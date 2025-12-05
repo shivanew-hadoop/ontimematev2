@@ -1,6 +1,6 @@
 export const config = { runtime: "edge" };
 
-import { supabaseAdmin } from "../_utils/supabaseClient.js";
+import { supabaseAdmin } from "../../_utils/supabaseClient.js";
 
 export default async function handler(req) {
   const body = await req.json();
