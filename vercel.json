@@ -1,10 +1,25 @@
 {
   "cleanUrls": true,
-  "trailingSlash": false,
   "rewrites": [
     {
-      "source": "/(.*)",
-      "destination": "/frontend/pages/$1"
+      "source": "/",
+      "destination": "/frontend/pages/index.html"
+    },
+    {
+      "source": "/auth",
+      "destination": "/frontend/pages/auth.html"
+    },
+    {
+      "source": "/admin",
+      "destination": "/frontend/pages/admin.html"
+    },
+    {
+      "source": "/app",
+      "destination": "/frontend/pages/app.html"
+    },
+    {
+      "source": "/js/:file*",
+      "destination": "/frontend/js/:file*"
     }
   ]
 }
