@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Panel • ThoughtMatters</title>
+
+  <!-- Tailwind -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+</head>
+
+<body class="bg-gray-100 text-gray-800">
+
+  <!-- NAVBAR -->
+  <nav class="bg-white shadow-sm h-16 flex items-center justify-between px-6">
+    <h1 class="text-2xl font-semibold text-blue-600">Admin Panel</h1>
+    <button id="logoutBtn"
+      class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-md">
+      Logout
+    </button>
+  </nav>
+
+  <!-- MAIN CONTENT -->
+  <div class="max-w-6xl mx-auto mt-10 px-4">
+
+    <h2 class="text-xl font-bold mb-6">Registered Users</h2>
+
+    <!-- USERS GRID -->
+    <div id="usersGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <!-- User cards injected by JS -->
+    </div>
+
+  </div>
+
+  <script src="/js/admin.js"></script>
+
+</body>
+</html>

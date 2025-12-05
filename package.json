@@ -1,0 +1,13 @@
+{
+  "name": "thoughtmatters-realtime",
+  "version": "1.0.0",
+  "description": "Realtime WebSocket + Supabase + Vercel Edge Functions",
+  "type": "module",
+  "scripts": {
+    "dev": "vercel dev",
+    "start": "vercel dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.43.0"
+  }
+}

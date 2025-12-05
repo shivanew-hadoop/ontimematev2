@@ -1,0 +1,37 @@
+{
+  "version": 2,
+  "routes": [
+    {
+      "src": "/",
+      "dest": "/frontend/pages/index.html"
+    },
+    {
+      "src": "/login",
+      "dest": "/frontend/pages/login.html"
+    },
+    {
+      "src": "/signup",
+      "dest": "/frontend/pages/signup.html"
+    },
+    {
+      "src": "/admin",
+      "dest": "/frontend/pages/admin.html"
+    },
+    {
+      "src": "/app",
+      "dest": "/frontend/pages/app.html"
+    },
+    {
+      "src": "/js/(.*)",
+      "dest": "/frontend/js/$1"
+    },
+    {
+      "src": "/public/(.*)",
+      "dest": "/frontend/public/$1"
+    },
+    {
+      "src": "/api/(.*)",
+      "dest": "/api/$1"
+    }
+  ]
+}
