@@ -1,15 +1,18 @@
 {
-  "cleanUrls": true,
-  "rewrites": [
-    { "source": "/",        "destination": "/frontend/pages/index.html" },
-    { "source": "/auth",    "destination": "/frontend/pages/auth.html" },
-    { "source": "/admin",   "destination": "/frontend/pages/admin.html" },
-    { "source": "/app",     "destination": "/frontend/pages/app.html" },
+  "version": 2,
+  "routes": [
+    { "handle": "filesystem" },
 
-    { "source": "/login",   "destination": "/frontend/pages/login.html" },
-    { "source": "/signup",  "destination": "/frontend/pages/signup.html" },
+    { "src": "^/api/(.*)$", "dest": "/api/$1" },
 
-    { "source": "/js/:path*",     "destination": "/frontend/js/:path*" },
-    { "source": "/public/:path*", "destination": "/frontend/public/:path*" }
+    { "src": "^/js/(.*)$", "dest": "/frontend/js/$1" },
+    { "src": "^/public/(.*)$", "dest": "/frontend/public/$1" },
+
+    { "src": "^/$", "dest": "/frontend/pages/index.html" },
+    { "src": "^/auth$", "dest": "/frontend/pages/auth.html" },
+    { "src": "^/login$", "dest": "/frontend/pages/login.html" },
+    { "src": "^/signup$", "dest": "/frontend/pages/signup.html" },
+    { "src": "^/admin$", "dest": "/frontend/pages/admin.html" },
+    { "src": "^/app$", "dest": "/frontend/pages/app.html" }
   ]
 }
