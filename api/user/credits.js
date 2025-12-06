@@ -1,20 +1,28 @@
-export const config = { runtime: "edge" };
-
+// /api/user/credits.js
 import { supabaseAdmin } from "../../_utils/supabaseClient.js";
+import jwt from "@tsndr/cloudflare-worker-jwt";
 
-export default async function handler(req) {
-  const { user_id } = await req.json();
+export const config = { runtime: "nodejs" };
 
-  const supabase = supabaseAdmin();
+export default async function handler(req, res) {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Missing token" });
 
-  // subtract 1 credit
-  await supabase.rpc("decrement_credit", { uid: user_id });
+    const decoded = await jwt.decode(token);
+    const user_id = decoded?.sub;
 
-  const { data } = await supabase
-    .from("user_profiles")
-    .select("credits")
-    .eq("id", user_id)
-    .single();
+    const sb = supabaseAdmin();
+    const { data, error } = await sb
+      .from("user_profiles")
+      .select("credits")
+      .eq("id", user_id)
+      .single();
 
-  return new Response(JSON.stringify({ credits: data.credits }), { status: 200 });
+    if (error) return res.status(400).json({ error: error.message });
+
+    return res.json({ credits: data?.credits ?? 0 });
+  } catch (e) {
+    return res.status(500).json({ error: e.message });
+  }
 }

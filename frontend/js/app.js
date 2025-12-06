@@ -1,16 +1,10 @@
 //--------------------------------------------------------------
 // CONFIG
 //--------------------------------------------------------------
-const API_BASE = ""; // same origin on Vercel
-
-const TARGET_SR = 16000;
-const FLUSH_EVERY_MS = 1100;
-const OVERLAP_MS = 250;
-
-const PING_INTERVAL = 1000; // 1 second credit deduction
+const API_BASE = ""; // same domain on Vercel
 
 //--------------------------------------------------------------
-// DOM
+// DOM REFERENCES
 //--------------------------------------------------------------
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
@@ -27,14 +21,23 @@ const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
 const logoutBtn = document.getElementById("logoutBtn");
 const userInfo = document.getElementById("userInfo");
+const creditsLabel = document.getElementById("creditsLabel");
 
 //--------------------------------------------------------------
-// STATE
+// SESSION
+//--------------------------------------------------------------
+const session = JSON.parse(localStorage.getItem("session"));
+if (!session) window.location.href = "/auth";
+
+const TOKEN = session.token;
+
+//--------------------------------------------------------------
+// STATE VARIABLES
 //--------------------------------------------------------------
 let isRunning = false;
 let recognition = null;
-
 let audioContext = null;
+
 let sysStream = null;
 let sysSource = null;
 let sysGain = null;
@@ -45,139 +48,110 @@ let sysChunks = [];
 let sysCarryRaw = new Float32Array(0);
 let lastSysFlushAt = 0;
 let sysFlushInFlight = false;
-
-let timeline = [];
 let autoFlushTimer = null;
 
-let blockMicUntil = 0;   
-let creditTimer = null;
-let userSession = null;
-let userProfile = null;
+let timeline = [];
+let blockMicUntil = 0;
 
 //--------------------------------------------------------------
-// Helper
+// Utility
 //--------------------------------------------------------------
-function setStatus(el, text, cls = "") {
-  if (!el) return;
-  el.className = `text-xs ${cls}`;
-  el.textContent = text;
-}
-
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-function updateTranscript() {
-  promptBox.value = timeline.map(t => t.text).join(" ");
-  promptBox.scrollTop = promptBox.scrollHeight;
-}
-
-function addToTimeline(txt) {
-  const cleaned = normalize(txt);
-  if (!cleaned) return;
-  timeline.push({ t: Date.now(), text: cleaned });
-  updateTranscript();
+function setStatus(el, text, cls = "") {
+  if (!el) return;
+  el.className = `text-xs mt-1 ${cls}`;
+  el.textContent = text;
 }
 
 //--------------------------------------------------------------
-// Load Session From LocalStorage
+// USER PROFILE + CREDITS LOADING
 //--------------------------------------------------------------
-async function loadUserSession() {
+async function loadProfile() {
   try {
-    const raw = localStorage.getItem("session");
-    if (!raw) {
-      window.location.href = "/auth";
-      return;
-    }
-
-    userSession = JSON.parse(raw);
-
-    if (userSession.is_admin) {
-      userInfo.innerHTML = `<b>Admin:</b> ${userSession.user.email}`;
-      return;
-    }
-
-    // load user profile details
-    const r = await fetch("/api/user/profile", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userSession.user.id })
+    const res = await fetch("/api/user/profile", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${TOKEN}` }
     });
 
-    const data = await r.json();
-    userProfile = data.data;
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.error);
 
-    if (!userProfile) {
-      userInfo.innerHTML = "<span class='text-red-600'>Profile missing.</span>";
-      return;
-    }
-
-    if (!userProfile.approved) {
-      userInfo.innerHTML = `<b>${userProfile.email}</b><br>
-        Status: <span class='text-red-600'>Not Approved</span>`;
-      startBtn.disabled = true;
-      return;
-    }
+    const u = data.user;
 
     userInfo.innerHTML = `
-      <b>${userProfile.name}</b><br>
-      ${userProfile.email}<br>
-      Credits: <span id="creditCounter">${userProfile.credits}</span>
+      <div><strong>${u.name}</strong></div>
+      <div>${u.email}</div>
+      <div>Status: ${u.approved ? "Approved" : "Pending"}</div>
     `;
+
+    creditsLabel.textContent = u.credits ?? 0;
+
+    if (!u.approved) {
+      alert("Your account is not approved yet.");
+      window.location.href = "/auth";
+    }
   } catch (e) {
-    console.error("Session load error:", e);
+    alert("Session expired. Login again.");
     window.location.href = "/auth";
   }
 }
 
+loadProfile();
+
 //--------------------------------------------------------------
-// Credit Deduction per Second
+// CREDIT DEDUCTION PING
 //--------------------------------------------------------------
-async function startCreditTimer() {
-  if (userSession?.is_admin) return;
-
-  creditTimer = setInterval(async () => {
-    let credits = Number(document.getElementById("creditCounter")?.textContent || "0");
-
-    if (credits <= 0) {
-      stopAll();
-      alert("Credits exhausted.");
-      return;
-    }
-
-    // Deduct 1 credit
-    const r = await fetch("/api/credits/deductSecond", {
+setInterval(async () => {
+  if (!isRunning) return;
+  try {
+    const res = await fetch("/api/user/deductSecond", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: userSession.user.id })
+      headers: { Authorization: `Bearer ${TOKEN}` }
     });
 
-    const data = await r.json();
-    if (data?.credits !== undefined) {
-      document.getElementById("creditCounter").textContent = data.credits;
-    }
-  }, PING_INTERVAL);
-}
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
 
-function stopCreditTimer() {
-  if (creditTimer) clearInterval(creditTimer);
-  creditTimer = null;
+    const credits = data.credits ?? 0;
+    creditsLabel.textContent = credits;
+
+    // AUTO-STOP when credits hit zero
+    if (credits <= 0) {
+      stopAll();
+      alert("Your credits are finished.");
+    }
+  } catch (_) {}
+}, 1000);
+
+//--------------------------------------------------------------
+// TIMELINE + TRANSCRIPT
+//--------------------------------------------------------------
+function addToTimeline(txt) {
+  const cleaned = normalize(txt);
+  if (!cleaned) return;
+
+  timeline.push({ time: Date.now(), text: cleaned });
+
+  promptBox.value = timeline.map(t => t.text).join(" ");
+  promptBox.scrollTop = promptBox.scrollHeight;
 }
 
 //--------------------------------------------------------------
-// Instructions + Resume persistence
+// CUSTOM INSTRUCTIONS (LOCAL STORAGE)
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("custom_instructions") || "";
+
 instructionsBox.addEventListener("input", () => {
   localStorage.setItem("custom_instructions", instructionsBox.value.trim());
   setStatus(instrStatus, "Saved", "text-green-600");
-  setTimeout(() => setStatus(instrStatus, "", ""), 600);
 });
 
-function getResumeText() {
-  return sessionStorage.getItem("resume_text") || "";
-}
-
+//--------------------------------------------------------------
+// RESUME UPLOAD
+//--------------------------------------------------------------
 resumeInput.onchange = async () => {
   try {
     const f = resumeInput.files?.[0];
@@ -186,24 +160,26 @@ resumeInput.onchange = async () => {
     const fd = new FormData();
     fd.append("resume", f);
 
-    const res = await fetch(`/upload-resume`, {
+    const res = await fetch("/upload-resume", {
       method: "POST",
       body: fd
     });
+
     const data = await res.json();
     sessionStorage.setItem("resume_text", data.text || "");
 
-    setStatus(resumeStatus, "Resume loaded", "text-green-600");
-  } catch (_) {
-    setStatus(resumeStatus, "Resume load failed", "text-red-600");
+    setStatus(resumeStatus, "Uploaded", "text-green-600");
+  } catch (e) {
+    setStatus(resumeStatus, "Failed", "text-red-600");
   }
 };
 
 //--------------------------------------------------------------
-// Speech Recognition
+// SPEECH RECOGNITION
 //--------------------------------------------------------------
 function startMic() {
-  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  const SR =
+    window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     setStatus(audioStatus, "SpeechRecognition not supported", "text-red-600");
     return false;
@@ -225,6 +201,7 @@ function startMic() {
       if (Date.now() < blockMicUntil) return;
 
       let interim = "";
+
       for (let i = ev.resultIndex; i < ev.results.length; i++) {
         const r = ev.results[i];
         const text = normalize(r[0].transcript || "");
@@ -241,7 +218,9 @@ function startMic() {
     recognition.onerror = () => setTimeout(boot, 250);
     recognition.onend = () => isRunning && setTimeout(boot, 250);
 
-    try { recognition.start(); } catch (_) {}
+    try {
+      recognition.start();
+    } catch (_) {}
   }
 
   boot();
@@ -249,7 +228,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// Audio Context Utils
+// AUDIO CONTEXT + SYSTEM AUDIO
 //--------------------------------------------------------------
 async function ensureContext() {
   if (!audioContext) audioContext = new AudioContext();
@@ -257,23 +236,18 @@ async function ensureContext() {
 }
 
 function stopSystemAudio() {
-  try { sysProcessor && (sysProcessor.onaudioprocess = null); } catch (_) {}
-
-  try { sysSource?.disconnect(); } catch (_) {}
-  try { sysGain?.disconnect(); } catch (_) {}
-  try { sysProcessor?.disconnect(); } catch (_) {}
-  try { sysSilentGain?.disconnect(); } catch (_) {}
+  try { sysProcessor.onaudioprocess = null; } catch (_) {}
+  try { sysSource.disconnect(); } catch (_) {}
+  try { sysGain.disconnect(); } catch (_) {}
+  try { sysProcessor.disconnect(); } catch (_) {}
+  try { sysSilentGain.disconnect(); } catch (_) {}
 
   if (sysStream) sysStream.getTracks().forEach(t => t.stop());
 
   sysStream = null;
   sysChunks = [];
-  sysCarryRaw = new Float32Array(0);
 }
 
-//--------------------------------------------------------------
-// System Audio Enable
-//--------------------------------------------------------------
 async function enableSystemAudio() {
   await ensureContext();
 
@@ -283,13 +257,13 @@ async function enableSystemAudio() {
       audio: { channelCount: 1 }
     });
   } catch {
-    setStatus(audioStatus, "Tab audio denied", "text-red-600");
+    setStatus(audioStatus, "Permission denied", "text-red-600");
     return;
   }
 
   const aTrack = sysStream.getAudioTracks()[0];
   if (!aTrack) {
-    setStatus(audioStatus, "No tab audio found", "text-red-600");
+    setStatus(audioStatus, "No tab audio", "text-red-600");
     return;
   }
 
@@ -306,39 +280,32 @@ async function enableSystemAudio() {
   sysProcessor.connect(sysSilentGain);
   sysSilentGain.connect(audioContext.destination);
 
-  sysChunks = [];
-  lastSysFlushAt = Date.now();
-
   sysProcessor.onaudioprocess = (ev) => {
     if (!isRunning) return;
     const ch = ev.inputBuffer.getChannelData(0);
     sysChunks.push(new Float32Array(ch));
 
     const now = Date.now();
-    if (now - lastSysFlushAt >= FLUSH_EVERY_MS) {
+    if (now - lastSysFlushAt >= 1100) {
       lastSysFlushAt = now;
-      flushSystem();
+      flushTabAudio();
     }
   };
-
-  if (autoFlushTimer) clearInterval(autoFlushTimer);
-  autoFlushTimer = setInterval(() => {
-    if (isRunning && sysChunks.length) flushSystem();
-  }, FLUSH_EVERY_MS + 200);
 
   setStatus(audioStatus, "System audio ON", "text-green-600");
 }
 
 //--------------------------------------------------------------
-// Whisper Flush
+// Flush system audio to Whisper API
 //--------------------------------------------------------------
-async function flushSystem() {
+async function flushTabAudio() {
   if (sysFlushInFlight) return;
   sysFlushInFlight = true;
 
   try {
     const chunks = sysChunks;
     sysChunks = [];
+
     if (!chunks.length) return;
 
     const raw = chunks.reduce((acc, c) => {
@@ -348,21 +315,18 @@ async function flushSystem() {
       return o;
     }, new Float32Array(0));
 
-    const wav16 = float32ToWav(raw, audioContext.sampleRate);
+    const wav = float32ToWav(raw, audioContext.sampleRate);
+
     const fd = new FormData();
-    fd.append("audio", wav16, "tab.wav");
+    fd.append("audio", wav, "sys.wav");
 
-    const res = await fetch(`/whisper`, {
-      method: "POST",
-      body: fd
-    });
+    const res = await fetch("/whisper", { method: "POST", body: fd });
     const data = await res.json();
-    if (data?.text) addToTimeline(data.text);
-  } catch (e) {
-    console.error("WHISPER ERROR", e);
-  }
 
-  sysFlushInFlight = false;
+    if (data.text) addToTimeline(data.text);
+  } finally {
+    sysFlushInFlight = false;
+  }
 }
 
 function float32ToWav(float32, sr) {
@@ -374,7 +338,10 @@ function float32ToWav(float32, sr) {
   const buf = new ArrayBuffer(44 + int16.length * 2);
   const dv = new DataView(buf);
 
-  function w(off, str) { for (let i = 0; i < str.length; i++) dv.setUint8(off + i, str.charCodeAt(i)); }
+  function w(off, str) {
+    for (let i = 0; i < str.length; i++)
+      dv.setUint8(off + i, str.charCodeAt(i));
+  }
 
   w(0, "RIFF");
   dv.setUint32(4, 36 + int16.length * 2, true);
@@ -391,24 +358,22 @@ function float32ToWav(float32, sr) {
   dv.setUint32(40, int16.length * 2, true);
 
   let off = 44;
-  for (let i = 0; i < int16.length; i++, off += 2) dv.setInt16(off, int16[i], true);
+  for (let i = 0; i < int16.length; i++, off += 2)
+    dv.setInt16(off, int16[i], true);
 
   return new Blob([buf], { type: "audio/wav" });
 }
 
 //--------------------------------------------------------------
-// Start / Stop
+// START / STOP
 //--------------------------------------------------------------
 async function startAll() {
   if (isRunning) return;
 
-  if (!userSession?.is_admin) startCreditTimer();
-
-  await fetch(`/reset-memory`, { method: "POST" });
+  await fetch("/reset-memory", { method: "POST" });
 
   timeline = [];
   promptBox.value = "";
-  updateTranscript();
 
   isRunning = true;
   startBtn.disabled = true;
@@ -418,49 +383,43 @@ async function startAll() {
     isRunning = false;
     startBtn.disabled = false;
     stopBtn.disabled = true;
+    return;
   }
 
-  setStatus(audioStatus, "Mic running. Enable tab audio if needed.", "text-green-600");
+  setStatus(audioStatus, "Mic running", "text-green-600");
 }
 
 function stopAll() {
   isRunning = false;
 
-  stopCreditTimer();
-
   try { recognition?.stop(); } catch (_) {}
   stopSystemAudio();
 
-  if (autoFlushTimer) clearInterval(autoFlushTimer);
-
   timeline = [];
   promptBox.value = "";
-  updateTranscript();
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
 
-  setStatus(audioStatus, "Stopped", "text-yellow-600");
+  setStatus(audioStatus, "Stopped", "text-red-600");
 }
 
 //--------------------------------------------------------------
-// Send Prompt
+// SEND to ChatGPT
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   const msg = normalize(promptBox.value);
-  if (!msg) return setStatus(sendStatus, "Nothing to send", "text-yellow-600");
+  if (!msg) return setStatus(sendStatus, "Nothing to send", "text-red-600");
 
   blockMicUntil = Date.now() + 700;
 
   timeline = [];
   promptBox.value = "";
-  updateTranscript();
-
   responseBox.innerText = "";
   setStatus(sendStatus, "Sending…", "text-yellow-600");
 
   try {
-    const res = await fetch(`/chat`, {
+    const res = await fetch("/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ prompt: msg })
@@ -470,47 +429,34 @@ sendBtn.onclick = async () => {
     const decoder = new TextDecoder();
 
     while (true) {
-      const { done, value } = await reader.read();
+      const { value, done } = await reader.read();
       if (done) break;
       responseBox.innerText += decoder.decode(value, { stream: true });
     }
 
     setStatus(sendStatus, "Done", "text-green-600");
-  } catch {
-    setStatus(sendStatus, "Send failed", "text-red-600");
+  } catch (_) {
+    setStatus(sendStatus, "Failed", "text-red-600");
   }
 };
 
 //--------------------------------------------------------------
-// Reset
+// CLEAR BUTTON
 //--------------------------------------------------------------
 resetBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
-  updateTranscript();
-  setStatus(sendStatus, "Cleared", "text-green-600");
+  setStatus(sendStatus, "Cleared", "text-gray-600");
 };
 
 //--------------------------------------------------------------
-// Logout
+// BUTTON EVENTS
 //--------------------------------------------------------------
+startBtn.onclick = startAll;
+stopBtn.onclick = stopAll;
+sysBtn.onclick = enableSystemAudio;
+
 logoutBtn.onclick = () => {
   localStorage.removeItem("session");
   window.location.href = "/auth";
 };
-
-//--------------------------------------------------------------
-// Page Load
-//--------------------------------------------------------------
-window.addEventListener("load", async () => {
-  await loadUserSession();
-
-  await fetch(`/reset-memory`, { method: "POST" });
-
-  timeline = [];
-  promptBox.value = "";
-  updateTranscript();
-
-  sessionStorage.removeItem("resume_text");
-  setStatus(resumeStatus, "Resume cleared", "text-gray-600");
-});

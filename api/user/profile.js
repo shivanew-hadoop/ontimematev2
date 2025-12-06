@@ -10,24 +10,20 @@ export default async function handler(req, res) {
       return res.status(405).json({ error: "Method not allowed" });
     }
 
-    // session token from frontend
     const token = req.headers.authorization?.replace("Bearer ", "");
-
     if (!token) {
       return res.status(401).json({ error: "Missing session token" });
     }
 
-    // Decode JWT to extract user ID
     const decoded = await jwt.decode(token);
-    const user_id = decoded?.sub;
+    if (!decoded) return res.status(401).json({ error: "Invalid token" });
 
-    if (!user_id) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+    const user_id = decoded.sub;
+    const user_email = (decoded.email || "").toLowerCase();
 
-    // Admin user bypass
-    const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
-    if (decoded.email?.toLowerCase() === adminEmail) {
+    // ADMIN short-circuit
+    const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase();
+    if (user_email === adminEmail) {
       return res.json({
         ok: true,
         user: {
@@ -36,23 +32,28 @@ export default async function handler(req, res) {
           name: "Administrator",
           credits: 999999,
           approved: true,
-          created_at: new Date().toISOString(),
-          status: "admin",
-          is_admin: true
+          is_admin: true,
+          created_at: new Date().toISOString()
         }
       });
     }
 
+    // Normal user
     const sb = supabaseAdmin();
 
     const { data, error } = await sb
       .from("user_profiles")
-      .select("id, name, email, phone, approved, credits, created_at, status")
+      .select("*")
       .eq("id", user_id)
       .single();
 
-    if (error) {
-      return res.status(400).json({ error: error.message });
+    if (error) return res.status(400).json({ error: error.message });
+
+    if (!data.approved) {
+      return res.status(403).json({
+        error: "Account not yet approved by admin",
+        approved: false
+      });
     }
 
     return res.json({
@@ -64,8 +65,6 @@ export default async function handler(req, res) {
     });
 
   } catch (e) {
-    return res
-      .status(500)
-      .json({ error: e.message || "Profile fetch crashed" });
+    return res.status(500).json({ error: e.message || "Profile fetch failed" });
   }
 }

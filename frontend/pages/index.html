@@ -3,68 +3,61 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Welcome to ThoughtMatters</title>
-
-  <!-- Tailwind CDN -->
+  <title>ThoughtMatters • Intelligent Realtime AI Assistant</title>
   <script src="https://cdn.tailwindcss.com"></script>
-
 </head>
-<body class="bg-gray-50 text-gray-800">
 
-  <!-- NAVBAR -->
-  <nav class="w-full bg-white shadow-sm fixed top-0 left-0 h-16 flex items-center px-6 justify-between">
-    <div class="text-2xl font-semibold text-blue-600">ThoughtMatters</div>
-    <div class="space-x-6">
-      <a href="/login" class="text-gray-600 hover:text-blue-600">Login</a>
-      <a href="/signup" class="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700">Sign Up</a>
-    </div>
-  </nav>
+<body class="bg-white text-slate-900">
 
-  <!-- HERO SECTION -->
-  <section class="pt-32 pb-20 max-w-5xl mx-auto text-center">
-    <h1 class="text-5xl font-bold text-gray-900">
+  <header class="w-full border-b bg-white">
+    <nav class="max-w-7xl mx-auto flex items-center justify-between py-4 px-6">
+      <div class="text-2xl font-bold text-blue-700">ThoughtMatters</div>
+
+      <div class="flex items-center gap-4">
+        <a href="/auth?tab=login" class="text-slate-700 hover:text-slate-900 font-medium">
+          Login
+        </a>
+
+        <a href="/auth?tab=signup"
+           class="bg-blue-600 text-white px-4 py-2 rounded-lg font-medium hover:bg-blue-700 transition">
+          Sign Up
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <section class="max-w-5xl mx-auto text-center py-24 px-6">
+    <h1 class="text-4xl md:text-5xl font-extrabold mb-6">
       Your Intelligent Realtime AI Assistant
     </h1>
 
-    <p class="mt-6 text-lg text-gray-600 leading-relaxed max-w-2xl mx-auto">
-      Experience ultra-fast realtime AI responses powered by OpenAI WebSocket technology,
-      optimized for interviews, productivity and live conversation assistance.
+    <p class="text-lg text-slate-600 max-w-2xl mx-auto mb-8">
+      Experience ultra-fast realtime AI responses powered by OpenAI WebSocket
+      technology, optimized for interviews, productivity and live conversation assistance.
     </p>
 
-    <div class="mt-8">
-      <a href="/signup"
-         class="px-8 py-3 bg-blue-600 text-white text-lg rounded-lg hover:bg-blue-700 shadow">
-        Get Started
-      </a>
-    </div>
+    <a href="/auth"
+       class="inline-block bg-blue-600 text-white px-8 py-3 rounded-lg text-lg font-semibold hover:bg-blue-700 transition">
+      Get Started
+    </a>
   </section>
 
-  <!-- FEATURES -->
-  <section class="py-20 bg-white border-t">
-    <div class="max-w-6xl mx-auto grid md:grid-cols-3 gap-12 px-6">
+  <section class="max-w-6xl mx-auto grid md:grid-cols-3 gap-8 px-6 pb-20">
+    <div class="bg-slate-50 p-8 rounded-2xl shadow-sm">
+      <h3 class="text-xl font-semibold mb-2">Realtime AI</h3>
+      <p class="text-slate-600">Powered by OpenAI's realtime WebSocket engine.</p>
+    </div>
 
-      <div class="bg-gray-50 p-8 rounded-xl shadow-sm">
-        <h3 class="text-xl font-semibold text-gray-900">Realtime AI</h3>
-        <p class="mt-3 text-gray-600">Powered by OpenAI's realtime WebSocket engine.</p>
-      </div>
+    <div class="bg-slate-50 p-8 rounded-2xl shadow-sm">
+      <h3 class="text-xl font-semibold mb-2">Lightning Fast</h3>
+      <p class="text-slate-600">Optimized for sub-200ms response streaming.</p>
+    </div>
 
-      <div class="bg-gray-50 p-8 rounded-xl shadow-sm">
-        <h3 class="text-xl font-semibold text-gray-900">Lightning Fast</h3>
-        <p class="mt-3 text-gray-600">Optimized for sub-200ms response streaming.</p>
-      </div>
-
-      <div class="bg-gray-50 p-8 rounded-xl shadow-sm">
-        <h3 class="text-xl font-semibold text-gray-900">Secure</h3>
-        <p class="mt-3 text-gray-600">Supabase-authenticated, safe & private sessions.</p>
-      </div>
-
+    <div class="bg-slate-50 p-8 rounded-2xl shadow-sm">
+      <h3 class="text-xl font-semibold mb-2">Secure</h3>
+      <p class="text-slate-600">Supabase-authenticated, safe & private sessions.</p>
     </div>
   </section>
-
-  <!-- FOOTER -->
-  <footer class="py-10 text-center text-gray-500 text-sm">
-    © 2025 ThoughtMatters • All rights reserved.
-  </footer>
 
 </body>
 </html>

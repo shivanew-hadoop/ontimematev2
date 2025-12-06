@@ -1,160 +1,130 @@
 // frontend/js/admin.js
 
-//---------------------------------------------------
-// DOM
-//---------------------------------------------------
-const userTableBody = document.getElementById("userTableBody");
-const refreshBtn = document.getElementById("refreshBtn");
-const logoutBtn = document.getElementById("logoutBtn");
-const adminEmailBox = document.getElementById("adminEmail");
+const session = JSON.parse(localStorage.getItem("session"));
+const token = session?.token || session?.session_token;
 
-//---------------------------------------------------
-// Load admin session
-//---------------------------------------------------
-const session = JSON.parse(localStorage.getItem("session") || "{}");
-
-if (!session?.is_admin) {
-  window.location.href = "/auth?tab=login";
+if (!session || !session.is_admin) {
+  window.location.href = "/auth";
 }
 
-adminEmailBox.textContent = session?.user?.email || "";
+// --------------------------------------
+// LOAD ADMIN INFO
+// --------------------------------------
+document.getElementById("adminInfo").innerHTML =
+  `Logged in as: <b>${session.user.email}</b> (Admin)`;
 
-//---------------------------------------------------
-// Fetch all users
-//---------------------------------------------------
+// --------------------------------------
+// LOGOUT
+// --------------------------------------
+document.getElementById("logoutBtn").onclick = () => {
+  localStorage.removeItem("session");
+  window.location.href = "/auth";
+};
+
+// --------------------------------------
+// LOAD USERS
+// --------------------------------------
 async function loadUsers() {
-  try {
-    userTableBody.innerHTML = `<tr><td colspan="6">Loading...</td></tr>`;
+  const res = await fetch("/api/admin/list", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${token}` }
+  });
 
-    const res = await fetch(`/api/admin/users`);
-    const data = await res.json();
+  const data = await res.json();
+  const tbody = document.getElementById("userTable");
+  tbody.innerHTML = "";
 
-    if (!data?.users) {
-      userTableBody.innerHTML = `<tr><td colspan="6">No users found.</td></tr>`;
-      return;
-    }
-
-    renderUsers(data.users);
-
-  } catch (err) {
-    userTableBody.innerHTML = `<tr><td colspan="6">Error loading users</td></tr>`;
-    console.error(err);
-  }
-}
-
-//---------------------------------------------------
-// Render rows
-//---------------------------------------------------
-function renderUsers(users) {
-  if (!users.length) {
-    userTableBody.innerHTML = `<tr><td colspan="6">No users found.</td></tr>`;
+  if (!data.users || data.users.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="p-3 text-center text-gray-500">No users found</td></tr>`;
     return;
   }
 
-  userTableBody.innerHTML = "";
+  data.users.forEach(u => {
+    const row = document.createElement("tr");
 
-  users.forEach((u) => {
-    const tr = document.createElement("tr");
+    row.innerHTML = `
+      <td class="border p-2">${u.name}</td>
+      <td class="border p-2">${u.email}</td>
+      <td class="border p-2">${u.phone || "-"}</td>
+      <td class="border p-2">${u.approved ? "Yes" : "No"}</td>
+      <td class="border p-2">${u.credits}</td>
+      <td class="border p-2">${u.created_at?.slice(0, 10)}</td>
+      <td class="border p-2 space-x-2">
 
-    tr.innerHTML = `
-      <td>${u.name || "-"}</td>
-      <td>${u.email}</td>
-      <td>${u.phone || "-"}</td>
-      <td>${formatDate(u.created_at)}</td>
-      <td>${u.approved ? "Approved" : "Pending"}</td>
-      <td>${u.credits}</td>
-
-      <td>
-        <button class="btnApprove" data-id="${u.id}" data-status="${!u.approved}">
-          ${u.approved ? "Reject" : "Approve"}
+        <button class="px-2 py-1 bg-blue-600 text-white text-xs rounded"
+            onclick="approveUser('${u.id}', ${!u.approved})">
+          ${u.approved ? "Unapprove" : "Approve"}
         </button>
-      </td>
 
-      <td>
-        <input type="number" class="creditInput" placeholder="Add" style="width:70px;" data-id="${u.id}">
-        <button class="btnAddCredits" data-id="${u.id}">Add</button>
+        <button class="px-2 py-1 bg-green-600 text-white text-xs rounded"
+            onclick="addCredits('${u.id}')">
+          + Credits
+        </button>
+
+        <button class="px-2 py-1 bg-red-600 text-white text-xs rounded"
+            onclick="deductCredits('${u.id}')">
+          - Credits
+        </button>
+
       </td>
     `;
 
-    userTableBody.appendChild(tr);
-  });
-
-  attachHandlers();
-}
-
-//---------------------------------------------------
-// Approve / Reject / Add Credits Handlers
-//---------------------------------------------------
-function attachHandlers() {
-  document.querySelectorAll(".btnApprove").forEach((btn) => {
-    btn.onclick = async () => {
-      const user_id = btn.dataset.id;
-      const approved = btn.dataset.status === "true";
-
-      await approveUser(user_id, approved);
-      loadUsers();
-    };
-  });
-
-  document.querySelectorAll(".btnAddCredits").forEach((btn) => {
-    btn.onclick = async () => {
-      const user_id = btn.dataset.id;
-      const input = document.querySelector(`input.creditInput[data-id="${user_id}"]`);
-      const amount = Number(input.value);
-
-      if (!amount || isNaN(amount)) {
-        alert("Enter a valid number");
-        return;
-      }
-
-      await addCredits(user_id, amount);
-      loadUsers();
-    };
+    tbody.appendChild(row);
   });
 }
 
-//---------------------------------------------------
-// Approve / Reject API
-//---------------------------------------------------
+loadUsers();
+
+// --------------------------------------
+// APPROVE USER
+// --------------------------------------
 async function approveUser(user_id, approved) {
-  await fetch(`/api/admin/approve`, {
+  await fetch("/api/admin/approve", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-admin-token": session.token },
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
     body: JSON.stringify({ user_id, approved })
   });
+
+  loadUsers();
 }
 
-//---------------------------------------------------
-// Add credits API
-//---------------------------------------------------
-async function addCredits(user_id, amount) {
-  await fetch(`/api/admin/credits`, {
+// --------------------------------------
+// ADD CREDITS
+// --------------------------------------
+async function addCredits(user_id) {
+  const amt = prompt("Enter credits to add:");
+  if (!amt) return;
+
+  await fetch("/api/admin/credits", {
     method: "POST",
-    headers: { "Content-Type": "application/json", "x-admin-token": session.token },
-    body: JSON.stringify({ user_id, delta: amount })
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({ user_id, delta: Number(amt) })
   });
+
+  loadUsers();
 }
 
-//---------------------------------------------------
-// Date Format
-//---------------------------------------------------
-function formatDate(dt) {
-  if (!dt) return "-";
-  const d = new Date(dt);
-  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}-${String(d.getDate()).padStart(2,"0")}`;
+// --------------------------------------
+// DEDUCT CREDITS
+// --------------------------------------
+async function deductCredits(user_id) {
+  const amt = prompt("Enter credits to deduct:");
+  if (!amt) return;
+
+  await fetch("/api/admin/credits", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify({ user_id, delta: -Number(amt) })
+  });
+
+  loadUsers();
 }
-
-//---------------------------------------------------
-// Buttons
-//---------------------------------------------------
-refreshBtn.onclick = loadUsers;
-
-logoutBtn.onclick = () => {
-  localStorage.removeItem("session");
-  window.location.href = "/auth?tab=login";
-};
-
-//---------------------------------------------------
-// INIT
-//---------------------------------------------------
-loadUsers();
