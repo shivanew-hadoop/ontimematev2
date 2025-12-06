@@ -1,40 +1,73 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Admin Panel • ThoughtMatters</title>
-
-  <!-- Tailwind -->
+  <title>Admin • ThoughtMatters</title>
   <script src="https://cdn.tailwindcss.com"></script>
-
 </head>
+<body class="bg-gray-50 text-gray-900">
 
-<body class="bg-gray-100 text-gray-800">
-
-  <!-- NAVBAR -->
-  <nav class="bg-white shadow-sm h-16 flex items-center justify-between px-6">
-    <h1 class="text-2xl font-semibold text-blue-600">Admin Panel</h1>
-    <button id="logoutBtn"
-      class="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm rounded-md">
-      Logout
-    </button>
-  </nav>
-
-  <!-- MAIN CONTENT -->
-  <div class="max-w-6xl mx-auto mt-10 px-4">
-
-    <h2 class="text-xl font-bold mb-6">Registered Users List below</h2>
-
-    <!-- USERS GRID -->
-    <div id="usersGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-      <!-- User cards injected by JS -->
+  <div class="max-w-6xl mx-auto p-6">
+    <div class="flex items-center justify-between mb-6">
+      <h1 class="text-2xl font-bold">Admin Dashboard</h1>
+      <div class="flex items-center gap-3">
+        <span id="adminEmail" class="text-sm text-gray-600"></span>
+        <button id="logoutBtn" class="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300 text-sm">Logout</button>
+      </div>
     </div>
 
+    <!-- Admin Login Card -->
+    <div id="loginCard" class="bg-white rounded-xl shadow p-6 max-w-md hidden">
+      <h2 class="text-xl font-semibold mb-4">Admin Login</h2>
+      <form id="adminLoginForm" class="space-y-4">
+        <div>
+          <label class="text-sm">Email</label>
+          <input id="adminLoginEmail" type="email" class="w-full border rounded px-3 py-2" required />
+        </div>
+        <div>
+          <label class="text-sm">Password</label>
+          <input id="adminLoginPassword" type="password" class="w-full border rounded px-3 py-2" required />
+        </div>
+        <p id="loginErr" class="text-sm text-red-600 hidden"></p>
+        <button class="w-full bg-blue-600 text-white rounded py-2 hover:bg-blue-700">Sign In</button>
+      </form>
+    </div>
+
+    <!-- Users Table -->
+    <div id="usersCard" class="bg-white rounded-xl shadow p-4">
+      <div class="flex items-center justify-between gap-4 mb-4">
+        <div class="flex items-center gap-3">
+          <h2 class="text-lg font-semibold">Registered Users</h2>
+          <span id="countPill" class="text-xs bg-gray-100 px-2 py-1 rounded"></span>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="searchBox" class="border rounded px-3 py-2 text-sm w-72" placeholder="Search name/email/phone" />
+          <button id="refreshBtn" class="px-3 py-2 rounded bg-gray-200 hover:bg-gray-300 text-sm">Refresh</button>
+        </div>
+      </div>
+
+      <div class="overflow-auto">
+        <table class="min-w-full text-sm">
+          <thead class="bg-gray-100">
+            <tr>
+              <th class="text-left p-2">Name</th>
+              <th class="text-left p-2">Email</th>
+              <th class="text-left p-2">Phone</th>
+              <th class="text-left p-2">Created (YYYY-MM-DD)</th>
+              <th class="text-left p-2">Status</th>
+              <th class="text-left p-2">Credits (Remaining)</th>
+              <th class="text-left p-2">Actions</th>
+            </tr>
+          </thead>
+          <tbody id="usersTbody"></tbody>
+        </table>
+      </div>
+
+      <p id="usersErr" class="text-sm text-red-600 mt-3 hidden"></p>
+    </div>
   </div>
 
   <script src="/js/admin.js"></script>
-
 </body>
 </html>

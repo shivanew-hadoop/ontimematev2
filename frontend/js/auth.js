@@ -1,137 +1,74 @@
-function qs(id) { return document.getElementById(id); }
+const msg = document.getElementById("msg"); // add <p id="msg">...</p> in auth.html if not present
 
-function setStatus(msg, type = "info") {
-  const box = qs("statusBox");
-  box.className = "text-sm mb-4 rounded-lg p-3 " + (
-    type === "error" ? "bg-red-50 text-red-700 border border-red-200" :
-    type === "ok" ? "bg-green-50 text-green-700 border border-green-200" :
-    "bg-slate-50 text-slate-700 border border-slate-200"
-  );
-  box.textContent = msg;
-  box.classList.remove("hidden");
+function showMsg(text, isError = false) {
+  if (!msg) return;
+  msg.textContent = text;
+  msg.className = isError ? "text-sm text-red-600 mt-2" : "text-sm text-green-700 mt-2";
 }
 
-function clearStatus() {
-  const box = qs("statusBox");
-  box.classList.add("hidden");
-  box.textContent = "";
-}
-
-function activeTab(tab) {
-  const tabLogin = qs("tabLogin");
-  const tabSignup = qs("tabSignup");
-  const tabForgot = qs("tabForgot");
-
-  const loginForm = qs("loginForm");
-  const signupForm = qs("signupForm");
-  const forgotForm = qs("forgotForm");
-
-  const allTabs = [tabLogin, tabSignup, tabForgot];
-  allTabs.forEach(t => {
-    t.classList.remove("text-blue-700", "border-b-2", "border-blue-700");
-    t.classList.add("text-slate-500");
-  });
-
-  loginForm.classList.add("hidden");
-  signupForm.classList.add("hidden");
-  forgotForm.classList.add("hidden");
-
-  clearStatus();
-
-  if (tab === "signup") {
-    tabSignup.classList.add("text-blue-700", "border-b-2", "border-blue-700");
-    tabSignup.classList.remove("text-slate-500");
-    signupForm.classList.remove("hidden");
-  } else if (tab === "forgot") {
-    tabForgot.classList.add("text-blue-700", "border-b-2", "border-blue-700");
-    tabForgot.classList.remove("text-slate-500");
-    forgotForm.classList.remove("hidden");
-  } else {
-    tabLogin.classList.add("text-blue-700", "border-b-2", "border-blue-700");
-    tabLogin.classList.remove("text-slate-500");
-    loginForm.classList.remove("hidden");
-  }
-}
-
-function getTabFromUrl() {
-  const u = new URL(location.href);
-  return (u.searchParams.get("tab") || "login").toLowerCase();
-}
-
-async function postJson(url, payload) {
+async function postJSON(url, body) {
   const res = await fetch(url, {
     method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(payload || {})
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
-
-  const text = await res.text();
-  let json;
-  try { json = text ? JSON.parse(text) : {}; } catch { json = { raw: text }; }
-
-  if (!res.ok) {
-    const errMsg = json?.error || json?.message || `HTTP ${res.status}`;
-    throw new Error(errMsg);
-  }
-  return json;
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+  return data;
 }
 
-document.addEventListener("DOMContentLoaded", () => {
-  qs("tabLogin").onclick = () => activeTab("login");
-  qs("tabSignup").onclick = () => activeTab("signup");
-  qs("tabForgot").onclick = () => activeTab("forgot");
+// LOGIN form submit
+document.getElementById("loginForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const email = document.getElementById("loginEmail")?.value?.trim();
+    const password = document.getElementById("loginPassword")?.value;
+    if (!email || !password) return;
 
-  activeTab(getTabFromUrl());
+    const data = await postJSON("/api/auth/login", { email, password });
 
-  qs("loginForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    try {
-      const email = qs("loginEmail").value.trim();
-      const password = qs("loginPassword").value;
+    // store session
+    localStorage.setItem("session", JSON.stringify(data.session));
+    showMsg("Login successful. Redirecting...");
+    window.location.href = "/app";
+  } catch (err) {
+    showMsg(err.message || String(err), true);
+  }
+});
 
-      const data = await postJson("/api/auth/login", { email, password });
+// SIGNUP form submit
+document.getElementById("signupForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const name = document.getElementById("signupName")?.value?.trim();
+    const phone = document.getElementById("signupPhone")?.value?.trim();
+    const email = document.getElementById("signupEmail")?.value?.trim();
+    const password = document.getElementById("signupPassword")?.value;
+    const confirm = document.getElementById("signupConfirm")?.value;
 
-      // keep same structure your app expects: session.user.id
-      localStorage.setItem("session", JSON.stringify({ user: data.user, session: data.session }));
-      setStatus("Login successful. Redirecting…", "ok");
-      location.href = "/app";
-    } catch (err) {
-      setStatus(err.message || "Login failed", "error");
+    if (!name || !email || !password || password !== confirm) {
+      throw new Error("Please fill all fields and ensure passwords match.");
     }
-  });
 
-  qs("signupForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    try {
-      const name = qs("signupName").value.trim();
-      const phone = qs("signupPhone").value.trim();
-      const email = qs("signupEmail").value.trim();
-      const password = qs("signupPassword").value;
+    await postJSON("/api/auth/signup", { name, phone, email, password });
 
-      const data = await postJson("/api/auth/signup", { name, phone, email, password });
+    showMsg("Account created successfully. Waiting for admin approval. Please log in after approval.");
+    // optionally switch to login tab here
+  } catch (err) {
+    showMsg(err.message || String(err), true);
+  }
+});
 
-      if (data?.session && data?.user) {
-        localStorage.setItem("session", JSON.stringify({ user: data.user, session: data.session }));
-        setStatus("Account created. Redirecting…", "ok");
-        location.href = "/app";
-      } else {
-        // Email confirmation flows often return no session
-        setStatus("Account created. Check your email for confirmation (if enabled), then login.", "ok");
-        activeTab("login");
-      }
-    } catch (err) {
-      setStatus(err.message || "Signup failed", "error");
-    }
-  });
+// FORGOT form submit (use your backend route, not direct supabase recover)
+document.getElementById("forgotForm")?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const email = document.getElementById("forgotEmail")?.value?.trim();
+    if (!email) return;
 
-  qs("forgotForm").addEventListener("submit", async (e) => {
-    e.preventDefault();
-    try {
-      const email = qs("forgotEmail").value.trim();
-      await postJson("/api/auth/forgot", { email });
-      setStatus("Reset email requested. Check your inbox.", "ok");
-    } catch (err) {
-      setStatus(err.message || "Forgot password failed", "error");
-    }
-  });
+    await postJSON("/api/auth/recover", { email });
+    showMsg("Reset link sent (check inbox/spam).");
+  } catch (err) {
+    showMsg(err.message || String(err), true);
+  }
 });
