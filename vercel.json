@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "cleanUrls": true,
+  
+  "routes": [
+    {
+      "src": "^/$",
+      "dest": "/frontend/pages/index.html"
+    },
+    {
+      "src": "^/auth$",
+      "dest": "/frontend/pages/auth.html"
+    },
+    {
+      "src": "^/admin$",
+      "dest": "/frontend/pages/admin.html"
+    },
+    {
+      "src": "^/app$",
+      "dest": "/frontend/pages/app.html"
+    },
+    {
+      "src": "^/js/(.*)$",
+      "dest": "/frontend/js/$1"
+    }
+  ]
+}
