@@ -1,43 +1,55 @@
-export const config = { runtime: "edge" };
+import { supabaseAnon, supabaseAdmin } from "../../_utils/supabaseClient.js";
 
-import { supabaseAdmin } from "../../_utils/supabaseClient.js";
+export default async function handler(req, res) {
+  try {
+    if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-export default async function handler(req) {
-  const body = await req.json();
-  const { email, password, name, phone } = body;
+    const { email, password, name, phone } = req.body || {};
+    if (!email || !password || !name || !phone) {
+      return res.status(400).json({ error: "Missing required fields" });
+    }
 
-  const supabase = supabaseAdmin();
+    const origin = req.headers.origin || "https://thoughtmatters-ai.vercel.app";
 
-  // 1. Create user in auth.users
-  const { data: signUpData, error: signUpErr } = await supabase.auth.admin.createUser({
-    email,
-    password,
-    email_confirm: true
-  });
-
-  if (signUpErr) {
-    return new Response(JSON.stringify({ error: signUpErr.message }), { status: 400 });
-  }
-
-  const userId = signUpData.user.id;
-
-  // 2. Insert into user_profiles
-  const { error: profileErr } = await supabase
-    .from("user_profiles")
-    .insert({
-      id: userId,
-      name,
-      phone,
-      status: "pending",
-      credits: 100   // give default credits if needed
+    const sb = supabaseAnon();
+    const { data, error } = await sb.auth.signUp({
+      email,
+      password,
+      options: {
+        data: { name, phone },
+        emailRedirectTo: `${origin}/auth?tab=login`
+      }
     });
 
-  if (profileErr) {
-    return new Response(
-      JSON.stringify({ error: profileErr.message }),
-      { status: 400 }
-    );
-  }
+    if (error) return res.status(400).json({ error: error.message });
 
-  return new Response(JSON.stringify({ success: true }), { status: 200 });
+    const user = data?.user || null;
+    const session = data?.session || null;
+
+    // create user_profiles row (service role)
+    if (user?.id) {
+      const admin = supabaseAdmin();
+      const { error: upsertErr } = await admin
+        .from("user_profiles")
+        .upsert(
+          {
+            id: user.id,
+            name,
+            phone,
+            credits: 0,
+            approved: false
+          },
+          { onConflict: "id" }
+        );
+
+      if (upsertErr) {
+        // still allow signup; but return error to fix schema/policy
+        return res.status(500).json({ error: `user_profiles upsert failed: ${upsertErr.message}` });
+      }
+    }
+
+    return res.status(200).json({ user, session });
+  } catch (e) {
+    return res.status(500).json({ error: e.message || "Signup crashed" });
+  }
 }

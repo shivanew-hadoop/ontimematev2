@@ -1,92 +1,13 @@
-<!DOCTYPE html>
-<html lang="en">
+<!doctype html>
+<html>
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Sign Up • ThoughtMatters</title>
-
-  <!-- Tailwind CDN -->
-  <script src="https://cdn.tailwindcss.com"></script>
-
+  <meta charset="utf-8" />
+  <meta name="robots" content="noindex" />
+  <title>Login</title>
 </head>
-<body class="bg-gray-50 text-gray-800">
-
-  <!-- BACK BUTTON -->
-  <div class="absolute top-6 left-6">
-    <a href="/" class="text-blue-600 hover:underline">&larr; Home</a>
-  </div>
-
-  <!-- CENTERED CARD -->
-  <div class="min-h-screen flex items-center justify-center px-4">
-    <div class="bg-white w-full max-w-md rounded-xl shadow-md p-8">
-
-      <!-- TITLE -->
-      <h2 class="text-3xl font-bold text-center text-gray-900">
-        Create Account
-      </h2>
-      <p class="text-center text-gray-500 mt-2">
-        Join ThoughtMatters in 30 seconds
-      </p>
-
-      <!-- FORM -->
-      <form id="signupForm" class="mt-8 space-y-6">
-
-        <div>
-          <label class="text-sm font-medium text-gray-700">Full Name</label>
-          <input type="text" id="name" required
-            class="mt-1 w-full px-4 py-3 rounded-lg border border-gray-300
-            focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-gray-700">Phone</label>
-          <input type="text" id="phone" required
-            class="mt-1 w-full px-4 py-3 rounded-lg border border-gray-300
-            focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-gray-700">Email</label>
-          <input type="email" id="email" required
-            class="mt-1 w-full px-4 py-3 rounded-lg border border-gray-300
-            focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-gray-700">Password</label>
-          <input type="password" id="password" required
-            class="mt-1 w-full px-4 py-3 rounded-lg border border-gray-300
-            focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-        </div>
-
-        <div>
-          <label class="text-sm font-medium text-gray-700">Confirm Password</label>
-          <input type="password" id="confirmPassword" required
-            class="mt-1 w-full px-4 py-3 rounded-lg border border-gray-300
-            focus:ring-2 focus:ring-blue-500 focus:outline-none" />
-        </div>
-
-        <!-- ERROR -->
-        <p id="errorBox" class="text-red-600 text-sm mt-2 hidden"></p>
-
-        <!-- BUTTON -->
-        <button type="submit"
-          class="w-full bg-blue-600 text-white py-3 rounded-lg text-lg font-medium
-          hover:bg-blue-700 transition">
-          Create Account
-        </button>
-      </form>
-
-      <p class="text-center text-gray-600 text-sm mt-6">
-        Already have an account?
-        <a href="/login" class="text-blue-600 hover:underline">Login</a>
-      </p>
-
-    </div>
-  </div>
-
-  <!-- SCRIPT -->
-  <script src="/js/signup.js"></script>
-
+<body>
+<script>
+  location.replace("/auth?tab=login");
+</script>
 </body>
 </html>
