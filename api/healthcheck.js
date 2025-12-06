@@ -1,5 +1,15 @@
-export const config = { runtime: "edge" };
+import { createClient } from "@supabase/supabase-js";
 
-export default async function handler() {
-  return new Response(JSON.stringify({ ok: true }), { status: 200 });
+export function supabaseAnon() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_ANON_KEY;
+  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
+}
+
+export function supabaseAdmin() {
+  const url = process.env.SUPABASE_URL;
+  const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!url || !key) throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY");
+  return createClient(url, key, { auth: { persistSession: false } });
 }
