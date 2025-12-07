@@ -1,13 +1,10 @@
 {
-  "name": "thoughtmatters-realtime",
-  "version": "1.0.0",
-  "description": "Realtime WebSocket + Supabase + Vercel Edge Functions",
+  "name": "anu-help",
+  "private": true,
   "type": "module",
-  "scripts": {
-    "dev": "vercel dev",
-    "start": "vercel dev"
-  },
   "dependencies": {
-    "@supabase/supabase-js": "2.43.0"
+    "@supabase/supabase-js": "^2.49.1",
+    "busboy": "^1.6.0",
+    "openai": "^4.56.0"
   }
 }

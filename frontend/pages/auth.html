@@ -7,59 +7,76 @@
   <script src="https://cdn.tailwindcss.com"></script>
 </head>
 
-<body class="bg-slate-50">
-
+<body class="bg-slate-50 text-slate-900">
   <div class="absolute top-6 left-6">
     <a href="/" class="text-blue-600 hover:underline">&larr; Home</a>
   </div>
 
-  <div class="min-h-screen flex items-center justify-center">
-    <div class="bg-white w-full max-w-xl rounded-xl shadow p-8">
-
-      <div class="flex justify-center gap-10 mb-6">
-        <button id="tabLogin" class="text-blue-700 font-semibold border-b-2 border-blue-700 pb-1">Login</button>
-        <button id="tabSignup" class="text-slate-500 font-semibold pb-1">Sign Up</button>
-        <button id="tabForgot" class="text-slate-500 font-semibold pb-1">Forgot</button>
+  <div class="min-h-screen flex items-center justify-center px-4">
+    <div class="bg-white w-full max-w-xl rounded-2xl shadow-lg p-8">
+      <div class="flex items-center justify-center gap-10 mb-6">
+        <button id="tabLogin"  class="font-semibold text-blue-700 border-b-2 border-blue-700 pb-2">Login</button>
+        <button id="tabSignup" class="font-semibold text-slate-500 pb-2">Sign Up</button>
+        <button id="tabForgot" class="font-semibold text-slate-500 pb-2">Forgot Password</button>
       </div>
 
-      <p id="msg" class="text-center text-sm mb-3"></p>
+      <div id="statusBox" class="text-sm mb-4 hidden"></div>
 
       <!-- LOGIN -->
       <form id="loginForm" class="space-y-4">
-        <input id="loginEmail" required placeholder="Email" class="input" />
-        <input id="loginPassword" type="password" required placeholder="Password" class="input" />
-        <button class="btn">Login</button>
+        <div>
+          <label class="text-sm font-medium">Email</label>
+          <input id="loginEmail" type="email" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="text-sm font-medium">Password</label>
+          <input id="loginPassword" type="password" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+          Login
+        </button>
       </form>
 
       <!-- SIGNUP -->
       <form id="signupForm" class="space-y-4 hidden">
-        <input id="signupName" required placeholder="Full Name" class="input" />
-        <input id="signupPhone" required placeholder="Phone" class="input" />
-        <input id="signupEmail" required placeholder="Email" class="input" />
-        <input id="signupPassword" type="password" required placeholder="Password" class="input" />
-        <input id="signupConfirm" type="password" required placeholder="Confirm Password" class="input" />
-        <button class="btn">Create Account</button>
+        <div>
+          <label class="text-sm font-medium">Full Name</label>
+          <input id="signupName" type="text" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="text-sm font-medium">Phone</label>
+          <input id="signupPhone" type="text" class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="text-sm font-medium">Email</label>
+          <input id="signupEmail" type="email" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="text-sm font-medium">Password</label>
+          <input id="signupPassword" type="password" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <div>
+          <label class="text-sm font-medium">Confirm Password</label>
+          <input id="signupConfirm" type="password" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+          Create Account
+        </button>
       </form>
 
       <!-- FORGOT -->
       <form id="forgotForm" class="space-y-4 hidden">
-        <input id="forgotEmail" required placeholder="Enter Email to Reset" class="input" />
-        <button class="btn">Send Reset Link</button>
+        <div>
+          <label class="text-sm font-medium">Enter your email to reset password</label>
+          <input id="forgotEmail" type="email" required class="mt-1 w-full px-4 py-3 rounded-lg border border-slate-300 focus:ring-2 focus:ring-blue-500 outline-none">
+        </div>
+        <button type="submit" class="w-full bg-blue-600 text-white py-3 rounded-lg font-semibold hover:bg-blue-700 transition">
+          Send Reset Link
+        </button>
       </form>
-
     </div>
   </div>
 
-  <style>
-    .input {
-      width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 8px;
-    }
-    .btn {
-      width: 100%; background: #2563eb; color: white;
-      padding: 12px; border-radius: 8px; font-weight: bold;
-    }
-  </style>
-
-  <script src="/js/auth.js"></script>
+  <script defer src="/js/auth.js"></script>
 </body>
 </html>
