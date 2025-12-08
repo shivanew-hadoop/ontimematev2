@@ -1,5 +1,6 @@
 import Busboy from "busboy";
 import OpenAI from "openai";
+import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
@@ -72,10 +73,9 @@ function originFromReq(req) {
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(
-    2,
-    "0"
-  )}-${String(dt.getDate()).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
+    dt.getDate()
+  ).padStart(2, "0")}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -178,6 +178,8 @@ export default async function handler(req, res) {
       if (req.method !== "POST")
         return res.status(405).json({ error: "Method not allowed" });
 
+      ensureJson(req);
+
       const { email, password } = await readJson(req);
 
       // Admin
@@ -185,9 +187,7 @@ export default async function handler(req, res) {
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
 
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
-        const token = `ADMIN::${adminEmail}::${Math.random()
-          .toString(36)
-          .slice(2)}`;
+        const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
         return res.json({
           ok: true,
           session: {
@@ -218,9 +218,7 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved) {
-        return res
-          .status(403)
-          .json({ error: "Admin has not approved your account yet" });
+        return res.status(403).json({ error: "Admin has not approved your account yet" });
       }
 
       return res.json({
@@ -231,6 +229,11 @@ export default async function handler(req, res) {
           user: { id: user.id, email: user.email }
         }
       });
+    }
+
+    function ensureJson(req) {
+      // no-op; placeholder for future content-type enforcement
+      return req;
     }
 
     /* ---------------------------------------------------------------------- */
@@ -262,6 +265,8 @@ export default async function handler(req, res) {
         .eq("id", gate.user.id)
         .single();
 
+      if (!profile.data) return res.status(404).json({ error: "Profile not found" });
+
       return res.json({
         ok: true,
         user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
@@ -269,7 +274,45 @@ export default async function handler(req, res) {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* USER: DEDUCT 1 CREDIT (Rule A - per second)                            */
+    /* USER: DEDUCT (BATCH)                                                   */
+    /* Body: { delta: number }                                                */
+    /* ---------------------------------------------------------------------- */
+    if (path === "user/deduct") {
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
+
+      const gate = await getUserFromBearer(req);
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      const { delta } = await readJson(req);
+      const d = Math.max(0, Math.floor(Number(delta || 0)));
+      if (!d) return res.json({ ok: true, remaining: null });
+
+      const sb = supabaseAdmin();
+
+      const { data: row, error: e1 } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
+      if (e1) return res.status(400).json({ error: e1.message });
+
+      const current = Number(row?.credits || 0);
+      const remaining = Math.max(0, current - d);
+
+      const { error: e2 } = await sb
+        .from("user_profiles")
+        .update({ credits: remaining })
+        .eq("id", gate.user.id);
+
+      if (e2) return res.status(400).json({ error: e2.message });
+
+      return res.json({ ok: remaining > 0, remaining });
+    }
+
+    /* ---------------------------------------------------------------------- */
+    /* USER: DEDUCT 1 CREDIT (legacy route - keep if you want)                */
     /* ---------------------------------------------------------------------- */
     if (path === "user/deduct1") {
       const gate = await getUserFromBearer(req);
@@ -283,13 +326,10 @@ export default async function handler(req, res) {
         .eq("id", gate.user.id)
         .single();
 
-      let current = Number(row?.credits || 0);
-      let remaining = Math.max(0, current - 1);
+      const current = Number(row?.credits || 0);
+      const remaining = Math.max(0, current - 1);
 
-      await sb
-        .from("user_profiles")
-        .update({ credits: remaining })
-        .eq("id", gate.user.id);
+      await sb.from("user_profiles").update({ credits: remaining }).eq("id", gate.user.id);
 
       return res.json({ ok: remaining > 0, remaining });
     }
@@ -370,13 +410,16 @@ export default async function handler(req, res) {
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
 
-      if (!file?.buffer || file.buffer.length < 2000)
-        return res.json({ text: "" });
+      if (!file?.buffer || file.buffer.length < 2000) return res.json({ text: "" });
 
-      const blob = new Blob([file.buffer], { type: file.mime });
+      const audioFile = await toFile(
+        file.buffer,
+        file.filename || "audio.wav",
+        { type: file.mime || "audio/wav" }
+      );
 
       const out = await openai.audio.transcriptions.create({
-        file: blob,
+        file: audioFile,
         model: "gpt-4o-transcribe",
         language: "en",
         response_format: "json",
@@ -391,14 +434,11 @@ export default async function handler(req, res) {
     /* ---------------------------------------------------------------------- */
     if (path === "chat/send") {
       const { prompt, instructions, resumeText } = await readJson(req);
-      if (!prompt)
-        return res.status(400).json({ error: "Missing prompt" });
+      if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
 
-      const messages = [
-        { role: "system", content: (instructions || "").slice(0, 4000) }
-      ];
+      const messages = [{ role: "system", content: String(instructions || "").slice(0, 4000) }];
 
       if (resumeText) {
         messages.push({
@@ -436,7 +476,6 @@ export default async function handler(req, res) {
     /* FALLBACK                                                               */
     /* ---------------------------------------------------------------------- */
     return res.status(404).json({ error: `No route: /api/${path}` });
-
   } catch (err) {
     return res.status(500).json({ error: err.message || String(err) });
   }

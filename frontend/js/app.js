@@ -1,4 +1,12 @@
 //--------------------------------------------------------------
+// CONFIG
+//--------------------------------------------------------------
+const BILL_EVERY_MS = 5000;          // batch interval
+const CREDITS_PER_SECOND = 1;        // 1 credit per second
+const MAX_INSTR_CHARS = 1200;
+const MAX_RESUME_CHARS = 2500;
+
+//--------------------------------------------------------------
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
@@ -35,12 +43,14 @@ let sysSilentGain = null;
 let sysChunks = [];
 let lastSysFlushAt = 0;
 let sysFlushInFlight = false;
+let sysFlushTimer = null;
 
 let timeline = [];
 let blockMicUntil = 0;
 
-let creditTimer = null;
-let creditSecondCounter = 0;
+// billing
+let billingTimer = null;
+let billLastAt = 0;
 
 //--------------------------------------------------------------
 // Helpers
@@ -49,6 +59,11 @@ function showBanner(msg) {
   bannerTop.textContent = msg;
   bannerTop.classList.remove("hidden");
   bannerTop.classList.add("bg-red-600");
+}
+
+function hideBanner() {
+  bannerTop.classList.add("hidden");
+  bannerTop.textContent = "";
 }
 
 function setStatus(el, text, cls = "") {
@@ -73,15 +88,29 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
+function authHeaders() {
+  const token = session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+function mustHaveSessionOrRedirect() {
+  if (session?.access_token) return true;
+  localStorage.removeItem("session");
+  window.location.href = "/auth?tab=login";
+  return false;
+}
+
 //--------------------------------------------------------------
 // Load USER PROFILE
 //--------------------------------------------------------------
 async function loadUserProfile() {
+  if (!mustHaveSessionOrRedirect()) return;
+
   const res = await fetch("/api?path=user/profile", {
-    headers: { Authorization: `Bearer ${session.access_token}` }
+    headers: authHeaders()
   });
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error);
+  if (!res.ok) throw new Error(data.error || "Failed to load profile");
 
   userInfo.innerHTML =
     `Logged in as <b>${data.user.email}</b><br>` +
@@ -114,11 +143,12 @@ resumeInput?.addEventListener("change", async () => {
 
   const res = await fetch("/api?path=resume/extract", {
     method: "POST",
+    headers: authHeaders(), // optional, harmless
     body: fd
   });
 
   const data = await res.json();
-  localStorage.setItem("resumeText", data.text || "");
+  localStorage.setItem("resumeText", (data.text || "").slice(0, MAX_RESUME_CHARS));
 
   resumeStatus.textContent = "Resume extracted.";
 });
@@ -159,7 +189,9 @@ function startMic() {
 
   recognition.onerror = () => {};
   recognition.onend = () => {
-    if (isRunning) recognition.start();
+    if (isRunning) {
+      try { recognition.start(); } catch {}
+    }
   };
 
   try {
@@ -224,7 +256,8 @@ async function enableSystemAudio() {
     }
   };
 
-  setInterval(() => {
+  if (sysFlushTimer) clearInterval(sysFlushTimer);
+  sysFlushTimer = setInterval(() => {
     if (sysChunks.length && isRunning) flushSystemAudio();
   }, 1400);
 
@@ -239,7 +272,9 @@ function float32ToWav(float32, sr) {
   const buf = new ArrayBuffer(44 + int16.length * 2);
   const dv = new DataView(buf);
 
-  function w(o, s) { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); }
+  function w(o, s) {
+    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+  }
 
   w(0, "RIFF");
   dv.setUint32(4, 36 + int16.length * 2, true);
@@ -285,44 +320,89 @@ async function flushSystemAudio() {
 
     const res = await fetch("/api?path=transcribe", {
       method: "POST",
+      headers: authHeaders(), // optional but consistent
       body: fd
     });
 
     const data = await res.json();
     if (data.text) addToTimeline(data.text);
+  } catch {
+    // don't hard-fail; just keep mic running
   } finally {
     sysFlushInFlight = false;
   }
 }
 
 //--------------------------------------------------------------
-// Credits deduction
+// Credits deduction — BATCHED
 //--------------------------------------------------------------
-function startCreditTicking() {
-  if (creditTimer) clearInterval(creditTimer);
+async function deductCreditsBatch(delta) {
+  if (!mustHaveSessionOrRedirect()) return { remaining: 0 };
 
-  creditTimer = setInterval(async () => {
+  const res = await fetch("/api?path=user/deduct", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders() },
+    body: JSON.stringify({ delta })
+  });
+
+  if (res.status === 401) {
+    stopAll();
+    showBanner("Session expired. Please login again.");
+    localStorage.removeItem("session");
+    window.location.href = "/auth?tab=login";
+    return { remaining: 0 };
+  }
+
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Deduction failed");
+
+  return data;
+}
+
+function startBilling() {
+  if (billingTimer) clearInterval(billingTimer);
+
+  billLastAt = Date.now();
+
+  billingTimer = setInterval(async () => {
     if (!isRunning) return;
 
-    creditSecondCounter++;
-    if (creditSecondCounter % 60 === 0) {
+    const now = Date.now();
+    const elapsedMs = now - billLastAt;
+
+    if (elapsedMs < BILL_EVERY_MS) return;
+
+    // compute how many seconds to bill in this batch
+    const seconds = Math.floor(elapsedMs / 1000);
+    const delta = seconds * CREDITS_PER_SECOND;
+
+    // move the last marker forward by billed seconds
+    billLastAt += seconds * 1000;
+
+    try {
+      const out = await deductCreditsBatch(delta);
+
+      // refresh profile occasionally (every batch is ok; you can change)
       await loadUserProfile();
-    }
 
-    const res = await fetch("/api?path=user/deduct1", { method: "POST" });
-    const data = await res.json();
-
-    if (data.remaining <= 0) {
+      if (Number(out.remaining || 0) <= 0) {
+        stopAll();
+        showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+      }
+    } catch (e) {
       stopAll();
-      showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+      showBanner(e.message || "Billing failed");
     }
-  }, 1000);
+  }, 500); // internal tick, low cost
 }
 
 //--------------------------------------------------------------
 // START
 //--------------------------------------------------------------
 async function startAll() {
+  hideBanner();
+
+  if (!mustHaveSessionOrRedirect()) return;
   if (isRunning) return;
 
   await fetch("/api?path=chat/reset", { method: "POST" });
@@ -345,7 +425,7 @@ async function startAll() {
   sendBtn.classList.remove("opacity-60");
 
   startMic();
-  startCreditTicking();
+  startBilling();
 
   setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 }
@@ -361,7 +441,11 @@ function stopAll() {
   if (sysStream) sysStream.getTracks().forEach(t => t.stop());
   sysStream = null;
 
-  if (creditTimer) clearInterval(creditTimer);
+  if (billingTimer) clearInterval(billingTimer);
+  billingTimer = null;
+
+  if (sysFlushTimer) clearInterval(sysFlushTimer);
+  sysFlushTimer = null;
 
   startBtn.disabled = false;
   startBtn.classList.remove("opacity-50");
@@ -399,8 +483,8 @@ sendBtn.onclick = async () => {
   try {
     const body = {
       prompt: msg,
-      instructions: localStorage.getItem("instructions") || "",
-      resumeText: localStorage.getItem("resumeText") || ""
+      instructions: (localStorage.getItem("instructions") || "").slice(0, MAX_INSTR_CHARS),
+      resumeText: (localStorage.getItem("resumeText") || "").slice(0, MAX_RESUME_CHARS)
     };
 
     const res = await fetch("/api?path=chat/send", {
