@@ -28,24 +28,40 @@ let isRunning = false;
 let recognition = null;
 let blockMicUntil = 0;
 
-// System audio (MediaRecorder-based)
+// System audio (segment-based MediaRecorder)
 let sysStream = null;
+let sysTrack = null;
 let sysRecorder = null;
+let sysSegmentChunks = [];
+let sysSegmentTimer = null;
 let sysQueue = [];
 let sysUploading = false;
-let sysAbort = null; // AbortController for inflight transcribe calls
+let sysAbort = null;
 
 // Transcript timeline
 let timeline = [];
 
-// Credits (batch)
+// Credits (batched)
 let creditTimer = null;
 let lastCreditAt = 0;
 
 // Chat streaming cancellation
 let chatAbort = null;
 let chatStreamActive = false;
-let chatStreamSeq = 0; // monotonically increasing stream id
+let chatStreamSeq = 0;
+
+// In-session memory (reset on refresh/logout automatically)
+let chatHistory = []; // [{role:"user"|"assistant", content:string}]
+const MAX_HISTORY_MESSAGES = 8; // last 4 turns
+const MAX_HISTORY_CHARS_EACH = 1500;
+
+//--------------------------------------------------------------
+// CONFIG
+//--------------------------------------------------------------
+const SYS_SEGMENT_MS = 2500;      // each segment becomes a standalone file (Chrome-safe)
+const SYS_MIN_BYTES = 5000;       // ignore tiny segments
+const CREDIT_BATCH_SEC = 5;       // every 5 seconds
+const CREDITS_PER_SEC = 1;
 
 //--------------------------------------------------------------
 // Helpers
@@ -88,9 +104,7 @@ function authHeaders() {
 // Load USER PROFILE
 //--------------------------------------------------------------
 async function loadUserProfile() {
-  const res = await fetch("/api?path=user/profile", {
-    headers: authHeaders()
-  });
+  const res = await fetch("/api?path=user/profile", { headers: authHeaders() });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Failed to load profile");
 
@@ -123,12 +137,9 @@ resumeInput?.addEventListener("change", async () => {
   const fd = new FormData();
   fd.append("file", file);
 
-  const res = await fetch("/api?path=resume/extract", {
-    method: "POST",
-    body: fd
-  });
-
+  const res = await fetch("/api?path=resume/extract", { method: "POST", body: fd });
   const data = await res.json().catch(() => ({}));
+
   localStorage.setItem("resumeText", data.text || "");
   resumeStatus.textContent = "Resume extracted.";
 });
@@ -178,7 +189,9 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — MediaRecorder (fixes corrupted WAV issue)
+// SYSTEM AUDIO — segment recorder (Chrome-safe)
+// Reason: Chrome timeslice chunks may be non-decodable standalone.
+// Fix: stop->upload complete file->restart each segment.
 //--------------------------------------------------------------
 function pickBestMimeType() {
   const candidates = [
@@ -194,19 +207,24 @@ function pickBestMimeType() {
 }
 
 function stopSystemAudioOnly() {
+  try { sysAbort?.abort(); } catch {}
+  sysAbort = null;
+
+  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
+  sysSegmentTimer = null;
+
   try { sysRecorder?.stop(); } catch {}
   sysRecorder = null;
+
+  sysSegmentChunks = [];
+  sysQueue = [];
+  sysUploading = false;
 
   if (sysStream) {
     try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
   }
   sysStream = null;
-
-  sysQueue = [];
-  sysUploading = false;
-
-  try { sysAbort?.abort(); } catch {}
-  sysAbort = null;
+  sysTrack = null;
 }
 
 async function enableSystemAudio() {
@@ -224,39 +242,60 @@ async function enableSystemAudio() {
     return;
   }
 
-  const track = sysStream.getAudioTracks()[0];
-  if (!track) {
-    setStatus(audioStatus, "No system audio detected. Use Chrome Tab + Share audio.", "text-red-600");
-    stopSystemAudioOnly();
-    return;
-  }
-
-  // Use clean audio-only stream
-  const audioOnly = new MediaStream([track]);
-
-  const mimeType = pickBestMimeType();
-  try {
-    sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
-  } catch (e) {
-    console.error(e);
-    setStatus(audioStatus, "MediaRecorder failed. Try Chrome Tab capture.", "text-red-600");
+  sysTrack = sysStream.getAudioTracks()[0];
+  if (!sysTrack) {
+    setStatus(audioStatus, "No system audio detected. Use Chrome TAB + Share audio.", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
 
   sysAbort = new AbortController();
+  startSystemSegmentRecorder();
+
+  setStatus(audioStatus, "System audio enabled", "text-green-600");
+}
+
+function startSystemSegmentRecorder() {
+  if (!sysTrack) return;
+
+  const audioOnly = new MediaStream([sysTrack]);
+  const mimeType = pickBestMimeType();
+
+  sysSegmentChunks = [];
+
+  try {
+    sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
+  } catch (e) {
+    console.error(e);
+    setStatus(audioStatus, "MediaRecorder failed. Try Chrome TAB capture.", "text-red-600");
+    stopSystemAudioOnly();
+    return;
+  }
 
   sysRecorder.ondataavailable = (ev) => {
     if (!isRunning) return;
-    if (!ev.data || ev.data.size < 1500) return;
-    sysQueue.push(ev.data);
-    drainSysQueue();
+    if (ev.data && ev.data.size) sysSegmentChunks.push(ev.data);
   };
 
-  sysRecorder.onerror = (e) => console.error("sysRecorder error", e);
+  sysRecorder.onstop = () => {
+    if (!isRunning) return;
+
+    const blob = new Blob(sysSegmentChunks, { type: sysRecorder?.mimeType || "" });
+    sysSegmentChunks = [];
+
+    if (blob.size >= SYS_MIN_BYTES) {
+      sysQueue.push(blob);
+      drainSysQueue();
+    }
+
+    // restart recorder for next segment (this is the Chrome-safe trick)
+    if (isRunning && sysTrack && sysTrack.readyState === "live") {
+      startSystemSegmentRecorder();
+    }
+  };
 
   try {
-    sysRecorder.start(2000); // 2s slices
+    sysRecorder.start(); // no timeslice
   } catch (e) {
     console.error(e);
     setStatus(audioStatus, "System audio start failed", "text-red-600");
@@ -264,7 +303,12 @@ async function enableSystemAudio() {
     return;
   }
 
-  setStatus(audioStatus, "System audio enabled", "text-green-600");
+  // force segment boundary
+  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
+  sysSegmentTimer = setInterval(() => {
+    if (!isRunning) return;
+    try { sysRecorder?.stop(); } catch {}
+  }, SYS_SEGMENT_MS);
 }
 
 async function drainSysQueue() {
@@ -287,7 +331,6 @@ async function transcribeSysBlob(blob) {
 
   const type = (blob.type || "").toLowerCase();
   const ext =
-    type.includes("webm") ? "webm" :
     type.includes("ogg") ? "ogg" :
     "webm";
 
@@ -299,19 +342,20 @@ async function transcribeSysBlob(blob) {
     signal: sysAbort?.signal
   });
 
+  // show real error (if backend returns 400, you see 400 now)
   if (!res.ok) {
-    const txt = await res.text().catch(() => "");
-    console.error("transcribe failed", res.status, txt);
+    const t = await res.text().catch(() => "");
+    console.error("transcribe failed", res.status, t);
     return;
   }
 
   const data = await res.json().catch(() => ({}));
-  const t = normalize(data.text || "");
-  if (t) addToTimeline(t);
+  const txt = normalize(data.text || "");
+  if (txt) addToTimeline(txt);
 }
 
 //--------------------------------------------------------------
-// CREDITS — batched every 5 seconds
+// CREDITS — batch deduct every 5 seconds
 //--------------------------------------------------------------
 async function deductCredits(delta) {
   const res = await fetch("/api?path=user/deduct", {
@@ -319,7 +363,6 @@ async function deductCredits(delta) {
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ delta })
   });
-
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Deduct failed (${res.status})`);
   return data;
@@ -327,7 +370,6 @@ async function deductCredits(delta) {
 
 function startCreditTicking() {
   if (creditTimer) clearInterval(creditTimer);
-
   lastCreditAt = Date.now();
 
   creditTimer = setInterval(async () => {
@@ -335,11 +377,11 @@ function startCreditTicking() {
 
     const now = Date.now();
     const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
-    if (elapsedSec < 5) return;
+    if (elapsedSec < CREDIT_BATCH_SEC) return;
 
-    // deduct in batches: every 5 seconds deduct 5 credits
-    const batchSec = elapsedSec - (elapsedSec % 5);
-    const delta = batchSec; // 1 credit/sec
+    const batchSec = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
+    const delta = batchSec * CREDITS_PER_SEC;
+
     lastCreditAt += batchSec * 1000;
 
     try {
@@ -349,24 +391,38 @@ function startCreditTicking() {
         showBanner("No more credits. Contact admin: shiva509203@gmail.com");
         return;
       }
-      // refresh occasionally
       await loadUserProfile();
     } catch (e) {
       console.error(e);
-      // do not kill app immediately; show banner
       showBanner(e.message || "Credit deduction error");
     }
   }, 500);
 }
 
 //--------------------------------------------------------------
-// CHAT STREAM CONTROL (Reset + Send priority switching)
+// CHAT STREAM CONTROL (Reset stops stream only; Send overrides stream)
+// + In-session memory (history) passed to backend
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
-  // This is EXACTLY what you asked: stop streaming + clear response box
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
   chatStreamActive = false;
+}
+
+function compactHistoryForRequest() {
+  // last MAX_HISTORY_MESSAGES only; clamp very large messages
+  const tail = chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
+    role: m.role,
+    content: String(m.content || "").slice(0, MAX_HISTORY_CHARS_EACH)
+  }));
+  return tail;
+}
+
+function pushHistory(role, content) {
+  const c = normalize(content);
+  if (!c) return;
+  chatHistory.push({ role, content: c });
+  if (chatHistory.length > 50) chatHistory = chatHistory.slice(-50);
 }
 
 async function startChatStreaming(prompt) {
@@ -380,18 +436,24 @@ async function startChatStreaming(prompt) {
   responseBox.textContent = "";
   setStatus(sendStatus, "Sending…", "text-orange-600");
 
+  // store user message in history immediately
+  pushHistory("user", prompt);
+
   const body = {
     prompt,
+    history: compactHistoryForRequest(),
     instructions: localStorage.getItem("instructions") || "",
     resumeText: localStorage.getItem("resumeText") || ""
   };
 
   let pending = "";
   let flushTimer = null;
+  let finalAnswer = "";
 
   const flush = () => {
     if (!pending) return;
     responseBox.textContent += pending;
+    finalAnswer += pending;
     pending = "";
   };
 
@@ -411,9 +473,8 @@ async function startChatStreaming(prompt) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
 
-    // flush every ~50ms to reduce slowness in Chrome DOM rendering
+    // reduce Chrome UI slowness
     flushTimer = setInterval(() => {
-      // if replaced by new send/reset, stop flushing
       if (!chatStreamActive || mySeq !== chatStreamSeq) return;
       flush();
     }, 50);
@@ -422,22 +483,37 @@ async function startChatStreaming(prompt) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // If user clicked Reset or sent a newer request -> stop immediately
       if (!chatStreamActive || mySeq !== chatStreamSeq) break;
 
       pending += decoder.decode(value);
     }
 
-    // final flush if still active and same stream
     if (chatStreamActive && mySeq === chatStreamSeq) {
       flush();
       setStatus(sendStatus, "Done", "text-green-600");
+      // store assistant answer only when stream completes normally
+      pushHistory("assistant", finalAnswer);
     } else {
       setStatus(sendStatus, "Interrupted", "text-orange-600");
+      // interrupted -> remove last user entry (avoid half-context)
+      // keep it simple: pop last "user" if it matches prompt
+      for (let i = chatHistory.length - 1; i >= 0; i--) {
+        if (chatHistory[i].role === "user" && chatHistory[i].content === normalize(prompt)) {
+          chatHistory.splice(i, 1);
+          break;
+        }
+      }
     }
   } catch (e) {
     if (e?.name === "AbortError") {
       setStatus(sendStatus, "Interrupted", "text-orange-600");
+      // rollback last user entry on abort
+      for (let i = chatHistory.length - 1; i >= 0; i--) {
+        if (chatHistory[i].role === "user" && chatHistory[i].content === normalize(prompt)) {
+          chatHistory.splice(i, 1);
+          break;
+        }
+      }
     } else {
       console.error(e);
       setStatus(sendStatus, "Failed", "text-red-600");
@@ -445,7 +521,6 @@ async function startChatStreaming(prompt) {
   } finally {
     if (flushTimer) clearInterval(flushTimer);
     pending = "";
-    // do not forcibly flip streamActive here; reset/send owns it
   }
 }
 
@@ -456,9 +531,7 @@ async function startAll() {
   hideBanner();
   if (isRunning) return;
 
-  // reset server-side chat state
   await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
-
   timeline = [];
   updateTranscript();
 
@@ -493,11 +566,6 @@ function stopAll() {
   if (creditTimer) clearInterval(creditTimer);
   creditTimer = null;
 
-  // NOTE: this DOES NOT stop the response box by itself unless you call Reset/Send.
-  // But Stop should stop everything else.
-  // If you want Stop to also stop chat: uncomment next line:
-  // abortChatStreamOnly();
-
   startBtn.disabled = false;
   startBtn.classList.remove("opacity-50");
 
@@ -514,7 +582,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// SEND (priority switching)
+// SEND (2nd Send cancels 1st automatically)
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -524,12 +592,11 @@ sendBtn.onclick = async () => {
 
   blockMicUntil = Date.now() + 700;
 
-  // Clear transcript for next question (your current behavior)
+  // clear transcript for next question (existing behavior)
   timeline = [];
   promptBox.value = "";
   updateTranscript();
 
-  // Start streaming; if user clicks Send again, previous gets aborted
   await startChatStreaming(msg);
 };
 
@@ -544,37 +611,42 @@ clearBtn.onclick = () => {
 };
 
 //--------------------------------------------------------------
-// RESET (your exact requirement):
-// - stop ChatGPT streaming output
-// - clear response box
-// - do NOT stop mic/system/credits
+// RESET (your exact requirement)
+// - stops ChatGPT streaming immediately
+// - clears response box
+// - does NOT stop mic/system/credits
 //--------------------------------------------------------------
 resetBtn.onclick = async () => {
-  abortChatStreamOnly();          // stops remaining tokens immediately
-  responseBox.textContent = "";   // clears response box
+  abortChatStreamOnly();
+  responseBox.textContent = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
-
-  // optional: also reset backend chat state
   await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
 };
 
 //--------------------------------------------------------------
-// LOGOUT
+// LOGOUT (must reset memory)
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
+  // reset in-session memory before redirect
+  chatHistory = [];
+  abortChatStreamOnly();
+  stopAll();
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
 };
 
 //--------------------------------------------------------------
 // PAGE LOAD
+// Memory resets automatically on hard refresh (JS memory cleared)
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  await loadUserProfile();
+  // Ensure memory is clean per fresh page load
+  chatHistory = [];
 
+  await loadUserProfile();
   await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
 
   timeline = [];
