@@ -70,16 +70,18 @@ document.getElementById("loginForm")?.addEventListener("submit", async (e) => {
 
     if (!data?.session) throw new Error("Invalid login response (no session).");
 
-    // localStorage.setItem("session", JSON.stringify(data.session));
-    // showMsg("Login successful. Redirecting...");
-    // window.location.href = data.session.is_admin ? "/admin" : "/app";
+    // SAVE SESSION (required for both admin & user)
+    localStorage.setItem("session", JSON.stringify(data.session));
 
-    // if (data.session.is_admin) window.location.href = "/admin";
-    // else window.location.href = "/app";
-    window.location.href = data.session.is_admin ? "/admin" : "/app";
+    showMsg("Login successful. Redirecting...");
 
-    if (data.session.is_admin) window.location.href = "/admin";
-    else window.location.href = "/app";
+    // Single clean redirect
+    if (data.session.is_admin === true) {
+      window.location.href = "/admin";
+    } else {
+      window.location.href = "/app";
+    }
+
   } catch (err) {
     showMsg(err?.message || String(err), true);
   }
