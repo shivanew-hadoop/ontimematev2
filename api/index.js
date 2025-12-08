@@ -63,7 +63,8 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host)
+    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
@@ -110,7 +111,9 @@ export default async function handler(req, res) {
     // Health Check
     // ---------------------------------------------
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
-      return res.status(200).json({ ok: true, service: "api", time: new Date().toISOString() });
+      return res
+        .status(200)
+        .json({ ok: true, service: "api", time: new Date().toISOString() });
     }
 
     if (req.method === "GET" && path === "envcheck") {
@@ -128,7 +131,8 @@ export default async function handler(req, res) {
     // AUTH: signup
     // ---------------------------------------------
     if (path === "auth/signup") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { name, phone, email, password } = await readJson(req);
       if (!name || !email || !password)
@@ -146,17 +150,15 @@ export default async function handler(req, res) {
 
       const userId = data?.user?.id;
 
-      await supabaseAdmin()
-        .from("user_profiles")
-        .insert({
-          id: userId,
-          name,
-          phone: phone || "",
-          email,
-          approved: false,
-          credits: 0,
-          created_at: new Date().toISOString()
-        });
+      await supabaseAdmin().from("user_profiles").insert({
+        id: userId,
+        name,
+        phone: phone || "",
+        email,
+        approved: false,
+        credits: 0,
+        created_at: new Date().toISOString()
+      });
 
       return res.status(200).json({
         ok: true,
@@ -168,35 +170,43 @@ export default async function handler(req, res) {
     // AUTH: login (admin + user)
     // ---------------------------------------------
     if (path === "auth/login") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
-      // ADMIN login
+      // Admin login
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
 
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
-        const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
+        const token = `ADMIN::${adminEmail}::${Math.random()
+          .toString(36)
+          .slice(2)}`;
         return res.status(200).json({
           ok: true,
-          session: { is_admin: true, token, user: { id: "admin", email: adminEmail } }
+          session: {
+            is_admin: true,
+            token,
+            user: { id: "admin", email: adminEmail }
+          }
         });
       }
 
-      // USER login
+      // User login
       const sb = supabaseAnon();
-      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      const { data, error } = await sb.auth.signInWithPassword({
+        email,
+        password
+      });
       if (error) return res.status(401).json({ error: error.message });
 
       const user = data.user;
 
-      // email verification check
       if (!user.email_confirmed_at) {
         return res.status(403).json({ error: "Email not verified yet" });
       }
 
-      // approval check
       const profile = await supabaseAdmin()
         .from("user_profiles")
         .select("approved")
@@ -204,7 +214,9 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved) {
-        return res.status(403).json({ error: "Admin has not approved your account yet" });
+        return res
+          .status(403)
+          .json({ error: "Admin has not approved your account yet" });
       }
 
       return res.status(200).json({
@@ -226,7 +238,8 @@ export default async function handler(req, res) {
     // AUTH: forgot
     // ---------------------------------------------
     if (path === "auth/forgot") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -259,7 +272,8 @@ export default async function handler(req, res) {
     // ---------------------------------------------
     if (path === "admin/users") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { data } = await supabaseAdmin()
         .from("user_profiles")
@@ -274,7 +288,8 @@ export default async function handler(req, res) {
     // ---------------------------------------------
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { user_id, approved } = await readJson(req);
 
@@ -293,7 +308,8 @@ export default async function handler(req, res) {
     // ---------------------------------------------
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { user_id, delta } = await readJson(req);
       const sb = supabaseAdmin();
@@ -321,7 +337,9 @@ export default async function handler(req, res) {
     // ---------------------------------------------
     if (path === "resume/extract") {
       const { file } = await readMultipart(req);
-      return res.status(200).json({ text: file?.buffer?.toString("utf8") || "" });
+      return res
+        .status(200)
+        .json({ text: file?.buffer?.toString("utf8") || "" });
     }
 
     // ---------------------------------------------
@@ -346,16 +364,17 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // CHAT
+    // CHAT STREAM SEND
     // ---------------------------------------------
     if (path === "chat/send") {
       const { prompt, instructions, resumeText } = await readJson(req);
-      if (!prompt) return res.status(400).json({ error: "Missing prompt" });
+      if (!prompt)
+        return res.status(400).json({ error: "Missing prompt" });
 
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
 
       const messages = [
-        { role: "system", content: (instructions || "").slice(0, 4000) },
+        { role: "system", content: (instructions || "").slice(0, 4000) }
       ];
 
       if (resumeText) {
@@ -383,10 +402,23 @@ export default async function handler(req, res) {
       return res.end();
     }
 
+    // ---------------------------------------------
+    // CHAT RESET  (NEW — FIXES YOUR MIC + CLEAR ISSUES)
+    // ---------------------------------------------
+    if (path === "chat/reset") {
+      return res.status(200).json({ ok: true, message: "chat reset" });
+    }
+
+    // ---------------------------------------------
     // Fallback
-    return res.status(404).json({ error: `No route: /api/${path}` });
+    // ---------------------------------------------
+    return res
+      .status(404)
+      .json({ error: `No route: /api/${path}` });
 
   } catch (err) {
-    return res.status(500).json({ error: err.message || String(err) });
+    return res
+      .status(500)
+      .json({ error: err.message || String(err) });
   }
 }
