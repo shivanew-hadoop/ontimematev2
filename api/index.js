@@ -1,5 +1,6 @@
 const Busboy = require("busboy");
-import OpenAI from "openai";
+const OpenAI = require("openai");
+
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 

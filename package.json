@@ -1,7 +1,6 @@
 {
   "name": "anu-help",
   "private": true,
-  "type": "module",
   "dependencies": {
     "@supabase/supabase-js": "^2.49.1",
     "busboy": "^1.6.0",
