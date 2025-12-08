@@ -1,182 +1,152 @@
 //--------------------------------------------------------------
-// SESSION
+// HELPERS
 //--------------------------------------------------------------
-function getSession() {
-  try {
-    return JSON.parse(localStorage.getItem("session") || "null");
-  } catch {
-    return null;
-  }
+const statusBox = document.getElementById("statusBox");
+
+function showMsg(text, isError = false) {
+  if (!statusBox) return;
+  statusBox.textContent = text;
+  statusBox.className = isError
+    ? "text-sm mb-4 bg-red-50 text-red-700 border border-red-200 rounded-lg p-3"
+    : "text-sm mb-4 bg-green-50 text-green-800 border-green-200 border rounded-lg p-3";
+  statusBox.classList.remove("hidden");
 }
 
-function clearSession() {
-  localStorage.removeItem("session");
-}
-
-async function ensureUser() {
-  const s = getSession();
-  if (!s || s.is_admin) {
-    window.location.href = "/auth?tab=login";
-    return null;
-  }
-  return s;
-}
-
-//--------------------------------------------------------------
-// DOM
-//--------------------------------------------------------------
-const userInfo = document.getElementById("userInfo");
-const instructionsBox = document.getElementById("instructionsBox");
-const instrStatus = document.getElementById("instrStatus");
-const resumeInput = document.getElementById("resumeInput");
-const resumeStatus = document.getElementById("resumeStatus");
-const promptBox = document.getElementById("promptBox");
-const responseBox = document.getElementById("responseBox");
-const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
-const sysBtn = document.getElementById("sysBtn");
-const resetBtn = document.getElementById("resetBtn");
-const sendBtn = document.getElementById("sendBtn");
-const sendStatus = document.getElementById("sendStatus");
-const audioStatus = document.getElementById("audioStatus");
-const logoutBtn = document.getElementById("logoutBtn");
-
-let session = null;
-
-//--------------------------------------------------------------
-// USER PROFILE
-//--------------------------------------------------------------
-async function loadUserProfile() {
-  const res = await fetch("/api/user/profile", {
-    headers: { Authorization: `Bearer ${session.access_token}` }
-  });
-
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error);
-
-  userInfo.innerHTML = `
-    Logged in as <b>${data.user.email}</b><br>
-    Credits: <b>${data.user.credits}</b><br>
-    Joined: ${data.user.created_ymd}
-  `;
-}
-
-//--------------------------------------------------------------
-// RESUME UPLOAD
-//--------------------------------------------------------------
-resumeInput?.addEventListener("change", async () => {
-  const file = resumeInput.files?.[0];
-  if (!file) return;
-
-  resumeStatus.textContent = "Uploading...";
-
-  const fd = new FormData();
-  fd.append("file", file);
-
-  const res = await fetch("/api/resume/extract", { method: "POST", body: fd });
-  const data = await res.json();
-
-  localStorage.setItem("resumeText", data.text || "");
-  resumeStatus.textContent = "Resume uploaded and extracted.";
-});
-
-//--------------------------------------------------------------
-// SAVE INSTRUCTIONS
-//--------------------------------------------------------------
-instructionsBox?.addEventListener("input", () => {
-  localStorage.setItem("instructions", instructionsBox.value);
-  instrStatus.textContent = "Saved";
-});
-
-//--------------------------------------------------------------
-// CHAT SEND
-//--------------------------------------------------------------
-sendBtn?.addEventListener("click", async () => {
-  const prompt = promptBox.value.trim();
-  if (!prompt) return;
-
-  sendStatus.textContent = "Sending...";
-
-  const body = {
-    prompt,
-    instructions: localStorage.getItem("instructions") || "",
-    resumeText: localStorage.getItem("resumeText") || ""
-  };
-
-  const res = await fetch("/api/chat/send", {
+async function postJSON(url, body) {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body)
   });
 
-  const reader = res.body.getReader();
-  responseBox.textContent = "";
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.error || `Request failed: ${res.status}`);
+  return data;
+}
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    responseBox.textContent += new TextDecoder().decode(value);
-  }
-
-  sendStatus.textContent = "Done.";
-});
+function getVal(id) {
+  const el = document.getElementById(id);
+  return el ? (el.value || "").trim() : "";
+}
 
 //--------------------------------------------------------------
-// RESET
+// TAB SWITCHING
 //--------------------------------------------------------------
-resetBtn?.addEventListener("click", () => {
-  responseBox.textContent = "";
-  promptBox.value = "";
-});
+const tabLogin = document.getElementById("tabLogin");
+const tabSignup = document.getElementById("tabSignup");
+const tabForgot = document.getElementById("tabForgot");
+const loginForm = document.getElementById("loginForm");
+const signupForm = document.getElementById("signupForm");
+const forgotForm = document.getElementById("forgotForm");
 
-//--------------------------------------------------------------
-// AUDIO CAPTURE (MIC ONLY TO KEEP SIMPLE)
-//--------------------------------------------------------------
-let recorder = null;
-
-startBtn?.addEventListener("click", async () => {
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
-
-  recorder.ondataavailable = async (e) => {
-    const fd = new FormData();
-    fd.append("file", e.data, "chunk.webm");
-
-    const res = await fetch("/api/transcribe", { method: "POST", body: fd });
-    const data = await res.json();
-    promptBox.value += " " + data.text;
+function setTab(active) {
+  const setBtn = (btn, on) => {
+    if (!btn) return;
+    btn.className = on
+      ? "font-semibold text-blue-700 border-b-2 border-blue-700 pb-2"
+      : "font-semibold text-slate-500 pb-2";
   };
 
-  recorder.start(2000);
-  audioStatus.textContent = "Recording...";
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  stopBtn.classList.remove("opacity-50");
+  loginForm.classList.toggle("hidden", active !== "login");
+  signupForm.classList.toggle("hidden", active !== "signup");
+  forgotForm.classList.toggle("hidden", active !== "forgot");
+
+  setBtn(tabLogin, active === "login");
+  setBtn(tabSignup, active === "signup");
+  setBtn(tabForgot, active === "forgot");
+}
+
+const params = new URLSearchParams(location.search);
+setTab(params.get("tab") || "login");
+
+tabLogin?.addEventListener("click", () => setTab("login"));
+tabSignup?.addEventListener("click", () => setTab("signup"));
+tabForgot?.addEventListener("click", () => setTab("forgot"));
+
+
+//--------------------------------------------------------------
+// LOGIN
+//--------------------------------------------------------------
+loginForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+
+  try {
+    const email = getVal("loginEmail");
+    const password = getVal("loginPassword");
+
+    if (!email || !password)
+      return showMsg("Enter email and password.", true);
+
+    showMsg("Signing in…");
+
+    const data = await postJSON("/api/auth/login", { email, password });
+
+    // MUST HAVE SESSION
+    if (!data?.session)
+      throw new Error("Login failed: No session returned.");
+
+    // SAVE SESSION (fixes infinite refresh)
+    localStorage.setItem("session", JSON.stringify(data.session));
+
+    // REDIRECT
+    window.location.href = data.session.is_admin ? "/admin" : "/app";
+
+  } catch (err) {
+    showMsg(err?.message || String(err), true);
+  }
 });
 
-stopBtn?.addEventListener("click", () => {
-  if (recorder) recorder.stop();
-  audioStatus.textContent = "Stopped";
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  stopBtn.classList.add("opacity-50");
+
+//--------------------------------------------------------------
+// SIGNUP
+//--------------------------------------------------------------
+signupForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const name = getVal("signupName");
+    const phone = getVal("signupPhone");
+    const email = getVal("signupEmail");
+    const password = getVal("signupPassword");
+    const confirm = getVal("signupConfirm");
+
+    if (!name || !email || !password)
+      return showMsg("Fill all required fields.", true);
+
+    if (password !== confirm)
+      return showMsg("Passwords do not match.", true);
+
+    showMsg("Creating account…");
+
+    const out = await postJSON("/api/auth/signup", {
+      name, phone, email, password
+    });
+
+    showMsg(out.message || "Account created.");
+    setTab("login");
+
+  } catch (err) {
+    showMsg(err?.message || String(err), true);
+  }
 });
 
-//--------------------------------------------------------------
-// LOGOUT
-//--------------------------------------------------------------
-logoutBtn?.addEventListener("click", () => {
-  clearSession();
-  window.location.href = "/auth?tab=login";
-});
 
 //--------------------------------------------------------------
-// INIT
+// FORGOT PASSWORD
 //--------------------------------------------------------------
-window.addEventListener("load", async () => {
-  session = await ensureUser();
-  if (!session) return;
+forgotForm?.addEventListener("submit", async (e) => {
+  e.preventDefault();
+  try {
+    const email = getVal("forgotEmail");
+    if (!email) return showMsg("Enter your email.", true);
 
-  instructionsBox.value = localStorage.getItem("instructions") || "";
-  await loadUserProfile();
+    showMsg("Sending reset link…");
+
+    await postJSON("/api/auth/forgot", { email });
+
+    showMsg("Reset link sent.");
+    setTab("login");
+
+  } catch (err) {
+    showMsg(err?.message || String(err), true);
+  }
 });
