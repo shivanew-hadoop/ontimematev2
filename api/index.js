@@ -77,7 +77,7 @@ function ymd(dateStr) {
 }
 
 // ---------------------------------------------
-// User Token Helper
+// USER TOKEN HELPER
 // ---------------------------------------------
 async function getUserFromBearer(req) {
   const auth = req.headers.authorization || "";
@@ -97,7 +97,7 @@ async function getUserFromBearer(req) {
 }
 
 // ---------------------------------------------
-// Main Handler
+// MAIN HANDLER
 // ---------------------------------------------
 export default async function handler(req, res) {
   try {
@@ -108,12 +108,14 @@ export default async function handler(req, res) {
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
     // ---------------------------------------------
-    // Health Check
+    // HEALTH CHECK
     // ---------------------------------------------
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
-      return res
-        .status(200)
-        .json({ ok: true, service: "api", time: new Date().toISOString() });
+      return res.status(200).json({
+        ok: true,
+        service: "api",
+        time: new Date().toISOString()
+      });
     }
 
     if (req.method === "GET" && path === "envcheck") {
@@ -128,7 +130,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // AUTH: signup
+    // AUTH: SIGNUP
     // ---------------------------------------------
     if (path === "auth/signup") {
       if (req.method !== "POST")
@@ -167,7 +169,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // AUTH: login (admin + user)
+    // AUTH: LOGIN (ADMIN + USER)
     // ---------------------------------------------
     if (path === "auth/login") {
       if (req.method !== "POST")
@@ -175,7 +177,7 @@ export default async function handler(req, res) {
 
       const { email, password } = await readJson(req);
 
-      // Admin login
+      // ADMIN LOGIN
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
 
@@ -193,7 +195,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // User login
+      // USER LOGIN
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({
         email,
@@ -230,12 +232,12 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // AUTH: logout
+    // AUTH: LOGOUT
     // ---------------------------------------------
     if (path === "auth/logout") return res.status(200).json({ ok: true });
 
     // ---------------------------------------------
-    // AUTH: forgot
+    // AUTH: FORGOT
     // ---------------------------------------------
     if (path === "auth/forgot") {
       if (req.method !== "POST")
@@ -249,7 +251,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // USER: profile
+    // USER: PROFILE
     // ---------------------------------------------
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
@@ -267,13 +269,52 @@ export default async function handler(req, res) {
       });
     }
 
+    // ============================================================
+    // USER: DEDUCT CREDITS (NEW — Rule A: 1 credit per sec)
+    // ============================================================
+    if (path === "user/deduct") {
+      const gate = await getUserFromBearer(req);
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      const { seconds } = await readJson(req);
+      const sec = Number(seconds || 1);
+
+      const sb = supabaseAdmin();
+
+      // fetch current credits
+      const { data: row } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
+      const current = Number(row?.credits || 0);
+      if (current <= 0) {
+        return res.status(200).json({ ok: false, stop: true, credits: 0 });
+      }
+
+      const newCredits = Math.max(0, current - sec);
+
+      const { data: updated } = await sb
+        .from("user_profiles")
+        .update({ credits: newCredits })
+        .eq("id", gate.user.id)
+        .select()
+        .single();
+
+      return res.status(200).json({
+        ok: newCredits > 0,
+        stop: newCredits <= 0,
+        credits: newCredits
+      });
+    }
+
     // ---------------------------------------------
-    // ADMIN: list users
+    // ADMIN: LIST USERS
     // ---------------------------------------------
     if (path === "admin/users") {
       const gate = requireAdmin(req);
-      if (!gate.ok)
-        return res.status(401).json({ error: gate.error });
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
 
       const { data } = await supabaseAdmin()
         .from("user_profiles")
@@ -284,12 +325,11 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // ADMIN: approve
+    // ADMIN: APPROVE USER
     // ---------------------------------------------
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
-      if (!gate.ok)
-        return res.status(401).json({ error: gate.error });
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
 
       const { user_id, approved } = await readJson(req);
 
@@ -304,12 +344,11 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // ADMIN: modify credits
+    // ADMIN: MODIFY CREDITS
     // ---------------------------------------------
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
-      if (!gate.ok)
-        return res.status(401).json({ error: gate.error });
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
 
       const { user_id, delta } = await readJson(req);
       const sb = supabaseAdmin();
@@ -333,7 +372,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // RESUME: extract
+    // RESUME: EXTRACT
     // ---------------------------------------------
     if (path === "resume/extract") {
       const { file } = await readMultipart(req);
@@ -343,7 +382,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // TRANSCRIBE
+    // TRANSCRIBE (WHISPER)
     // ---------------------------------------------
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
@@ -364,7 +403,7 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // CHAT STREAM SEND
+    // CHAT: STREAM SEND
     // ---------------------------------------------
     if (path === "chat/send") {
       const { prompt, instructions, resumeText } = await readJson(req);
@@ -403,22 +442,18 @@ export default async function handler(req, res) {
     }
 
     // ---------------------------------------------
-    // CHAT RESET  (NEW — FIXES YOUR MIC + CLEAR ISSUES)
+    // CHAT RESET
     // ---------------------------------------------
     if (path === "chat/reset") {
       return res.status(200).json({ ok: true, message: "chat reset" });
     }
 
     // ---------------------------------------------
-    // Fallback
+    // FALLBACK
     // ---------------------------------------------
-    return res
-      .status(404)
-      .json({ error: `No route: /api/${path}` });
+    return res.status(404).json({ error: `No route: /api/${path}` });
 
   } catch (err) {
-    return res
-      .status(500)
-      .json({ error: err.message || String(err) });
+    return res.status(500).json({ error: err.message || String(err) });
   }
 }
