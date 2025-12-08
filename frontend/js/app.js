@@ -2,7 +2,6 @@
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
-const logoutBtn = document.getElementById("logoutBtn");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
 const resumeInput = document.getElementById("resumeInput");
@@ -17,32 +16,41 @@ const resetBtn = document.getElementById("resetBtn");
 const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
-const banner = document.getElementById("bannerTop");
+const bannerTop = document.getElementById("bannerTop");
 
 //--------------------------------------------------------------
 // STATE
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
-
 let recognition = null;
-let credits = 0;
 
 let audioContext = null;
 let sysStream = null;
+let sysSource = null;
+let sysGain = null;
 let sysProcessor = null;
+let sysSilentGain = null;
+
 let sysChunks = [];
 let lastSysFlushAt = 0;
 let sysFlushInFlight = false;
 
 let timeline = [];
-let autoFlushTimer = null;
-let creditTimer = null;
 let blockMicUntil = 0;
+
+let creditTimer = null;
+let creditSecondCounter = 0;
 
 //--------------------------------------------------------------
 // Helpers
 //--------------------------------------------------------------
+function showBanner(msg) {
+  bannerTop.textContent = msg;
+  bannerTop.classList.remove("hidden");
+  bannerTop.classList.add("bg-red-600");
+}
+
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
@@ -65,79 +73,20 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-function showBanner(msg, color = "bg-red-600") {
-  banner.textContent = msg;
-  banner.className = `w-full text-white text-center p-2 ${color}`;
-  banner.style.display = "block";
-}
-
-function hideBanner() {
-  banner.style.display = "none";
-}
-
 //--------------------------------------------------------------
-// Load USER PROFILE + Credits
+// Load USER PROFILE
 //--------------------------------------------------------------
 async function loadUserProfile() {
   const res = await fetch("/api?path=user/profile", {
-    headers: { Authorization: `Bearer ${session.access_token}` },
+    headers: { Authorization: `Bearer ${session.access_token}` }
   });
-
   const data = await res.json();
   if (!res.ok) throw new Error(data.error);
 
-  credits = data.user.credits;
-
-  userInfo.innerHTML = `
-    Logged in as <b>${data.user.email}</b><br>
-    Credits: <b id="creditsLabel">${credits}</b><br>
-    Joined: ${data.user.created_ymd}
-  `;
-}
-
-function updateCreditsUI(newVal) {
-  credits = newVal;
-  const el = document.getElementById("creditsLabel");
-  if (el) el.textContent = credits;
-
-  if (credits <= 0) {
-    showBanner("No more credits. Contact admin: shiva509203@gmail.com");
-    stopAll();
-    sendBtn.disabled = true;
-  }
-}
-
-//--------------------------------------------------------------
-// Deduct Backend Credits each second
-//--------------------------------------------------------------
-async function deductOneSecond() {
-  if (!isRunning) return;
-  if (credits <= 0) return stopAll();
-
-  const res = await fetch("/api?path=user/deduct", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${session.access_token}`,
-    },
-    body: JSON.stringify({ seconds: 1 }),
-  });
-
-  const data = await res.json();
-  if (!res.ok) return;
-
-  updateCreditsUI(data.credits);
-}
-
-function startCreditLoop() {
-  creditTimer = setInterval(() => {
-    deductOneSecond();
-  }, 1000);
-}
-
-function stopCreditLoop() {
-  if (creditTimer) clearInterval(creditTimer);
-  creditTimer = null;
+  userInfo.innerHTML =
+    `Logged in as <b>${data.user.email}</b><br>` +
+    `Credits: <b>${data.user.credits}</b><br>` +
+    `Joined: ${data.user.created_ymd}`;
 }
 
 //--------------------------------------------------------------
@@ -146,8 +95,9 @@ function stopCreditLoop() {
 instructionsBox.value = localStorage.getItem("instructions") || "";
 instructionsBox.addEventListener("input", () => {
   localStorage.setItem("instructions", instructionsBox.value);
-  setStatus(instrStatus, "Saved", "text-green-600");
-  setTimeout(() => setStatus(instrStatus, "", ""), 600);
+  instrStatus.textContent = "Saved";
+  instrStatus.className = "text-green-600";
+  setTimeout(() => (instrStatus.textContent = ""), 600);
 });
 
 //--------------------------------------------------------------
@@ -157,48 +107,48 @@ resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
 
-  setStatus(resumeStatus, "Processing...", "text-orange-600");
+  resumeStatus.textContent = "Processing…";
 
   const fd = new FormData();
   fd.append("file", file);
 
   const res = await fetch("/api?path=resume/extract", {
     method: "POST",
-    body: fd,
+    body: fd
   });
 
   const data = await res.json();
   localStorage.setItem("resumeText", data.text || "");
 
-  setStatus(resumeStatus, "Resume extracted", "text-green-600");
+  resumeStatus.textContent = "Resume extracted.";
 });
 
 //--------------------------------------------------------------
-// MIC Speech Recognition
+// MIC — SpeechRecognition
 //--------------------------------------------------------------
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    setStatus(audioStatus, "Browser does not support speech", "text-red-600");
+    setStatus(audioStatus, "SpeechRecognition not supported", "text-red-600");
     return false;
   }
 
-  const r = new SR();
-  r.lang = "en-US";
-  r.continuous = true;
-  r.interimResults = true;
+  recognition = new SR();
+  recognition.lang = "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = true;
 
-  r.onresult = (ev) => {
+  recognition.onresult = (ev) => {
     if (!isRunning) return;
     if (Date.now() < blockMicUntil) return;
 
     let interim = "";
-
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
-      const rr = ev.results[i];
-      const txt = normalize(rr[0].transcript || "");
-      if (rr.isFinal) addToTimeline(txt);
-      else interim = txt;
+      const r = ev.results[i];
+      const text = normalize(r[0].transcript || "");
+
+      if (r.isFinal) addToTimeline(text);
+      else interim = text;
     }
 
     if (interim) {
@@ -207,19 +157,20 @@ function startMic() {
     }
   };
 
-  r.onerror = (_) => {};
-  r.onend = () => isRunning && r.start();
+  recognition.onerror = () => {};
+  recognition.onend = () => {
+    if (isRunning) recognition.start();
+  };
 
   try {
-    r.start();
+    recognition.start();
   } catch {}
 
-  recognition = r;
   return true;
 }
 
 //--------------------------------------------------------------
-// System Audio Capture
+// System Audio
 //--------------------------------------------------------------
 async function ensureContext() {
   if (!audioContext) audioContext = new AudioContext();
@@ -234,7 +185,7 @@ async function enableSystemAudio() {
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: true,
+      audio: true
     });
   } catch {
     setStatus(audioStatus, "System audio denied", "text-red-600");
@@ -243,22 +194,22 @@ async function enableSystemAudio() {
 
   const track = sysStream.getAudioTracks()[0];
   if (!track) {
-    setStatus(audioStatus, "No system audio detected", "text-red-600");
+    setStatus(audioStatus, "No audio detected", "text-red-600");
     return;
   }
 
-  const src = audioContext.createMediaStreamSource(sysStream);
-  const gain = audioContext.createGain();
-  gain.gain.value = 1;
+  sysSource = audioContext.createMediaStreamSource(sysStream);
+  sysGain = audioContext.createGain();
+  sysGain.gain.value = 1;
 
   sysProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-  const silent = audioContext.createGain();
-  silent.gain.value = 0;
+  sysSilentGain = audioContext.createGain();
+  sysSilentGain.gain.value = 0;
 
-  src.connect(gain);
-  gain.connect(sysProcessor);
-  sysProcessor.connect(silent);
-  silent.connect(audioContext.destination);
+  sysSource.connect(sysGain);
+  sysGain.connect(sysProcessor);
+  sysProcessor.connect(sysSilentGain);
+  sysSilentGain.connect(audioContext.destination);
 
   sysProcessor.onaudioprocess = (ev) => {
     if (!isRunning) return;
@@ -273,30 +224,27 @@ async function enableSystemAudio() {
     }
   };
 
-  autoFlushTimer = setInterval(() => {
+  setInterval(() => {
     if (sysChunks.length && isRunning) flushSystemAudio();
   }, 1400);
 
-  sysBtn.className = "px-3 py-2 bg-purple-700 text-white rounded";
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
 function float32ToWav(float32, sr) {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i++)
-    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 32767;
+    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
 
   const buf = new ArrayBuffer(44 + int16.length * 2);
   const dv = new DataView(buf);
 
-  function wr(o, s) {
-    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
-  }
+  function w(o, s) { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); }
 
-  wr(0, "RIFF");
+  w(0, "RIFF");
   dv.setUint32(4, 36 + int16.length * 2, true);
-  wr(8, "WAVE");
-  wr(12, "fmt ");
+  w(8, "WAVE");
+  w(12, "fmt ");
   dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true);
   dv.setUint16(22, 1, true);
@@ -304,7 +252,7 @@ function float32ToWav(float32, sr) {
   dv.setUint32(28, sr * 2, true);
   dv.setUint16(32, 2, true);
   dv.setUint16(34, 16, true);
-  wr(36, "data");
+  w(36, "data");
   dv.setUint32(40, int16.length * 2, true);
 
   let off = 44;
@@ -324,86 +272,117 @@ async function flushSystemAudio() {
     if (!chunks.length) return;
 
     const raw = chunks.reduce((acc, c) => {
-      const o = new Float32Array(acc.length + c.length);
-      o.set(acc, 0);
-      o.set(c, acc.length);
-      return o;
+      const out = new Float32Array(acc.length + c.length);
+      out.set(acc, 0);
+      out.set(c, acc.length);
+      return out;
     }, new Float32Array(0));
 
     const wav = float32ToWav(raw, audioContext.sampleRate);
 
     const fd = new FormData();
-    fd.append("file", wav);
+    fd.append("file", wav, "sys.wav");
 
     const res = await fetch("/api?path=transcribe", {
       method: "POST",
-      body: fd,
+      body: fd
     });
 
     const data = await res.json();
     if (data.text) addToTimeline(data.text);
-  } catch (err) {
-    console.error(err);
+  } finally {
+    sysFlushInFlight = false;
   }
-
-  sysFlushInFlight = false;
 }
 
 //--------------------------------------------------------------
-// START / STOP
+// Credits deduction
+//--------------------------------------------------------------
+function startCreditTicking() {
+  if (creditTimer) clearInterval(creditTimer);
+
+  creditTimer = setInterval(async () => {
+    if (!isRunning) return;
+
+    creditSecondCounter++;
+    if (creditSecondCounter % 60 === 0) {
+      await loadUserProfile();
+    }
+
+    const res = await fetch("/api?path=user/deduct1", { method: "POST" });
+    const data = await res.json();
+
+    if (data.remaining <= 0) {
+      stopAll();
+      showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+    }
+  }, 1000);
+}
+
+//--------------------------------------------------------------
+// START
 //--------------------------------------------------------------
 async function startAll() {
   if (isRunning) return;
 
-  hideBanner();
+  await fetch("/api?path=chat/reset", { method: "POST" });
 
-  if (credits <= 0) {
-    showBanner("You have 0 credits. Contact admin: shiva509203@gmail.com");
-    return;
-  }
+  timeline = [];
+  updateTranscript();
 
   isRunning = true;
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  sendBtn.disabled = false;
 
-  startBtn.className = "px-3 py-2 bg-gray-400 text-white rounded";
-  stopBtn.className = "px-3 py-2 bg-red-700 text-white rounded";
+  startBtn.disabled = true;
+  startBtn.classList.add("opacity-50");
+
+  stopBtn.disabled = false;
+  stopBtn.classList.remove("opacity-50");
+
+  sysBtn.disabled = false;
+  sysBtn.classList.remove("opacity-50");
+
+  sendBtn.disabled = false;
+  sendBtn.classList.remove("opacity-60");
 
   startMic();
-  startCreditLoop();
+  startCreditTicking();
 
-  setStatus(audioStatus, "Mic active", "text-green-600");
+  setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 }
 
+//--------------------------------------------------------------
+// STOP
+//--------------------------------------------------------------
 function stopAll() {
   isRunning = false;
-
-  stopCreditLoop();
 
   try { recognition?.stop(); } catch {}
 
   if (sysStream) sysStream.getTracks().forEach(t => t.stop());
   sysStream = null;
 
-  if (autoFlushTimer) clearInterval(autoFlushTimer);
+  if (creditTimer) clearInterval(creditTimer);
 
   startBtn.disabled = false;
-  stopBtn.disabled = true;
-  sendBtn.disabled = true;
+  startBtn.classList.remove("opacity-50");
 
-  startBtn.className = "px-3 py-2 bg-green-600 text-white rounded";
-  stopBtn.className = "px-3 py-2 bg-gray-500 text-white rounded opacity-50";
-  sysBtn.className = "px-3 py-2 bg-purple-600 text-white rounded";
+  stopBtn.disabled = true;
+  stopBtn.classList.add("opacity-50");
+
+  sysBtn.disabled = true;
+  sysBtn.classList.add("opacity-50");
+
+  sendBtn.disabled = true;
+  sendBtn.classList.add("opacity-60");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
 //--------------------------------------------------------------
-// SEND to ChatGPT
+// SEND to GPT
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
-  if (!isRunning) return;
+  if (sendBtn.disabled) return;
 
   const msg = normalize(promptBox.value);
   if (!msg) return;
@@ -421,13 +400,13 @@ sendBtn.onclick = async () => {
     const body = {
       prompt: msg,
       instructions: localStorage.getItem("instructions") || "",
-      resumeText: localStorage.getItem("resumeText") || "",
+      resumeText: localStorage.getItem("resumeText") || ""
     };
 
     const res = await fetch("/api?path=chat/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(body)
     });
 
     const reader = res.body.getReader();
@@ -439,14 +418,14 @@ sendBtn.onclick = async () => {
       responseBox.textContent += decoder.decode(value);
     }
 
-    setStatus(sendStatus, "Completed", "text-green-600");
+    setStatus(sendStatus, "Done", "text-green-600");
   } catch {
     setStatus(sendStatus, "Failed", "text-red-600");
   }
 };
 
 //--------------------------------------------------------------
-// CLEAR + RESET
+// CLEAR transcript only
 //--------------------------------------------------------------
 clearBtn.onclick = () => {
   timeline = [];
@@ -455,18 +434,20 @@ clearBtn.onclick = () => {
   setStatus(sendStatus, "Transcript cleared", "text-green-600");
 };
 
+//--------------------------------------------------------------
+// RESET everything including GPT response
+//--------------------------------------------------------------
 resetBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
   responseBox.textContent = "";
-  updateTranscript();
   setStatus(sendStatus, "All cleared", "text-green-600");
 };
 
 //--------------------------------------------------------------
 // LOGOUT
 //--------------------------------------------------------------
-logoutBtn.onclick = () => {
+document.getElementById("logoutBtn").onclick = () => {
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
 };
@@ -480,5 +461,18 @@ window.addEventListener("load", async () => {
 
   await loadUserProfile();
 
-  sendBtn.disabled = true;
+  await fetch("/api?path=chat/reset", { method: "POST" });
+
+  timeline = [];
+  updateTranscript();
+
+  localStorage.removeItem("resumeText");
+  resumeStatus.textContent = "Resume cleared";
 });
+
+//--------------------------------------------------------------
+// Bind Buttons
+//--------------------------------------------------------------
+startBtn.onclick = startAll;
+stopBtn.onclick = stopAll;
+sysBtn.onclick = enableSystemAudio;

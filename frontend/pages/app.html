@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <title>ThoughtMatters • Voice Agent</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.tailwindcss.com"></script>
 
   <style>
@@ -19,83 +19,79 @@
       line-height: 1.45;
     }
     #promptBox {
-      height: 140px;
+      height: 180px;
       background: #fafafa;
       border: 1px solid #ccc;
       padding: 10px;
+      font-size: 12px;
       resize: vertical;
-      font-size: 13px;
     }
   </style>
 </head>
-
 <body>
 
 <!-- TOP BANNER -->
-<div id="bannerTop" class="hidden w-full text-white text-center p-2 bg-red-600"></div>
+<div id="bannerTop" class="hidden text-white text-center py-2 font-semibold"></div>
 
 <div class="flex h-screen">
-
-  <!-- LEFT COLUMN -->
+  <!-- LEFT PANEL -->
   <div class="w-1/3 bg-white p-6 border-r overflow-y-auto">
 
-    <!-- Header -->
+    <!-- HEADER -->
     <div class="flex justify-between items-center mb-4">
       <h2 class="text-xl font-bold">Voice Agent</h2>
-      <button id="logoutBtn" class="text-red-600 hover:underline text-sm">Logout</button>
+      <button id="logoutBtn" class="text-sm text-red-600 hover:underline">Logout</button>
     </div>
 
-    <!-- User Info -->
+    <!-- PROFILE -->
     <div id="userInfo" class="text-sm text-gray-700 mb-4"></div>
 
-    <!-- Transcript -->
+    <!-- LIVE TRANSCRIPT -->
     <h3 class="font-semibold mb-2">Live Transcript</h3>
     <textarea id="promptBox"></textarea>
 
-    <!-- Buttons under transcript -->
     <div class="flex gap-2 mt-2">
       <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-xs rounded opacity-60">Send</button>
       <button id="clearBtn" class="px-3 py-2 bg-gray-600 text-white text-xs rounded">Clear</button>
-      <button id="resetBtn" class="px-3 py-2 bg-gray-800 text-white text-xs rounded">Reset</button>
+      <button id="resetBtn" class="px-3 py-2 bg-gray-900 text-white text-xs rounded">Reset</button>
     </div>
 
     <div id="sendStatus" class="text-xs mt-1 text-gray-600"></div>
 
-    <!-- Controls -->
+    <!-- CONTROLS -->
     <h3 class="font-semibold mt-6 mb-2">Controls</h3>
+
     <div class="flex gap-2">
       <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-xs rounded">Start</button>
-      <button id="stopBtn" disabled class="px-3 py-2 bg-gray-500 text-white text-xs rounded opacity-50">Stop</button>
-      <button id="sysBtn" class="px-3 py-2 bg-purple-600 text-white text-xs rounded">Enable System Audio</button>
+
+      <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-xs rounded opacity-50">
+        Stop
+      </button>
+
+      <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-xs rounded opacity-50">
+        System Audio
+      </button>
     </div>
 
     <div id="audioStatus" class="text-xs mt-2 text-gray-600"></div>
 
-    <!-- Instructions -->
+    <!-- INSTRUCTIONS -->
     <h3 class="font-semibold mt-6 mb-2">Custom Instructions</h3>
-
-    <textarea
-      id="instructionsBox"
-      rows="6"
-      class="w-full border p-2 text-xs bg-white rounded"
-      placeholder="Write instructions for ChatGPT (role, tone, context...)"
-    ></textarea>
-
+    <textarea id="instructionsBox" rows="5" class="w-full border p-2 text-xs bg-white rounded"></textarea>
     <div id="instrStatus" class="text-xs mt-1 text-gray-600"></div>
 
-    <!-- Resume Upload -->
+    <!-- RESUME -->
     <h3 class="font-semibold mt-6 mb-2">Resume Upload</h3>
-    <input type="file" id="resumeInput" class="text-xs" />
+    <input type="file" id="resumeInput" class="text-xs">
     <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
 
   </div>
 
-  <!-- RIGHT COLUMN -->
+  <!-- RIGHT PANEL -->
   <div class="w-2/3 p-6 overflow-y-auto">
     <h3 class="text-lg font-semibold mb-2">ChatGPT Response</h3>
     <div id="responseBox"></div>
   </div>
-
 </div>
 
 <script src="/js/app.js"></script>

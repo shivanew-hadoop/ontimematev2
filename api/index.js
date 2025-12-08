@@ -7,9 +7,10 @@ export const config = { runtime: "nodejs" };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// ---------------------------------------------
-// Helpers
-// ---------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* HELPERS                                                                    */
+/* -------------------------------------------------------------------------- */
+
 function setCors(req, res) {
   const origin = req.headers.origin || "*";
   res.setHeader("Access-Control-Allow-Origin", origin);
@@ -25,7 +26,7 @@ function readJson(req) {
     req.on("end", () => {
       try {
         resolve(body ? JSON.parse(body) : {});
-      } catch (e) {
+      } catch {
         reject(new Error("Invalid JSON"));
       }
     });
@@ -56,6 +57,7 @@ function readMultipart(req) {
 
     bb.on("finish", () => resolve({ fields, file }));
     bb.on("error", reject);
+
     req.pipe(bb);
   });
 }
@@ -70,15 +72,16 @@ function originFromReq(req) {
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  const yyyy = dt.getFullYear();
-  const mm = String(dt.getMonth() + 1).padStart(2, "0");
-  const dd = String(dt.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
-// ---------------------------------------------
-// USER TOKEN HELPER
-// ---------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* USER SESSION HELPER                                                        */
+/* -------------------------------------------------------------------------- */
+
 async function getUserFromBearer(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
@@ -90,15 +93,17 @@ async function getUserFromBearer(req) {
 
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
+
   if (error) return { ok: false, error: error.message };
   if (!data?.user) return { ok: false, error: "Invalid session" };
 
   return { ok: true, user: data.user, access_token: token };
 }
 
-// ---------------------------------------------
-// MAIN HANDLER
-// ---------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* MAIN HANDLER                                                               */
+/* -------------------------------------------------------------------------- */
+
 export default async function handler(req, res) {
   try {
     setCors(req, res);
@@ -107,9 +112,9 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "http://localhost");
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
-    // ---------------------------------------------
-    // HEALTH CHECK
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* HEALTH CHECK                                                           */
+    /* ---------------------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({
         ok: true,
@@ -129,16 +134,16 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------------------------------------------
-    // AUTH: SIGNUP
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* AUTH: SIGNUP                                                           */
+    /* ---------------------------------------------------------------------- */
     if (path === "auth/signup") {
       if (req.method !== "POST")
         return res.status(405).json({ error: "Method not allowed" });
 
       const { name, phone, email, password } = await readJson(req);
       if (!name || !email || !password)
-        return res.status(400).json({ error: "Missing required fields" });
+        return res.status(400).json({ error: "Missing fields" });
 
       const sb = supabaseAnon();
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -150,10 +155,8 @@ export default async function handler(req, res) {
       });
       if (error) return res.status(400).json({ error: error.message });
 
-      const userId = data?.user?.id;
-
       await supabaseAdmin().from("user_profiles").insert({
-        id: userId,
+        id: data?.user?.id,
         name,
         phone: phone || "",
         email,
@@ -162,22 +165,22 @@ export default async function handler(req, res) {
         created_at: new Date().toISOString()
       });
 
-      return res.status(200).json({
+      return res.json({
         ok: true,
-        message: "Account created. Verify email and wait for approval."
+        message: "Account created. Verify email + wait for approval."
       });
     }
 
-    // ---------------------------------------------
-    // AUTH: LOGIN (ADMIN + USER)
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* AUTH: LOGIN (Admin + User)                                            */
+    /* ---------------------------------------------------------------------- */
     if (path === "auth/login") {
       if (req.method !== "POST")
         return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
-      // ADMIN LOGIN
+      // Admin
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
 
@@ -185,7 +188,7 @@ export default async function handler(req, res) {
         const token = `ADMIN::${adminEmail}::${Math.random()
           .toString(36)
           .slice(2)}`;
-        return res.status(200).json({
+        return res.json({
           ok: true,
           session: {
             is_admin: true,
@@ -195,7 +198,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // USER LOGIN
+      // Normal user login
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({
         email,
@@ -205,9 +208,8 @@ export default async function handler(req, res) {
 
       const user = data.user;
 
-      if (!user.email_confirmed_at) {
+      if (!user.email_confirmed_at)
         return res.status(403).json({ error: "Email not verified yet" });
-      }
 
       const profile = await supabaseAdmin()
         .from("user_profiles")
@@ -221,7 +223,7 @@ export default async function handler(req, res) {
           .json({ error: "Admin has not approved your account yet" });
       }
 
-      return res.status(200).json({
+      return res.json({
         ok: true,
         session: {
           is_admin: false,
@@ -231,28 +233,25 @@ export default async function handler(req, res) {
       });
     }
 
-    // ---------------------------------------------
-    // AUTH: LOGOUT
-    // ---------------------------------------------
-    if (path === "auth/logout") return res.status(200).json({ ok: true });
+    /* ---------------------------------------------------------------------- */
+    /* AUTH: LOGOUT                                                           */
+    /* ---------------------------------------------------------------------- */
+    if (path === "auth/logout") return res.json({ ok: true });
 
-    // ---------------------------------------------
-    // AUTH: FORGOT
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* AUTH: FORGOT PASSWORD                                                  */
+    /* ---------------------------------------------------------------------- */
     if (path === "auth/forgot") {
-      if (req.method !== "POST")
-        return res.status(405).json({ error: "Method not allowed" });
-
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
 
       await supabaseAnon().auth.resetPasswordForEmail(email, { redirectTo });
-      return res.status(200).json({ ok: true });
+      return res.json({ ok: true });
     }
 
-    // ---------------------------------------------
-    // USER: PROFILE
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* USER: PROFILE                                                          */
+    /* ---------------------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -263,55 +262,41 @@ export default async function handler(req, res) {
         .eq("id", gate.user.id)
         .single();
 
-      return res.status(200).json({
+      return res.json({
         ok: true,
         user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
       });
     }
 
-    // ============================================================
-    // USER: DEDUCT CREDITS (NEW — Rule A: 1 credit per sec)
-    // ============================================================
-    if (path === "user/deduct") {
+    /* ---------------------------------------------------------------------- */
+    /* USER: DEDUCT 1 CREDIT (Rule A - per second)                            */
+    /* ---------------------------------------------------------------------- */
+    if (path === "user/deduct1") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      const { seconds } = await readJson(req);
-      const sec = Number(seconds || 1);
-
       const sb = supabaseAdmin();
 
-      // fetch current credits
       const { data: row } = await sb
         .from("user_profiles")
         .select("credits")
         .eq("id", gate.user.id)
         .single();
 
-      const current = Number(row?.credits || 0);
-      if (current <= 0) {
-        return res.status(200).json({ ok: false, stop: true, credits: 0 });
-      }
+      let current = Number(row?.credits || 0);
+      let remaining = Math.max(0, current - 1);
 
-      const newCredits = Math.max(0, current - sec);
-
-      const { data: updated } = await sb
+      await sb
         .from("user_profiles")
-        .update({ credits: newCredits })
-        .eq("id", gate.user.id)
-        .select()
-        .single();
+        .update({ credits: remaining })
+        .eq("id", gate.user.id);
 
-      return res.status(200).json({
-        ok: newCredits > 0,
-        stop: newCredits <= 0,
-        credits: newCredits
-      });
+      return res.json({ ok: remaining > 0, remaining });
     }
 
-    // ---------------------------------------------
-    // ADMIN: LIST USERS
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* ADMIN: LIST USERS                                                      */
+    /* ---------------------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -321,12 +306,12 @@ export default async function handler(req, res) {
         .select("id,name,email,phone,approved,credits,created_at")
         .order("created_at", { ascending: false });
 
-      return res.status(200).json({ users: data });
+      return res.json({ users: data });
     }
 
-    // ---------------------------------------------
-    // ADMIN: APPROVE USER
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* ADMIN: APPROVE USER                                                    */
+    /* ---------------------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -340,19 +325,19 @@ export default async function handler(req, res) {
         .select()
         .single();
 
-      return res.status(200).json({ ok: true, user: data });
+      return res.json({ ok: true, user: data });
     }
 
-    // ---------------------------------------------
-    // ADMIN: MODIFY CREDITS
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* ADMIN: MODIFY CREDITS                                                  */
+    /* ---------------------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
       const { user_id, delta } = await readJson(req);
-      const sb = supabaseAdmin();
 
+      const sb = supabaseAdmin();
       const { data: row } = await sb
         .from("user_profiles")
         .select("credits")
@@ -368,26 +353,25 @@ export default async function handler(req, res) {
         .select()
         .single();
 
-      return res.status(200).json({ ok: true, credits: data.credits });
+      return res.json({ ok: true, credits: data.credits });
     }
 
-    // ---------------------------------------------
-    // RESUME: EXTRACT
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* RESUME EXTRACT                                                         */
+    /* ---------------------------------------------------------------------- */
     if (path === "resume/extract") {
       const { file } = await readMultipart(req);
-      return res
-        .status(200)
-        .json({ text: file?.buffer?.toString("utf8") || "" });
+      return res.json({ text: file?.buffer?.toString("utf8") || "" });
     }
 
-    // ---------------------------------------------
-    // TRANSCRIBE (WHISPER)
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* TRANSCRIBE (WHISPER)                                                   */
+    /* ---------------------------------------------------------------------- */
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
+
       if (!file?.buffer || file.buffer.length < 2000)
-        return res.status(200).json({ text: "" });
+        return res.json({ text: "" });
 
       const blob = new Blob([file.buffer], { type: file.mime });
 
@@ -399,12 +383,12 @@ export default async function handler(req, res) {
         temperature: 0
       });
 
-      return res.status(200).json({ text: out.text || "" });
+      return res.json({ text: out.text || "" });
     }
 
-    // ---------------------------------------------
-    // CHAT: STREAM SEND
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* CHAT SEND (STREAM)                                                     */
+    /* ---------------------------------------------------------------------- */
     if (path === "chat/send") {
       const { prompt, instructions, resumeText } = await readJson(req);
       if (!prompt)
@@ -441,16 +425,16 @@ export default async function handler(req, res) {
       return res.end();
     }
 
-    // ---------------------------------------------
-    // CHAT RESET
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* CHAT RESET                                                             */
+    /* ---------------------------------------------------------------------- */
     if (path === "chat/reset") {
-      return res.status(200).json({ ok: true, message: "chat reset" });
+      return res.json({ ok: true, message: "chat reset" });
     }
 
-    // ---------------------------------------------
-    // FALLBACK
-    // ---------------------------------------------
+    /* ---------------------------------------------------------------------- */
+    /* FALLBACK                                                               */
+    /* ---------------------------------------------------------------------- */
     return res.status(404).json({ error: `No route: /api/${path}` });
 
   } catch (err) {
