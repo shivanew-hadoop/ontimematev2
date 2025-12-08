@@ -1,14 +1,15 @@
 {
   "version": 2,
   "routes": [
+    { "src": "^/api$", "dest": "/api/index.js" },
+    { "src": "^/api/(.*)$", "dest": "/api/index.js?path=$1" },
+
     { "src": "^/admin$", "dest": "/frontend/pages/admin.html" },
     { "src": "^/app$", "dest": "/frontend/pages/app.html" },
     { "src": "^/auth$", "dest": "/frontend/pages/auth.html" },
 
     { "src": "^/js/(.*)$", "dest": "/frontend/js/$1" },
-    { "src": "^/(.*)$", "dest": "/frontend/pages/$1" },
 
-    { "src": "^/api/(.*)$", "dest": "/api/index.js?path=$1" },
-    { "src": "^/api$", "dest": "/api/index.js" }
+    { "src": "^/(.*)$", "dest": "/frontend/pages/$1" }
   ]
 }
