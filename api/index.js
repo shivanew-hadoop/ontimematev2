@@ -62,29 +62,26 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host)
-    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
-    dt.getDate()
-  ).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
 async function getUserFromBearer(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
-
   if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
 
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
   if (error) return { ok: false, error: error.message };
   if (!data?.user) return { ok: false, error: "Invalid session" };
+
   return { ok: true, user: data.user, access_token: token };
 }
 
@@ -112,6 +109,18 @@ export default async function handler(req, res) {
     // HEALTH
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
+    }
+
+    // ENV CHECK
+    if (req.method === "GET" && path === "envcheck") {
+      return res.status(200).json({
+        hasSUPABASE_URL: !!process.env.SUPABASE_URL,
+        hasSUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
+        hasSUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+        hasOPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+        hasADMIN_EMAIL: !!process.env.ADMIN_EMAIL,
+        hasADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD
+      });
     }
 
     // AUTH: SIGNUP
@@ -144,15 +153,15 @@ export default async function handler(req, res) {
       return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
     }
 
-    // AUTH: LOGIN
+    // AUTH: LOGIN (returns refresh_token to avoid expired JWT issues)
     if (path === "auth/login") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
+      // Admin
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
-
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
         const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
         return res.json({
@@ -161,6 +170,7 @@ export default async function handler(req, res) {
         });
       }
 
+      // User
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return res.status(401).json({ error: error.message });
@@ -174,14 +184,39 @@ export default async function handler(req, res) {
         .eq("id", user.id)
         .single();
 
-      if (!profile.data?.approved) return res.status(403).json({ error: "Admin has not approved your account yet" });
+      if (!profile.data?.approved) {
+        return res.status(403).json({ error: "Admin has not approved your account yet" });
+      }
 
       return res.json({
         ok: true,
         session: {
           is_admin: false,
           access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,       // IMPORTANT
+          expires_at: data.session.expires_at,             // IMPORTANT
           user: { id: user.id, email: user.email }
+        }
+      });
+    }
+
+    // AUTH: REFRESH (fixes expired JWT)
+    if (path === "auth/refresh") {
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+      const { refresh_token } = await readJson(req);
+      if (!refresh_token) return res.status(400).json({ error: "Missing refresh_token" });
+
+      const sb = supabaseAnon();
+      const { data, error } = await sb.auth.refreshSession({ refresh_token });
+      if (error) return res.status(401).json({ error: error.message });
+
+      return res.json({
+        ok: true,
+        session: {
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at
         }
       });
     }
@@ -210,7 +245,7 @@ export default async function handler(req, res) {
       return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
     }
 
-    // USER: DEDUCT (BATCH)
+    // USER: DEDUCT (batch)
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -251,13 +286,11 @@ export default async function handler(req, res) {
     // TRANSCRIBE
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
-      if (!file?.buffer || file.buffer.length < 2000) return res.json({ text: "" });
+      if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
 
       try {
-        // Use filename extension to help decoding
         const filename = file.filename || "sys.webm";
-        const mime = (file.mime || "audio/webm").split(";")[0]; // strip codecs=...
-
+        const mime = (file.mime || "audio/webm").split(";")[0]; // strip codecs
         const audioFile = await toFile(file.buffer, filename, { type: mime });
 
         const out = await openai.audio.transcriptions.create({
@@ -275,7 +308,7 @@ export default async function handler(req, res) {
       }
     }
 
-    // CHAT SEND (STREAM) + HISTORY
+    // CHAT SEND (stream + history + resume)
     if (path === "chat/send") {
       const { prompt, instructions, resumeText, history } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
@@ -289,7 +322,6 @@ export default async function handler(req, res) {
         messages.push({ role: "system", content: `RESUME:\n${String(resumeText).slice(0, 12000)}` });
       }
 
-      // session memory from frontend (resets on refresh/logout)
       for (const m of safeHistory(history)) messages.push(m);
 
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
@@ -315,7 +347,7 @@ export default async function handler(req, res) {
 
     if (path === "chat/reset") return res.json({ ok: true });
 
-    // ADMIN endpoints unchanged (keep yours if needed)
+    // ADMIN: users
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -328,6 +360,7 @@ export default async function handler(req, res) {
       return res.json({ users: data });
     }
 
+    // ADMIN: approve
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -344,6 +377,7 @@ export default async function handler(req, res) {
       return res.json({ ok: true, user: data });
     }
 
+    // ADMIN: credits
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });

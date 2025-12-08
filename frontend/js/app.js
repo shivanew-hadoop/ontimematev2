@@ -24,11 +24,10 @@ const bannerTop = document.getElementById("bannerTop");
 let session = null;
 let isRunning = false;
 
-// MIC recognition
 let recognition = null;
 let blockMicUntil = 0;
 
-// System audio (segment-based MediaRecorder)
+// System audio (segment recording)
 let sysStream = null;
 let sysTrack = null;
 let sysRecorder = null;
@@ -38,29 +37,35 @@ let sysQueue = [];
 let sysUploading = false;
 let sysAbort = null;
 
-// Transcript timeline
+// transcript timeline
 let timeline = [];
 
-// Credits (batched)
+// credits
 let creditTimer = null;
 let lastCreditAt = 0;
 
-// Chat streaming cancellation
+// chat stream cancellation
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
 
-// In-session memory (reset on refresh/logout automatically)
-let chatHistory = []; // [{role:"user"|"assistant", content:string}]
-const MAX_HISTORY_MESSAGES = 8; // last 4 turns
+// in-session memory (clears on refresh/logout automatically)
+let chatHistory = [];
+const MAX_HISTORY_MESSAGES = 8;       // last 4 turns
 const MAX_HISTORY_CHARS_EACH = 1500;
+
+// resume in memory (NOT localStorage)
+let resumeTextMem = "";
+
+// system transcript dedupe
+let lastSysTail = "";
 
 //--------------------------------------------------------------
 // CONFIG
 //--------------------------------------------------------------
-const SYS_SEGMENT_MS = 2500;      // each segment becomes a standalone file (Chrome-safe)
-const SYS_MIN_BYTES = 5000;       // ignore tiny segments
-const CREDIT_BATCH_SEC = 5;       // every 5 seconds
+const SYS_SEGMENT_MS = 6500;          // longer improves accuracy
+const SYS_MIN_BYTES = 9000;
+const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
 //--------------------------------------------------------------
@@ -85,6 +90,10 @@ function setStatus(el, text, cls = "") {
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
+function authHeaders() {
+  const token = session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
   promptBox.scrollTop = promptBox.scrollHeight;
@@ -95,16 +104,72 @@ function addToTimeline(txt) {
   timeline.push({ t: Date.now(), text: txt });
   updateTranscript();
 }
-function authHeaders() {
-  const token = session?.access_token;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+
+//--------------------------------------------------------------
+// TOKEN REFRESH (fix expired JWT)
+//--------------------------------------------------------------
+function isTokenNearExpiry() {
+  const exp = Number(session?.expires_at || 0);
+  if (!exp) return false;
+  const now = Math.floor(Date.now() / 1000);
+  return exp - now < 60; // refresh if <60s remaining
+}
+
+async function refreshAccessToken() {
+  const refresh_token = session?.refresh_token;
+  if (!refresh_token) throw new Error("Missing refresh_token. Please login again.");
+
+  const res = await fetch("/api?path=auth/refresh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ refresh_token })
+  });
+
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Refresh failed");
+
+  session.access_token = data.session.access_token;
+  session.refresh_token = data.session.refresh_token;
+  session.expires_at = data.session.expires_at;
+
+  localStorage.setItem("session", JSON.stringify(session));
+}
+
+async function apiFetch(path, opts = {}, needAuth = true) {
+  if (needAuth) {
+    if (isTokenNearExpiry()) {
+      try { await refreshAccessToken(); } catch (e) { console.error(e); }
+    }
+  }
+
+  const headers = { ...(opts.headers || {}) };
+  if (needAuth) Object.assign(headers, authHeaders());
+
+  const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
+
+  // retry once on expired/invalid token
+  if (needAuth && res.status === 401) {
+    const t = await res.text().catch(() => "");
+    const looksExpired =
+      t.includes("token is expired") ||
+      t.includes("invalid JWT") ||
+      t.includes("Missing token");
+
+    if (looksExpired) {
+      await refreshAccessToken();
+      const headers2 = { ...(opts.headers || {}), ...authHeaders() };
+      return fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers: headers2 });
+    }
+  }
+
+  return res;
 }
 
 //--------------------------------------------------------------
 // Load USER PROFILE
 //--------------------------------------------------------------
 async function loadUserProfile() {
-  const res = await fetch("/api?path=user/profile", { headers: authHeaders() });
+  const res = await apiFetch("user/profile", {}, true);
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Failed to load profile");
 
@@ -126,7 +191,7 @@ instructionsBox.addEventListener("input", () => {
 });
 
 //--------------------------------------------------------------
-// Resume Upload
+// Resume Upload (memory only)
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
@@ -137,11 +202,11 @@ resumeInput?.addEventListener("change", async () => {
   const fd = new FormData();
   fd.append("file", file);
 
-  const res = await fetch("/api?path=resume/extract", { method: "POST", body: fd });
+  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
   const data = await res.json().catch(() => ({}));
 
-  localStorage.setItem("resumeText", data.text || "");
-  resumeStatus.textContent = "Resume extracted.";
+  resumeTextMem = String(data.text || "");
+  resumeStatus.textContent = resumeTextMem ? "Resume extracted (in session)." : "Resume empty";
 });
 
 //--------------------------------------------------------------
@@ -189,9 +254,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — segment recorder (Chrome-safe)
-// Reason: Chrome timeslice chunks may be non-decodable standalone.
-// Fix: stop->upload complete file->restart each segment.
+// SYSTEM AUDIO — segment recorder + basic dedupe
 //--------------------------------------------------------------
 function pickBestMimeType() {
   const candidates = [
@@ -225,6 +288,8 @@ function stopSystemAudioOnly() {
   }
   sysStream = null;
   sysTrack = null;
+
+  lastSysTail = "";
 }
 
 async function enableSystemAudio() {
@@ -260,14 +325,13 @@ function startSystemSegmentRecorder() {
 
   const audioOnly = new MediaStream([sysTrack]);
   const mimeType = pickBestMimeType();
-
   sysSegmentChunks = [];
 
   try {
     sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
   } catch (e) {
     console.error(e);
-    setStatus(audioStatus, "MediaRecorder failed. Try Chrome TAB capture.", "text-red-600");
+    setStatus(audioStatus, "MediaRecorder failed. Use Chrome TAB capture.", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
@@ -288,14 +352,13 @@ function startSystemSegmentRecorder() {
       drainSysQueue();
     }
 
-    // restart recorder for next segment (this is the Chrome-safe trick)
     if (isRunning && sysTrack && sysTrack.readyState === "live") {
       startSystemSegmentRecorder();
     }
   };
 
   try {
-    sysRecorder.start(); // no timeslice
+    sysRecorder.start();
   } catch (e) {
     console.error(e);
     setStatus(audioStatus, "System audio start failed", "text-red-600");
@@ -303,7 +366,6 @@ function startSystemSegmentRecorder() {
     return;
   }
 
-  // force segment boundary
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
   sysSegmentTimer = setInterval(() => {
     if (!isRunning) return;
@@ -326,23 +388,54 @@ async function drainSysQueue() {
   }
 }
 
+// removes duplicated beginnings like: "Artificial intelligence..." repeating
+function dedupeSystemText(newText) {
+  const t = normalize(newText);
+  if (!t) return "";
+
+  const tail = lastSysTail;
+  if (!tail) {
+    lastSysTail = t.split(" ").slice(-12).join(" ");
+    return t;
+  }
+
+  // find overlap of up to last 10 words
+  const tailWords = tail.split(" ");
+  const newWords = t.split(" ");
+
+  let bestK = 0;
+  const maxK = Math.min(10, tailWords.length, newWords.length);
+  for (let k = maxK; k >= 3; k--) {
+    const tailEnd = tailWords.slice(-k).join(" ").toLowerCase();
+    const newStart = newWords.slice(0, k).join(" ").toLowerCase();
+    if (tailEnd === newStart) {
+      bestK = k;
+      break;
+    }
+  }
+
+  const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
+
+  // update tail
+  const merged = (tail + " " + cleaned).trim();
+  lastSysTail = merged.split(" ").slice(-12).join(" ");
+
+  return normalize(cleaned);
+}
+
 async function transcribeSysBlob(blob) {
   const fd = new FormData();
 
   const type = (blob.type || "").toLowerCase();
-  const ext =
-    type.includes("ogg") ? "ogg" :
-    "webm";
-
+  const ext = type.includes("ogg") ? "ogg" : "webm";
   fd.append("file", blob, `sys.${ext}`);
 
-  const res = await fetch("/api?path=transcribe", {
+  const res = await apiFetch("transcribe", {
     method: "POST",
     body: fd,
     signal: sysAbort?.signal
-  });
+  }, false);
 
-  // show real error (if backend returns 400, you see 400 now)
   if (!res.ok) {
     const t = await res.text().catch(() => "");
     console.error("transcribe failed", res.status, t);
@@ -350,19 +443,20 @@ async function transcribeSysBlob(blob) {
   }
 
   const data = await res.json().catch(() => ({}));
-  const txt = normalize(data.text || "");
-  if (txt) addToTimeline(txt);
+  const cleaned = dedupeSystemText(data.text || "");
+  if (cleaned) addToTimeline(cleaned);
 }
 
 //--------------------------------------------------------------
-// CREDITS — batch deduct every 5 seconds
+// Credits deduction (batch)
 //--------------------------------------------------------------
 async function deductCredits(delta) {
-  const res = await fetch("/api?path=user/deduct", {
+  const res = await apiFetch("user/deduct", {
     method: "POST",
-    headers: { "Content-Type": "application/json", ...authHeaders() },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ delta })
-  });
+  }, true);
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Deduct failed (${res.status})`);
   return data;
@@ -377,11 +471,10 @@ function startCreditTicking() {
 
     const now = Date.now();
     const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
-    if (elapsedSec < CREDIT_BATCH_SEC) return;
+    if (elapsedSec < 5) return;
 
     const batchSec = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
     const delta = batchSec * CREDITS_PER_SEC;
-
     lastCreditAt += batchSec * 1000;
 
     try {
@@ -400,22 +493,12 @@ function startCreditTicking() {
 }
 
 //--------------------------------------------------------------
-// CHAT STREAM CONTROL (Reset stops stream only; Send overrides stream)
-// + In-session memory (history) passed to backend
+// Chat streaming + in-session memory + resume
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
   chatStreamActive = false;
-}
-
-function compactHistoryForRequest() {
-  // last MAX_HISTORY_MESSAGES only; clamp very large messages
-  const tail = chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
-    role: m.role,
-    content: String(m.content || "").slice(0, MAX_HISTORY_CHARS_EACH)
-  }));
-  return tail;
 }
 
 function pushHistory(role, content) {
@@ -425,8 +508,14 @@ function pushHistory(role, content) {
   if (chatHistory.length > 50) chatHistory = chatHistory.slice(-50);
 }
 
+function compactHistoryForRequest() {
+  return chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
+    role: m.role,
+    content: String(m.content || "").slice(0, MAX_HISTORY_CHARS_EACH)
+  }));
+}
+
 async function startChatStreaming(prompt) {
-  // Stop previous stream immediately, then start new
   abortChatStreamOnly();
 
   chatAbort = new AbortController();
@@ -436,14 +525,13 @@ async function startChatStreaming(prompt) {
   responseBox.textContent = "";
   setStatus(sendStatus, "Sending…", "text-orange-600");
 
-  // store user message in history immediately
   pushHistory("user", prompt);
 
   const body = {
     prompt,
     history: compactHistoryForRequest(),
     instructions: localStorage.getItem("instructions") || "",
-    resumeText: localStorage.getItem("resumeText") || ""
+    resumeText: resumeTextMem || ""
   };
 
   let pending = "";
@@ -458,12 +546,12 @@ async function startChatStreaming(prompt) {
   };
 
   try {
-    const res = await fetch("/api?path=chat/send", {
+    const res = await apiFetch("chat/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
       signal: chatAbort.signal
-    });
+    }, false);
 
     if (!res.ok) {
       const t = await res.text().catch(() => "");
@@ -473,7 +561,6 @@ async function startChatStreaming(prompt) {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
 
-    // reduce Chrome UI slowness
     flushTimer = setInterval(() => {
       if (!chatStreamActive || mySeq !== chatStreamSeq) return;
       flush();
@@ -482,45 +569,25 @@ async function startChatStreaming(prompt) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-
       if (!chatStreamActive || mySeq !== chatStreamSeq) break;
-
       pending += decoder.decode(value);
     }
 
     if (chatStreamActive && mySeq === chatStreamSeq) {
       flush();
       setStatus(sendStatus, "Done", "text-green-600");
-      // store assistant answer only when stream completes normally
       pushHistory("assistant", finalAnswer);
     } else {
       setStatus(sendStatus, "Interrupted", "text-orange-600");
-      // interrupted -> remove last user entry (avoid half-context)
-      // keep it simple: pop last "user" if it matches prompt
-      for (let i = chatHistory.length - 1; i >= 0; i--) {
-        if (chatHistory[i].role === "user" && chatHistory[i].content === normalize(prompt)) {
-          chatHistory.splice(i, 1);
-          break;
-        }
-      }
     }
   } catch (e) {
-    if (e?.name === "AbortError") {
-      setStatus(sendStatus, "Interrupted", "text-orange-600");
-      // rollback last user entry on abort
-      for (let i = chatHistory.length - 1; i >= 0; i--) {
-        if (chatHistory[i].role === "user" && chatHistory[i].content === normalize(prompt)) {
-          chatHistory.splice(i, 1);
-          break;
-        }
-      }
-    } else {
+    if (e?.name === "AbortError") setStatus(sendStatus, "Interrupted", "text-orange-600");
+    else {
       console.error(e);
       setStatus(sendStatus, "Failed", "text-red-600");
     }
   } finally {
     if (flushTimer) clearInterval(flushTimer);
-    pending = "";
   }
 }
 
@@ -531,7 +598,8 @@ async function startAll() {
   hideBanner();
   if (isRunning) return;
 
-  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+
   timeline = [];
   updateTranscript();
 
@@ -582,7 +650,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// SEND (2nd Send cancels 1st automatically)
+// SEND / CLEAR / RESET
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -592,7 +660,6 @@ sendBtn.onclick = async () => {
 
   blockMicUntil = Date.now() + 700;
 
-  // clear transcript for next question (existing behavior)
   timeline = [];
   promptBox.value = "";
   updateTranscript();
@@ -600,9 +667,6 @@ sendBtn.onclick = async () => {
   await startChatStreaming(msg);
 };
 
-//--------------------------------------------------------------
-// CLEAR transcript only
-//--------------------------------------------------------------
 clearBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
@@ -610,25 +674,19 @@ clearBtn.onclick = () => {
   setStatus(sendStatus, "Transcript cleared", "text-green-600");
 };
 
-//--------------------------------------------------------------
-// RESET (your exact requirement)
-// - stops ChatGPT streaming immediately
-// - clears response box
-// - does NOT stop mic/system/credits
-//--------------------------------------------------------------
 resetBtn.onclick = async () => {
   abortChatStreamOnly();
   responseBox.textContent = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
-  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 };
 
 //--------------------------------------------------------------
-// LOGOUT (must reset memory)
+// LOGOUT (hard reset all memory)
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
-  // reset in-session memory before redirect
   chatHistory = [];
+  resumeTextMem = "";
   abortChatStreamOnly();
   stopAll();
   localStorage.removeItem("session");
@@ -636,24 +694,28 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// PAGE LOAD
-// Memory resets automatically on hard refresh (JS memory cleared)
+// PAGE LOAD (memory resets automatically because JS reloads)
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  // Ensure memory is clean per fresh page load
+  // if older session has no refresh_token, force relogin for stability
+  if (!session.refresh_token) {
+    localStorage.removeItem("session");
+    return (window.location.href = "/auth?tab=login");
+  }
+
   chatHistory = [];
+  resumeTextMem = "";
+  if (resumeStatus) resumeStatus.textContent = "Resume cleared (refresh).";
 
   await loadUserProfile();
-  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
+
+  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
   timeline = [];
   updateTranscript();
-
-  localStorage.removeItem("resumeText");
-  if (resumeStatus) resumeStatus.textContent = "Resume cleared";
 });
 
 //--------------------------------------------------------------
