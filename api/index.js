@@ -78,6 +78,16 @@ function ymd(dateStr) {
   ).padStart(2, "0")}`;
 }
 
+function inferMime(filename = "", fallback = "application/octet-stream") {
+  const f = filename.toLowerCase();
+  if (f.endsWith(".webm")) return "audio/webm";
+  if (f.endsWith(".ogg")) return "audio/ogg";
+  if (f.endsWith(".wav")) return "audio/wav";
+  if (f.endsWith(".mp3")) return "audio/mpeg";
+  if (f.endsWith(".m4a")) return "audio/mp4";
+  return fallback;
+}
+
 /* -------------------------------------------------------------------------- */
 /* USER SESSION HELPER                                                        */
 /* -------------------------------------------------------------------------- */
@@ -213,9 +223,7 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved) {
-        return res
-          .status(403)
-          .json({ error: "Admin has not approved your account yet" });
+        return res.status(403).json({ error: "Admin has not approved your account yet" });
       }
 
       return res.json({
@@ -374,48 +382,20 @@ export default async function handler(req, res) {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* TRANSCRIBE (SYSTEM AUDIO)                                              */
-    /* - Node-safe upload via toFile                                          */
-    /* - Silence reject to stop hallucinations + reduce cost                  */
+    /* TRANSCRIBE (System Audio)                                              */
+    /* Accepts webm/ogg/wav, sends with Node-safe toFile                       */
     /* ---------------------------------------------------------------------- */
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
 
-      if (!file?.buffer || file.buffer.length < 2000)
+      if (!file?.buffer || file.buffer.length < 1500)
         return res.json({ text: "" });
 
-      // Silence reject (WAV PCM16 typical)
       try {
-        const buf = file.buffer;
-        if ((file.mime || "").includes("wav") && buf.length > 60) {
-          const start = 44; // wav header
-          let sumAbs = 0;
-          let count = 0;
+        const filename = file.filename || "sys.webm";
+        const mime = file.mime || inferMime(filename, "audio/webm");
 
-          // sample every 10th sample for speed
-          for (let i = start; i + 1 < buf.length; i += 20) {
-            const v = buf.readInt16LE(i);
-            sumAbs += Math.abs(v);
-            count++;
-          }
-
-          const avgAbs = sumAbs / Math.max(1, count);
-
-          // Tune 80–250. Higher => stricter silence rejection
-          if (avgAbs < 140) {
-            return res.json({ text: "" });
-          }
-        }
-      } catch {
-        // ignore silence check failures
-      }
-
-      try {
-        const audioFile = await toFile(
-          file.buffer,
-          file.filename || "audio.wav",
-          { type: file.mime || "audio/wav" }
-        );
+        const audioFile = await toFile(file.buffer, filename, { type: mime });
 
         const out = await openai.audio.transcriptions.create({
           file: audioFile,
@@ -427,7 +407,9 @@ export default async function handler(req, res) {
 
         return res.json({ text: out.text || "" });
       } catch (e) {
-        return res.status(500).json({ error: e?.message || String(e) });
+        // Preserve OpenAI status when available (e.g., 400)
+        const status = e?.status || e?.response?.status || 500;
+        return res.status(status).json({ error: e?.message || String(e) });
       }
     }
 

@@ -3,15 +3,16 @@
 //--------------------------------------------------------------
 const BILL_EVERY_MS = 5000;          // batch interval (5s)
 const CREDITS_PER_SECOND = 1;        // 1 credit per second
-const SYS_FLUSH_EVERY_MS = 1100;     // system audio flush cadence
-const SYS_FLUSH_TIMER_MS = 1400;
 
-// Silence / hallucination control (tune if needed)
-const SYS_RMS_THRESHOLD = 0.008;     // 0.006–0.012 typical
-const SYS_SILENCE_DROP_MS = 1200;    // if silent > this, drop queued chunks
+// System audio chunk size (tradeoff: lower = faster, higher = more accurate)
+const SYS_RECORDER_SLICE_MS = 2000;  // 2000–3000 recommended
 
 const MAX_INSTR_CHARS = 1200;
 const MAX_RESUME_CHARS = 2500;
+
+// Dedupe tuning
+const DEDUPE_WINDOW_MS = 8000;
+const DUP_TOKEN_OVERLAP = 0.82;      // 0.75–0.90
 
 //--------------------------------------------------------------
 // DOM
@@ -40,17 +41,10 @@ let session = null;
 let isRunning = false;
 let recognition = null;
 
-let audioContext = null;
 let sysStream = null;
-let sysSource = null;
-let sysGain = null;
-let sysProcessor = null;
-let sysSilentGain = null;
-
-let sysChunks = [];
-let lastSysFlushAt = 0;
-let sysFlushInFlight = false;
-let sysFlushTimer = null;
+let sysRecorder = null;
+let sysQueue = [];
+let sysUploadInFlight = false;
 
 let timeline = [];
 let blockMicUntil = 0;
@@ -59,10 +53,9 @@ let blockMicUntil = 0;
 let billingTimer = null;
 let billLastAt = 0;
 
-// anti-hallucination / dedupe
+// dedupe
 let lastAcceptedText = "";
 let lastAcceptedAt = 0;
-let lastNonSilentAt = 0;
 
 //--------------------------------------------------------------
 // Helpers
@@ -99,7 +92,6 @@ function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
-
 function mustHaveSessionOrRedirect() {
   if (session?.access_token) return true;
   localStorage.removeItem("session");
@@ -107,23 +99,46 @@ function mustHaveSessionOrRedirect() {
   return false;
 }
 
-function rmsOfFloat32(a) {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) sum += a[i] * a[i];
-  return Math.sqrt(sum / Math.max(1, a.length));
+// token overlap similarity (cheap dedupe)
+function tokenSet(s) {
+  return new Set(
+    normalize(s)
+      .toLowerCase()
+      .split(" ")
+      .filter(Boolean)
+  );
+}
+function overlapRatio(a, b) {
+  const A = tokenSet(a);
+  const B = tokenSet(b);
+  if (!A.size || !B.size) return 0;
+
+  let inter = 0;
+  for (const t of A) if (B.has(t)) inter++;
+  const denom = Math.min(A.size, B.size);
+  return inter / denom;
 }
 
 function shouldAcceptText(txt) {
   txt = normalize(txt);
   if (!txt) return false;
 
-  // basic noise filter
+  // ignore 1-word noise
   const wc = txt.split(" ").filter(Boolean).length;
   if (wc < 2) return false;
 
-  // dedupe (same phrase repeated quickly)
   const now = Date.now();
-  if (txt === lastAcceptedText && (now - lastAcceptedAt) < 5000) return false;
+
+  // strong dedupe: exact repeat in short window
+  if (txt === lastAcceptedText && (now - lastAcceptedAt) < DEDUPE_WINDOW_MS) {
+    return false;
+  }
+
+  // fuzzy dedupe: high overlap with last segment in short window
+  if ((now - lastAcceptedAt) < DEDUPE_WINDOW_MS) {
+    const r = overlapRatio(txt, lastAcceptedText);
+    if (r >= DUP_TOKEN_OVERLAP) return false;
+  }
 
   lastAcceptedText = txt;
   lastAcceptedAt = now;
@@ -232,21 +247,33 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// System Audio
+// System Audio (MediaRecorder-based, avoids corrupted WAV chunks)
 //--------------------------------------------------------------
-async function ensureContext() {
-  if (!audioContext) audioContext = new AudioContext();
-  if (audioContext.state === "suspended") await audioContext.resume();
+function pickBestMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg"
+  ];
+  for (const t of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return ""; // let browser choose
 }
 
 async function enableSystemAudio() {
   if (!isRunning) return;
 
-  await ensureContext();
+  // Stop old system audio if any
+  try { sysRecorder?.stop(); } catch {}
+  sysRecorder = null;
+  sysQueue = [];
+  sysUploadInFlight = false;
 
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: true,  // required for picker UI
       audio: true
     });
   } catch {
@@ -254,150 +281,98 @@ async function enableSystemAudio() {
     return;
   }
 
-  const track = sysStream.getAudioTracks()[0];
-  if (!track) {
-    setStatus(audioStatus, "No audio detected (select Chrome Tab + Share audio)", "text-red-600");
+  const audioTrack = sysStream.getAudioTracks()[0];
+  if (!audioTrack) {
+    setStatus(audioStatus, "No system audio track. Select Chrome Tab + Share audio.", "text-red-600");
+    // stop tracks
+    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
+    sysStream = null;
     return;
   }
 
-  sysSource = audioContext.createMediaStreamSource(sysStream);
-  sysGain = audioContext.createGain();
-  sysGain.gain.value = 1;
+  // Use only the audio track in a clean stream (avoid weird mux)
+  const cleanAudioStream = new MediaStream([audioTrack]);
 
-  sysProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-  sysSilentGain = audioContext.createGain();
-  sysSilentGain.gain.value = 0;
+  const mimeType = pickBestMimeType();
+  try {
+    sysRecorder = new MediaRecorder(cleanAudioStream, mimeType ? { mimeType } : undefined);
+  } catch (e) {
+    console.error("MediaRecorder init failed", e);
+    setStatus(audioStatus, "MediaRecorder failed. Try Chrome Tab capture.", "text-red-600");
+    return;
+  }
 
-  sysSource.connect(sysGain);
-  sysGain.connect(sysProcessor);
-  sysProcessor.connect(sysSilentGain);
-  sysSilentGain.connect(audioContext.destination);
-
-  lastNonSilentAt = 0;
-
-  sysProcessor.onaudioprocess = (ev) => {
+  sysRecorder.ondataavailable = (ev) => {
     if (!isRunning) return;
-
-    const data = ev.inputBuffer.getChannelData(0);
-    const rms = rmsOfFloat32(data);
-
-    if (rms >= SYS_RMS_THRESHOLD) {
-      lastNonSilentAt = Date.now();
-      sysChunks.push(new Float32Array(data));
-    }
-
-    const now = Date.now();
-
-    // flush only when we had non-silent audio recently
-    if (now - lastSysFlushAt >= SYS_FLUSH_EVERY_MS && (now - lastNonSilentAt) <= SYS_SILENCE_DROP_MS) {
-      lastSysFlushAt = now;
-      flushSystemAudio();
-    }
-
-    // if silent for too long, drop queued chunks
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS && sysChunks.length) {
-      sysChunks = [];
-    }
+    if (!ev.data || ev.data.size < 1200) return; // ignore tiny blobs
+    sysQueue.push(ev.data);
+    drainSysQueue();
   };
 
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = setInterval(() => {
-    const now = Date.now();
-    if (!isRunning) return;
-    if (!sysChunks.length) return;
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
-      sysChunks = [];
-      return;
-    }
-    flushSystemAudio();
-  }, SYS_FLUSH_TIMER_MS);
+  sysRecorder.onerror = (e) => {
+    console.error("sysRecorder error", e);
+  };
+
+  sysRecorder.onstop = () => {};
+
+  // Start chunking
+  try {
+    sysRecorder.start(SYS_RECORDER_SLICE_MS);
+  } catch (e) {
+    console.error("sysRecorder start failed", e);
+    setStatus(audioStatus, "System audio start failed", "text-red-600");
+    return;
+  }
 
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
-function float32ToWav(float32, sr) {
-  const int16 = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++)
-    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
+async function drainSysQueue() {
+  if (sysUploadInFlight) return;
+  if (!sysQueue.length) return;
 
-  const buf = new ArrayBuffer(44 + int16.length * 2);
-  const dv = new DataView(buf);
-
-  function w(o, s) {
-    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+  sysUploadInFlight = true;
+  try {
+    while (sysQueue.length && isRunning) {
+      const blob = sysQueue.shift();
+      await transcribeSysBlob(blob);
+    }
+  } finally {
+    sysUploadInFlight = false;
   }
-
-  w(0, "RIFF");
-  dv.setUint32(4, 36 + int16.length * 2, true);
-  w(8, "WAVE");
-  w(12, "fmt ");
-  dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true);
-  dv.setUint16(22, 1, true);
-  dv.setUint32(24, sr, true);
-  dv.setUint32(28, sr * 2, true);
-  dv.setUint16(32, 2, true);
-  dv.setUint16(34, 16, true);
-  w(36, "data");
-  dv.setUint32(40, int16.length * 2, true);
-
-  let off = 44;
-  for (let i = 0; i < int16.length; i++, off += 2)
-    dv.setInt16(off, int16[i], true);
-
-  return new Blob([buf], { type: "audio/wav" });
 }
 
-async function flushSystemAudio() {
-  if (sysFlushInFlight) return;
-  sysFlushInFlight = true;
+async function transcribeSysBlob(blob) {
+  // IMPORTANT: if you play system audio on speakers, mic will also hear it → duplicates.
+  // Use headphones for best results.
 
-  try {
-    const now = Date.now();
+  const fd = new FormData();
 
-    // if silent recently, do not send anything
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
-      sysChunks = [];
-      return;
-    }
+  // filename extension based on mime
+  const type = (blob.type || "").toLowerCase();
+  const ext =
+    type.includes("webm") ? "webm" :
+    type.includes("ogg") ? "ogg" :
+    "webm";
 
-    const chunks = sysChunks;
-    sysChunks = [];
-    if (!chunks.length) return;
+  fd.append("file", blob, `sys.${ext}`);
 
-    const raw = chunks.reduce((acc, c) => {
-      const out = new Float32Array(acc.length + c.length);
-      out.set(acc, 0);
-      out.set(c, acc.length);
-      return out;
-    }, new Float32Array(0));
+  const res = await fetch("/api?path=transcribe", {
+    method: "POST",
+    headers: authHeaders(), // optional but consistent
+    body: fd
+  });
 
-    const wav = float32ToWav(raw, audioContext.sampleRate);
-
-    const fd = new FormData();
-    fd.append("file", wav, "sys.wav");
-
-    const res = await fetch("/api?path=transcribe", {
-      method: "POST",
-      headers: authHeaders(), // optional but consistent
-      body: fd
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("transcribe failed", res.status, errText);
-      return;
-    }
-
-    const data = await res.json();
-    const txt = normalize(data.text || "");
-
-    if (shouldAcceptText(txt)) addToTimeline(txt);
-  } catch (e) {
-    console.error("flushSystemAudio error", e);
-  } finally {
-    sysFlushInFlight = false;
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    console.error("transcribe failed", res.status, errText);
+    return;
   }
+
+  const data = await res.json().catch(() => ({}));
+  const txt = normalize(data.text || "");
+
+  if (shouldAcceptText(txt)) addToTimeline(txt);
 }
 
 //--------------------------------------------------------------
@@ -422,7 +397,6 @@ async function deductCreditsBatch(delta) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `Deduction failed (${res.status})`);
-
   return data;
 }
 
@@ -445,7 +419,6 @@ function startBilling() {
 
     try {
       const out = await deductCreditsBatch(delta);
-
       await loadUserProfile();
 
       if (Number(out.remaining || 0) <= 0) {
@@ -500,15 +473,20 @@ function stopAll() {
   isRunning = false;
 
   try { recognition?.stop(); } catch {}
+  recognition = null;
 
-  if (sysStream) sysStream.getTracks().forEach(t => t.stop());
+  try { sysRecorder?.stop(); } catch {}
+  sysRecorder = null;
+  sysQueue = [];
+  sysUploadInFlight = false;
+
+  if (sysStream) {
+    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
+  }
   sysStream = null;
 
   if (billingTimer) clearInterval(billingTimer);
   billingTimer = null;
-
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = null;
 
   startBtn.disabled = false;
   startBtn.classList.remove("opacity-50");
