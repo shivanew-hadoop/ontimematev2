@@ -172,13 +172,11 @@ export default async function handler(req, res) {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* AUTH: LOGIN (Admin + User)                                            */
+    /* AUTH: LOGIN (Admin + User)                                             */
     /* ---------------------------------------------------------------------- */
     if (path === "auth/login") {
       if (req.method !== "POST")
         return res.status(405).json({ error: "Method not allowed" });
-
-      ensureJson(req);
 
       const { email, password } = await readJson(req);
 
@@ -200,10 +198,7 @@ export default async function handler(req, res) {
 
       // Normal user login
       const sb = supabaseAnon();
-      const { data, error } = await sb.auth.signInWithPassword({
-        email,
-        password
-      });
+      const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return res.status(401).json({ error: error.message });
 
       const user = data.user;
@@ -218,7 +213,9 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved) {
-        return res.status(403).json({ error: "Admin has not approved your account yet" });
+        return res
+          .status(403)
+          .json({ error: "Admin has not approved your account yet" });
       }
 
       return res.json({
@@ -229,11 +226,6 @@ export default async function handler(req, res) {
           user: { id: user.id, email: user.email }
         }
       });
-    }
-
-    function ensureJson(req) {
-      // no-op; placeholder for future content-type enforcement
-      return req;
     }
 
     /* ---------------------------------------------------------------------- */
@@ -312,29 +304,6 @@ export default async function handler(req, res) {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* USER: DEDUCT 1 CREDIT (legacy route - keep if you want)                */
-    /* ---------------------------------------------------------------------- */
-    if (path === "user/deduct1") {
-      const gate = await getUserFromBearer(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
-
-      const sb = supabaseAdmin();
-
-      const { data: row } = await sb
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", gate.user.id)
-        .single();
-
-      const current = Number(row?.credits || 0);
-      const remaining = Math.max(0, current - 1);
-
-      await sb.from("user_profiles").update({ credits: remaining }).eq("id", gate.user.id);
-
-      return res.json({ ok: remaining > 0, remaining });
-    }
-
-    /* ---------------------------------------------------------------------- */
     /* ADMIN: LIST USERS                                                      */
     /* ---------------------------------------------------------------------- */
     if (path === "admin/users") {
@@ -405,28 +374,61 @@ export default async function handler(req, res) {
     }
 
     /* ---------------------------------------------------------------------- */
-    /* TRANSCRIBE (WHISPER)                                                   */
+    /* TRANSCRIBE (SYSTEM AUDIO)                                              */
+    /* - Node-safe upload via toFile                                          */
+    /* - Silence reject to stop hallucinations + reduce cost                  */
     /* ---------------------------------------------------------------------- */
     if (path === "transcribe") {
       const { file } = await readMultipart(req);
 
-      if (!file?.buffer || file.buffer.length < 2000) return res.json({ text: "" });
+      if (!file?.buffer || file.buffer.length < 2000)
+        return res.json({ text: "" });
 
-      const audioFile = await toFile(
-        file.buffer,
-        file.filename || "audio.wav",
-        { type: file.mime || "audio/wav" }
-      );
+      // Silence reject (WAV PCM16 typical)
+      try {
+        const buf = file.buffer;
+        if ((file.mime || "").includes("wav") && buf.length > 60) {
+          const start = 44; // wav header
+          let sumAbs = 0;
+          let count = 0;
 
-      const out = await openai.audio.transcriptions.create({
-        file: audioFile,
-        model: "gpt-4o-transcribe",
-        language: "en",
-        response_format: "json",
-        temperature: 0
-      });
+          // sample every 10th sample for speed
+          for (let i = start; i + 1 < buf.length; i += 20) {
+            const v = buf.readInt16LE(i);
+            sumAbs += Math.abs(v);
+            count++;
+          }
 
-      return res.json({ text: out.text || "" });
+          const avgAbs = sumAbs / Math.max(1, count);
+
+          // Tune 80–250. Higher => stricter silence rejection
+          if (avgAbs < 140) {
+            return res.json({ text: "" });
+          }
+        }
+      } catch {
+        // ignore silence check failures
+      }
+
+      try {
+        const audioFile = await toFile(
+          file.buffer,
+          file.filename || "audio.wav",
+          { type: file.mime || "audio/wav" }
+        );
+
+        const out = await openai.audio.transcriptions.create({
+          file: audioFile,
+          model: "gpt-4o-transcribe",
+          language: "en",
+          response_format: "json",
+          temperature: 0
+        });
+
+        return res.json({ text: out.text || "" });
+      } catch (e) {
+        return res.status(500).json({ error: e?.message || String(e) });
+      }
     }
 
     /* ---------------------------------------------------------------------- */
@@ -438,7 +440,9 @@ export default async function handler(req, res) {
 
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
 
-      const messages = [{ role: "system", content: String(instructions || "").slice(0, 4000) }];
+      const messages = [
+        { role: "system", content: String(instructions || "").slice(0, 4000) }
+      ];
 
       if (resumeText) {
         messages.push({

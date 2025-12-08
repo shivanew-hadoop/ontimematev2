@@ -1,8 +1,15 @@
 //--------------------------------------------------------------
 // CONFIG
 //--------------------------------------------------------------
-const BILL_EVERY_MS = 5000;          // batch interval
+const BILL_EVERY_MS = 5000;          // batch interval (5s)
 const CREDITS_PER_SECOND = 1;        // 1 credit per second
+const SYS_FLUSH_EVERY_MS = 1100;     // system audio flush cadence
+const SYS_FLUSH_TIMER_MS = 1400;
+
+// Silence / hallucination control (tune if needed)
+const SYS_RMS_THRESHOLD = 0.008;     // 0.006–0.012 typical
+const SYS_SILENCE_DROP_MS = 1200;    // if silent > this, drop queued chunks
+
 const MAX_INSTR_CHARS = 1200;
 const MAX_RESUME_CHARS = 2500;
 
@@ -52,6 +59,11 @@ let blockMicUntil = 0;
 let billingTimer = null;
 let billLastAt = 0;
 
+// anti-hallucination / dedupe
+let lastAcceptedText = "";
+let lastAcceptedAt = 0;
+let lastNonSilentAt = 0;
+
 //--------------------------------------------------------------
 // Helpers
 //--------------------------------------------------------------
@@ -60,27 +72,22 @@ function showBanner(msg) {
   bannerTop.classList.remove("hidden");
   bannerTop.classList.add("bg-red-600");
 }
-
 function hideBanner() {
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
-
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
-
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
-
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
   promptBox.scrollTop = promptBox.scrollHeight;
 }
-
 function addToTimeline(txt) {
   txt = normalize(txt);
   if (!txt) return;
@@ -100,6 +107,29 @@ function mustHaveSessionOrRedirect() {
   return false;
 }
 
+function rmsOfFloat32(a) {
+  let sum = 0;
+  for (let i = 0; i < a.length; i++) sum += a[i] * a[i];
+  return Math.sqrt(sum / Math.max(1, a.length));
+}
+
+function shouldAcceptText(txt) {
+  txt = normalize(txt);
+  if (!txt) return false;
+
+  // basic noise filter
+  const wc = txt.split(" ").filter(Boolean).length;
+  if (wc < 2) return false;
+
+  // dedupe (same phrase repeated quickly)
+  const now = Date.now();
+  if (txt === lastAcceptedText && (now - lastAcceptedAt) < 5000) return false;
+
+  lastAcceptedText = txt;
+  lastAcceptedAt = now;
+  return true;
+}
+
 //--------------------------------------------------------------
 // Load USER PROFILE
 //--------------------------------------------------------------
@@ -109,6 +139,7 @@ async function loadUserProfile() {
   const res = await fetch("/api?path=user/profile", {
     headers: authHeaders()
   });
+
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "Failed to load profile");
 
@@ -143,13 +174,12 @@ resumeInput?.addEventListener("change", async () => {
 
   const res = await fetch("/api?path=resume/extract", {
     method: "POST",
-    headers: authHeaders(), // optional, harmless
+    headers: authHeaders(), // optional; safe
     body: fd
   });
 
   const data = await res.json();
   localStorage.setItem("resumeText", (data.text || "").slice(0, MAX_RESUME_CHARS));
-
   resumeStatus.textContent = "Resume extracted.";
 });
 
@@ -177,8 +207,11 @@ function startMic() {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
 
-      if (r.isFinal) addToTimeline(text);
-      else interim = text;
+      if (r.isFinal) {
+        if (shouldAcceptText(text)) addToTimeline(text);
+      } else {
+        interim = text;
+      }
     }
 
     if (interim) {
@@ -194,10 +227,7 @@ function startMic() {
     }
   };
 
-  try {
-    recognition.start();
-  } catch {}
-
+  try { recognition.start(); } catch {}
   return true;
 }
 
@@ -226,7 +256,7 @@ async function enableSystemAudio() {
 
   const track = sysStream.getAudioTracks()[0];
   if (!track) {
-    setStatus(audioStatus, "No audio detected", "text-red-600");
+    setStatus(audioStatus, "No audio detected (select Chrome Tab + Share audio)", "text-red-600");
     return;
   }
 
@@ -243,23 +273,44 @@ async function enableSystemAudio() {
   sysProcessor.connect(sysSilentGain);
   sysSilentGain.connect(audioContext.destination);
 
+  lastNonSilentAt = 0;
+
   sysProcessor.onaudioprocess = (ev) => {
     if (!isRunning) return;
 
     const data = ev.inputBuffer.getChannelData(0);
-    sysChunks.push(new Float32Array(data));
+    const rms = rmsOfFloat32(data);
+
+    if (rms >= SYS_RMS_THRESHOLD) {
+      lastNonSilentAt = Date.now();
+      sysChunks.push(new Float32Array(data));
+    }
 
     const now = Date.now();
-    if (now - lastSysFlushAt >= 1100) {
+
+    // flush only when we had non-silent audio recently
+    if (now - lastSysFlushAt >= SYS_FLUSH_EVERY_MS && (now - lastNonSilentAt) <= SYS_SILENCE_DROP_MS) {
       lastSysFlushAt = now;
       flushSystemAudio();
+    }
+
+    // if silent for too long, drop queued chunks
+    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS && sysChunks.length) {
+      sysChunks = [];
     }
   };
 
   if (sysFlushTimer) clearInterval(sysFlushTimer);
   sysFlushTimer = setInterval(() => {
-    if (sysChunks.length && isRunning) flushSystemAudio();
-  }, 1400);
+    const now = Date.now();
+    if (!isRunning) return;
+    if (!sysChunks.length) return;
+    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
+      sysChunks = [];
+      return;
+    }
+    flushSystemAudio();
+  }, SYS_FLUSH_TIMER_MS);
 
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
@@ -302,6 +353,14 @@ async function flushSystemAudio() {
   sysFlushInFlight = true;
 
   try {
+    const now = Date.now();
+
+    // if silent recently, do not send anything
+    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
+      sysChunks = [];
+      return;
+    }
+
     const chunks = sysChunks;
     sysChunks = [];
     if (!chunks.length) return;
@@ -324,10 +383,18 @@ async function flushSystemAudio() {
       body: fd
     });
 
+    if (!res.ok) {
+      const errText = await res.text().catch(() => "");
+      console.error("transcribe failed", res.status, errText);
+      return;
+    }
+
     const data = await res.json();
-    if (data.text) addToTimeline(data.text);
-  } catch {
-    // don't hard-fail; just keep mic running
+    const txt = normalize(data.text || "");
+
+    if (shouldAcceptText(txt)) addToTimeline(txt);
+  } catch (e) {
+    console.error("flushSystemAudio error", e);
   } finally {
     sysFlushInFlight = false;
   }
@@ -353,8 +420,8 @@ async function deductCreditsBatch(delta) {
     return { remaining: 0 };
   }
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Deduction failed");
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Deduction failed (${res.status})`);
 
   return data;
 }
@@ -369,20 +436,16 @@ function startBilling() {
 
     const now = Date.now();
     const elapsedMs = now - billLastAt;
-
     if (elapsedMs < BILL_EVERY_MS) return;
 
-    // compute how many seconds to bill in this batch
     const seconds = Math.floor(elapsedMs / 1000);
     const delta = seconds * CREDITS_PER_SECOND;
 
-    // move the last marker forward by billed seconds
     billLastAt += seconds * 1000;
 
     try {
       const out = await deductCreditsBatch(delta);
 
-      // refresh profile occasionally (every batch is ok; you can change)
       await loadUserProfile();
 
       if (Number(out.remaining || 0) <= 0) {
@@ -393,7 +456,7 @@ function startBilling() {
       stopAll();
       showBanner(e.message || "Billing failed");
     }
-  }, 500); // internal tick, low cost
+  }, 500);
 }
 
 //--------------------------------------------------------------
@@ -544,14 +607,13 @@ window.addEventListener("load", async () => {
   if (!session) return (window.location.href = "/auth?tab=login");
 
   await loadUserProfile();
-
   await fetch("/api?path=chat/reset", { method: "POST" });
 
   timeline = [];
   updateTranscript();
 
   localStorage.removeItem("resumeText");
-  resumeStatus.textContent = "Resume cleared";
+  if (resumeStatus) resumeStatus.textContent = "Resume cleared";
 });
 
 //--------------------------------------------------------------
