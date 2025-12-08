@@ -11,6 +11,7 @@ const responseBox = document.getElementById("responseBox");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const sysBtn = document.getElementById("sysBtn");
+const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
@@ -94,13 +95,13 @@ instructionsBox.addEventListener("input", () => {
 });
 
 //--------------------------------------------------------------
-// Resume Upload → uses /api?path=resume/extract
+// Resume Upload → /api?path=resume/extract
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
 
-  resumeStatus.textContent = "Processing...";
+  resumeStatus.textContent = "Processing…";
 
   const fd = new FormData();
   fd.append("file", file);
@@ -117,7 +118,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// Mic Speech Recognition
+// Mic: Speech Recognition
 //--------------------------------------------------------------
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -139,7 +140,6 @@ function startMic() {
 
     recognition.onresult = (ev) => {
       if (!isRunning) return;
-
       if (Date.now() < blockMicUntil) return;
 
       let interim = "";
@@ -189,9 +189,9 @@ async function enableSystemAudio() {
     return;
   }
 
-  const aTrack = sysStream.getAudioTracks()[0];
-  if (!aTrack) {
-    setStatus(audioStatus, "No audio detected", "text-red-600");
+  const track = sysStream.getAudioTracks()[0];
+  if (!track) {
+    setStatus(audioStatus, "No system audio detected", "text-red-600");
     return;
   }
 
@@ -229,7 +229,7 @@ async function enableSystemAudio() {
 }
 
 //--------------------------------------------------------------
-// Convert Float32 → WAV Blob
+// Float32 → WAV
 //--------------------------------------------------------------
 function float32ToWav(float32, sr) {
   const int16 = new Int16Array(float32.length);
@@ -240,12 +240,12 @@ function float32ToWav(float32, sr) {
   const buf = new ArrayBuffer(44 + int16.length * 2);
   const dv = new DataView(buf);
 
-  const writeStr = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  const write = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
 
-  writeStr(0, "RIFF");
+  write(0, "RIFF");
   dv.setUint32(4, 36 + int16.length * 2, true);
-  writeStr(8, "WAVE");
-  writeStr(12, "fmt ");
+  write(8, "WAVE");
+  write(12, "fmt ");
   dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true);
   dv.setUint16(22, 1, true);
@@ -253,18 +253,18 @@ function float32ToWav(float32, sr) {
   dv.setUint32(28, sr * 2, true);
   dv.setUint16(32, 2, true);
   dv.setUint16(34, 16, true);
-  writeStr(36, "data");
+  write(36, "data");
   dv.setUint32(40, int16.length * 2, true);
 
-  let off = 44;
-  for (let i = 0; i < int16.length; i++, off += 2)
-    dv.setInt16(off, int16[i], true);
+  let offset = 44;
+  for (let i = 0; i < int16.length; i++, offset += 2)
+    dv.setInt16(offset, int16[i], true);
 
   return new Blob([buf], { type: "audio/wav" });
 }
 
 //--------------------------------------------------------------
-// Flush System Audio to Whisper
+// Flush whisper system audio
 //--------------------------------------------------------------
 async function flushSystemAudio() {
   if (sysFlushInFlight) return;
@@ -315,9 +315,8 @@ async function startAll() {
   isRunning = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
-  stopBtn.classList.remove("opacity-50");
 
-  if (!startMic()) return;
+  startMic();
 
   setStatus(audioStatus, "Mic active", "text-green-600");
 }
@@ -332,18 +331,14 @@ function stopAll() {
 
   if (autoFlushTimer) clearInterval(autoFlushTimer);
 
-  timeline = [];
-  updateTranscript();
-
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  stopBtn.classList.add("opacity-50");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
 //--------------------------------------------------------------
-// SEND (ChatGPT streaming)
+// SEND to ChatGPT
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   const msg = normalize(promptBox.value);
@@ -388,13 +383,24 @@ sendBtn.onclick = async () => {
 };
 
 //--------------------------------------------------------------
-// RESET
+// CLEAR only transcript (FIXED)
+//--------------------------------------------------------------
+clearBtn.onclick = () => {
+  timeline = [];
+  promptBox.value = "";
+  updateTranscript();
+  setStatus(sendStatus, "Transcript cleared", "text-green-600");
+};
+
+//--------------------------------------------------------------
+// RESET clears EVERYTHING including ChatGPT
 //--------------------------------------------------------------
 resetBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
   responseBox.textContent = "";
-  setStatus(sendStatus, "Cleared", "text-green-600");
+  updateTranscript();
+  setStatus(sendStatus, "All cleared", "text-green-600");
 };
 
 //--------------------------------------------------------------
@@ -417,7 +423,7 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
-// Bind buttons
+// Bind Buttons
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
