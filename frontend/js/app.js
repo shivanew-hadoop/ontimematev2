@@ -2,47 +2,43 @@
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
-const creditBanner = document.getElementById("creditBanner");
-
+const logoutBtn = document.getElementById("logoutBtn");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
-
 const resumeInput = document.getElementById("resumeInput");
 const resumeStatus = document.getElementById("resumeStatus");
-
 const promptBox = document.getElementById("promptBox");
 const responseBox = document.getElementById("responseBox");
-
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const sysBtn = document.getElementById("sysBtn");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
-
 const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
-
-const logoutBtn = document.getElementById("logoutBtn");
+const banner = document.getElementById("bannerTop");
 
 //--------------------------------------------------------------
 // STATE
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
+
 let recognition = null;
+let credits = 0;
 
 let audioContext = null;
 let sysStream = null;
 let sysProcessor = null;
-
 let sysChunks = [];
 let lastSysFlushAt = 0;
 let sysFlushInFlight = false;
 
 let timeline = [];
-let blockMicUntil = 0;
+let autoFlushTimer = null;
 let creditTimer = null;
+let blockMicUntil = 0;
 
 //--------------------------------------------------------------
 // Helpers
@@ -69,46 +65,89 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-function setLiveCredits(c) {
-  const html = userInfo.innerHTML.replace(/Credits:\s*<b>.*?<\/b>/, `Credits: <b>${c}</b>`);
-  userInfo.innerHTML = html;
+function showBanner(msg, color = "bg-red-600") {
+  banner.textContent = msg;
+  banner.className = `w-full text-white text-center p-2 ${color}`;
+  banner.style.display = "block";
+}
+
+function hideBanner() {
+  banner.style.display = "none";
 }
 
 //--------------------------------------------------------------
-// Load USER PROFILE
+// Load USER PROFILE + Credits
 //--------------------------------------------------------------
 async function loadUserProfile() {
   const res = await fetch("/api?path=user/profile", {
-    headers: { Authorization: `Bearer ${session.access_token}` }
+    headers: { Authorization: `Bearer ${session.access_token}` },
   });
+
   const data = await res.json();
   if (!res.ok) throw new Error(data.error);
 
+  credits = data.user.credits;
+
   userInfo.innerHTML = `
     Logged in as <b>${data.user.email}</b><br>
-    Credits: <b>${data.user.credits}</b><br>
+    Credits: <b id="creditsLabel">${credits}</b><br>
     Joined: ${data.user.created_ymd}
   `;
 }
 
+function updateCreditsUI(newVal) {
+  credits = newVal;
+  const el = document.getElementById("creditsLabel");
+  if (el) el.textContent = credits;
+
+  if (credits <= 0) {
+    showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+    stopAll();
+    sendBtn.disabled = true;
+  }
+}
+
 //--------------------------------------------------------------
-// LOGOUT
+// Deduct Backend Credits each second
 //--------------------------------------------------------------
-logoutBtn.onclick = () => {
-  localStorage.removeItem("session");
-  window.location.href = "/auth?tab=login";
-};
+async function deductOneSecond() {
+  if (!isRunning) return;
+  if (credits <= 0) return stopAll();
+
+  const res = await fetch("/api?path=user/deduct", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.access_token}`,
+    },
+    body: JSON.stringify({ seconds: 1 }),
+  });
+
+  const data = await res.json();
+  if (!res.ok) return;
+
+  updateCreditsUI(data.credits);
+}
+
+function startCreditLoop() {
+  creditTimer = setInterval(() => {
+    deductOneSecond();
+  }, 1000);
+}
+
+function stopCreditLoop() {
+  if (creditTimer) clearInterval(creditTimer);
+  creditTimer = null;
+}
 
 //--------------------------------------------------------------
 // Instructions
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
-
 instructionsBox.addEventListener("input", () => {
   localStorage.setItem("instructions", instructionsBox.value);
-  instrStatus.textContent = "Saved";
-  instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 500);
+  setStatus(instrStatus, "Saved", "text-green-600");
+  setTimeout(() => setStatus(instrStatus, "", ""), 600);
 });
 
 //--------------------------------------------------------------
@@ -118,66 +157,65 @@ resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
 
-  resumeStatus.textContent = "Processing…";
+  setStatus(resumeStatus, "Processing...", "text-orange-600");
 
   const fd = new FormData();
   fd.append("file", file);
 
   const res = await fetch("/api?path=resume/extract", {
     method: "POST",
-    body: fd
+    body: fd,
   });
 
   const data = await res.json();
   localStorage.setItem("resumeText", data.text || "");
 
-  resumeStatus.textContent = "Resume extracted.";
+  setStatus(resumeStatus, "Resume extracted", "text-green-600");
 });
 
 //--------------------------------------------------------------
-// Mic Speech Recognition
+// MIC Speech Recognition
 //--------------------------------------------------------------
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) return;
-
-  function createRecognizer() {
-    const r = new SR();
-    r.lang = "en-US";
-    r.continuous = true;
-    r.interimResults = true;
-    return r;
+  if (!SR) {
+    setStatus(audioStatus, "Browser does not support speech", "text-red-600");
+    return false;
   }
 
-  function boot() {
-    recognition = createRecognizer();
+  const r = new SR();
+  r.lang = "en-US";
+  r.continuous = true;
+  r.interimResults = true;
 
-    recognition.onresult = (ev) => {
-      if (!isRunning) return;
-      if (Date.now() < blockMicUntil) return;
+  r.onresult = (ev) => {
+    if (!isRunning) return;
+    if (Date.now() < blockMicUntil) return;
 
-      let interim = "";
-      for (let i = ev.resultIndex; i < ev.results.length; i++) {
-        const r = ev.results[i];
-        const text = normalize(r[0].transcript || "");
+    let interim = "";
 
-        if (r.isFinal) addToTimeline(text);
-        else interim = text;
-      }
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const rr = ev.results[i];
+      const txt = normalize(rr[0].transcript || "");
+      if (rr.isFinal) addToTimeline(txt);
+      else interim = txt;
+    }
 
-      if (interim) {
-        const base = timeline.map(t => t.text).join(" ");
-        promptBox.value = (base + " " + interim).trim();
-      }
-    };
+    if (interim) {
+      const base = timeline.map(t => t.text).join(" ");
+      promptBox.value = (base + " " + interim).trim();
+    }
+  };
 
-    recognition.onerror = () => setTimeout(boot, 400);
-    recognition.onend = () => isRunning && setTimeout(boot, 400);
+  r.onerror = (_) => {};
+  r.onend = () => isRunning && r.start();
 
-    try { recognition.start(); } catch {}
-  }
+  try {
+    r.start();
+  } catch {}
 
-  boot();
+  recognition = r;
+  return true;
 }
 
 //--------------------------------------------------------------
@@ -189,61 +227,76 @@ async function ensureContext() {
 }
 
 async function enableSystemAudio() {
-  if (!isRunning) return alert("Start recording first!");
+  if (!isRunning) return;
 
   await ensureContext();
 
-  let stream;
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
+    sysStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
-      audio: { channelCount: 1 }
+      audio: true,
     });
-  } catch (err) {
-    setStatus(audioStatus, "Window capture denied", "text-red-600");
+  } catch {
+    setStatus(audioStatus, "System audio denied", "text-red-600");
     return;
   }
 
-  sysStream = stream;
-  const source = audioContext.createMediaStreamSource(stream);
+  const track = sysStream.getAudioTracks()[0];
+  if (!track) {
+    setStatus(audioStatus, "No system audio detected", "text-red-600");
+    return;
+  }
+
+  const src = audioContext.createMediaStreamSource(sysStream);
+  const gain = audioContext.createGain();
+  gain.gain.value = 1;
 
   sysProcessor = audioContext.createScriptProcessor(4096, 1, 1);
+  const silent = audioContext.createGain();
+  silent.gain.value = 0;
+
+  src.connect(gain);
+  gain.connect(sysProcessor);
+  sysProcessor.connect(silent);
+  silent.connect(audioContext.destination);
+
   sysProcessor.onaudioprocess = (ev) => {
     if (!isRunning) return;
-    const ch = ev.inputBuffer.getChannelData(0);
-    if (ch.length === 0) return;
-    sysChunks.push(new Float32Array(ch));
+
+    const data = ev.inputBuffer.getChannelData(0);
+    sysChunks.push(new Float32Array(data));
 
     const now = Date.now();
-    if (now - lastSysFlushAt >= 1000) {
+    if (now - lastSysFlushAt >= 1100) {
       lastSysFlushAt = now;
       flushSystemAudio();
     }
   };
 
-  source.connect(sysProcessor);
-  sysProcessor.connect(audioContext.destination);
+  autoFlushTimer = setInterval(() => {
+    if (sysChunks.length && isRunning) flushSystemAudio();
+  }, 1400);
 
+  sysBtn.className = "px-3 py-2 bg-purple-700 text-white rounded";
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
-//--------------------------------------------------------------
-// Convert Float32 → WAV
-//--------------------------------------------------------------
 function float32ToWav(float32, sr) {
   const int16 = new Int16Array(float32.length);
   for (let i = 0; i < float32.length; i++)
-    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
+    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 32767;
 
   const buf = new ArrayBuffer(44 + int16.length * 2);
   const dv = new DataView(buf);
 
-  const write = (o, s) => { for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i)); };
+  function wr(o, s) {
+    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
+  }
 
-  write(0, "RIFF");
+  wr(0, "RIFF");
   dv.setUint32(4, 36 + int16.length * 2, true);
-  write(8, "WAVE");
-  write(12, "fmt ");
+  wr(8, "WAVE");
+  wr(12, "fmt ");
   dv.setUint32(16, 16, true);
   dv.setUint16(20, 1, true);
   dv.setUint16(22, 1, true);
@@ -251,21 +304,18 @@ function float32ToWav(float32, sr) {
   dv.setUint32(28, sr * 2, true);
   dv.setUint16(32, 2, true);
   dv.setUint16(34, 16, true);
-  write(36, "data");
+  wr(36, "data");
   dv.setUint32(40, int16.length * 2, true);
 
-  let offset = 44;
-  for (let i = 0; i < int16.length; i++, offset += 2)
-    dv.setInt16(offset, int16[i], true);
+  let off = 44;
+  for (let i = 0; i < int16.length; i++, off += 2)
+    dv.setInt16(off, int16[i], true);
 
   return new Blob([buf], { type: "audio/wav" });
 }
 
-//--------------------------------------------------------------
-// Flush System Audio → Whisper
-//--------------------------------------------------------------
 async function flushSystemAudio() {
-  if (!isRunning || sysFlushInFlight) return;
+  if (sysFlushInFlight) return;
   sysFlushInFlight = true;
 
   try {
@@ -281,82 +331,47 @@ async function flushSystemAudio() {
     }, new Float32Array(0));
 
     const wav = float32ToWav(raw, audioContext.sampleRate);
+
     const fd = new FormData();
-    fd.append("file", wav, "sys.wav");
+    fd.append("file", wav);
 
     const res = await fetch("/api?path=transcribe", {
       method: "POST",
-      body: fd
+      body: fd,
     });
-    const data = await res.json();
 
+    const data = await res.json();
     if (data.text) addToTimeline(data.text);
-  } catch (e) {
-    console.error(e);
+  } catch (err) {
+    console.error(err);
   }
 
   sysFlushInFlight = false;
 }
 
 //--------------------------------------------------------------
-// CREDIT DEDUCTION LOOP
-//--------------------------------------------------------------
-function startCreditTimer() {
-  if (creditTimer) clearInterval(creditTimer);
-
-  creditTimer = setInterval(async () => {
-    if (!isRunning) return;
-
-    const res = await fetch("/api?path=user/deduct", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${session.access_token}` }
-    });
-
-    const data = await res.json();
-
-    if (data?.credits != null) {
-      const c = Number(data.credits);
-      setLiveCredits(c);
-
-      if (c <= 0) {
-        creditBanner.classList.remove("hidden");
-        stopAll();
-        sendBtn.disabled = true;
-        sendBtn.classList.add("opacity-50");
-        startBtn.disabled = true;
-        startBtn.classList.add("opacity-50");
-      }
-    }
-  }, 1000);
-}
-
-//--------------------------------------------------------------
 // START / STOP
 //--------------------------------------------------------------
 async function startAll() {
-  if (!session) return;
   if (isRunning) return;
 
-  await fetch("/api?path=chat/reset", { method: "POST" });
+  hideBanner();
+
+  if (credits <= 0) {
+    showBanner("You have 0 credits. Contact admin: shiva509203@gmail.com");
+    return;
+  }
 
   isRunning = true;
-
   startBtn.disabled = true;
-  startBtn.classList.add("opacity-50");
-
   stopBtn.disabled = false;
-  stopBtn.classList.remove("opacity-50");
-
-  sysBtn.disabled = false;
-  sysBtn.classList.remove("opacity-50");
-
   sendBtn.disabled = false;
 
-  timeline = [];
-  updateTranscript();
+  startBtn.className = "px-3 py-2 bg-gray-400 text-white rounded";
+  stopBtn.className = "px-3 py-2 bg-red-700 text-white rounded";
 
   startMic();
-  startCreditTimer();
+  startCreditLoop();
 
   setStatus(audioStatus, "Mic active", "text-green-600");
 }
@@ -364,21 +379,22 @@ async function startAll() {
 function stopAll() {
   isRunning = false;
 
+  stopCreditLoop();
+
   try { recognition?.stop(); } catch {}
 
   if (sysStream) sysStream.getTracks().forEach(t => t.stop());
   sysStream = null;
 
-  if (creditTimer) clearInterval(creditTimer);
+  if (autoFlushTimer) clearInterval(autoFlushTimer);
 
   startBtn.disabled = false;
-  startBtn.classList.remove("opacity-50");
-
   stopBtn.disabled = true;
-  stopBtn.classList.add("opacity-50");
+  sendBtn.disabled = true;
 
-  sysBtn.disabled = true;
-  sysBtn.classList.add("opacity-50");
+  startBtn.className = "px-3 py-2 bg-green-600 text-white rounded";
+  stopBtn.className = "px-3 py-2 bg-gray-500 text-white rounded opacity-50";
+  sysBtn.className = "px-3 py-2 bg-purple-600 text-white rounded";
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
@@ -387,7 +403,7 @@ function stopAll() {
 // SEND to ChatGPT
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
-  if (!isRunning) return alert("Start recording first!");
+  if (!isRunning) return;
 
   const msg = normalize(promptBox.value);
   if (!msg) return;
@@ -405,13 +421,13 @@ sendBtn.onclick = async () => {
     const body = {
       prompt: msg,
       instructions: localStorage.getItem("instructions") || "",
-      resumeText: localStorage.getItem("resumeText") || ""
+      resumeText: localStorage.getItem("resumeText") || "",
     };
 
     const res = await fetch("/api?path=chat/send", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
     });
 
     const reader = res.body.getReader();
@@ -423,29 +439,36 @@ sendBtn.onclick = async () => {
       responseBox.textContent += decoder.decode(value);
     }
 
-    setStatus(sendStatus, "Done", "text-green-600");
-  } catch (err) {
+    setStatus(sendStatus, "Completed", "text-green-600");
+  } catch {
     setStatus(sendStatus, "Failed", "text-red-600");
   }
 };
 
 //--------------------------------------------------------------
-// CLEAR transcript only
+// CLEAR + RESET
 //--------------------------------------------------------------
 clearBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
   updateTranscript();
+  setStatus(sendStatus, "Transcript cleared", "text-green-600");
 };
 
-//--------------------------------------------------------------
-// RESET all
-//--------------------------------------------------------------
 resetBtn.onclick = () => {
   timeline = [];
   promptBox.value = "";
   responseBox.textContent = "";
   updateTranscript();
+  setStatus(sendStatus, "All cleared", "text-green-600");
+};
+
+//--------------------------------------------------------------
+// LOGOUT
+//--------------------------------------------------------------
+logoutBtn.onclick = () => {
+  localStorage.removeItem("session");
+  window.location.href = "/auth?tab=login";
 };
 
 //--------------------------------------------------------------
@@ -456,16 +479,6 @@ window.addEventListener("load", async () => {
   if (!session) return (window.location.href = "/auth?tab=login");
 
   await loadUserProfile();
-  await fetch("/api?path=chat/reset", { method: "POST" });
 
-  promptBox.value = "";
-  timeline = [];
-  updateTranscript();
+  sendBtn.disabled = true;
 });
-
-//--------------------------------------------------------------
-// Bind Buttons
-//--------------------------------------------------------------
-startBtn.onclick = startAll;
-stopBtn.onclick = stopAll;
-sysBtn.onclick = enableSystemAudio;
