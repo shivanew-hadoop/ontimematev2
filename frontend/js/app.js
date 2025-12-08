@@ -1,19 +1,4 @@
 //--------------------------------------------------------------
-// CONFIG
-//--------------------------------------------------------------
-const BILL_EVERY_MS = 5000;          // batch interval (5s)
-const CREDITS_PER_SECOND = 1;        // 1 credit per second
-const SYS_FLUSH_EVERY_MS = 1100;     // system audio flush cadence
-const SYS_FLUSH_TIMER_MS = 1400;
-
-// Silence / hallucination control (tune if needed)
-const SYS_RMS_THRESHOLD = 0.008;     // 0.006–0.012 typical
-const SYS_SILENCE_DROP_MS = 1200;    // if silent > this, drop queued chunks
-
-const MAX_INSTR_CHARS = 1200;
-const MAX_RESUME_CHARS = 2500;
-
-//--------------------------------------------------------------
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
@@ -38,41 +23,41 @@ const bannerTop = document.getElementById("bannerTop");
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
+
+// MIC recognition
 let recognition = null;
-
-let audioContext = null;
-let sysStream = null;
-let sysSource = null;
-let sysGain = null;
-let sysProcessor = null;
-let sysSilentGain = null;
-
-let sysChunks = [];
-let lastSysFlushAt = 0;
-let sysFlushInFlight = false;
-let sysFlushTimer = null;
-
-let timeline = [];
 let blockMicUntil = 0;
 
-// billing
-let billingTimer = null;
-let billLastAt = 0;
+// System audio (MediaRecorder-based)
+let sysStream = null;
+let sysRecorder = null;
+let sysQueue = [];
+let sysUploading = false;
+let sysAbort = null; // AbortController for inflight transcribe calls
 
-// anti-hallucination / dedupe
-let lastAcceptedText = "";
-let lastAcceptedAt = 0;
-let lastNonSilentAt = 0;
+// Transcript timeline
+let timeline = [];
+
+// Credits (batch)
+let creditTimer = null;
+let lastCreditAt = 0;
+
+// Chat streaming cancellation
+let chatAbort = null;
+let chatStreamActive = false;
+let chatStreamSeq = 0; // monotonically increasing stream id
 
 //--------------------------------------------------------------
 // Helpers
 //--------------------------------------------------------------
 function showBanner(msg) {
+  if (!bannerTop) return;
   bannerTop.textContent = msg;
   bannerTop.classList.remove("hidden");
   bannerTop.classList.add("bg-red-600");
 }
 function hideBanner() {
+  if (!bannerTop) return;
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
@@ -94,53 +79,19 @@ function addToTimeline(txt) {
   timeline.push({ t: Date.now(), text: txt });
   updateTranscript();
 }
-
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-function mustHaveSessionOrRedirect() {
-  if (session?.access_token) return true;
-  localStorage.removeItem("session");
-  window.location.href = "/auth?tab=login";
-  return false;
-}
-
-function rmsOfFloat32(a) {
-  let sum = 0;
-  for (let i = 0; i < a.length; i++) sum += a[i] * a[i];
-  return Math.sqrt(sum / Math.max(1, a.length));
-}
-
-function shouldAcceptText(txt) {
-  txt = normalize(txt);
-  if (!txt) return false;
-
-  // basic noise filter
-  const wc = txt.split(" ").filter(Boolean).length;
-  if (wc < 2) return false;
-
-  // dedupe (same phrase repeated quickly)
-  const now = Date.now();
-  if (txt === lastAcceptedText && (now - lastAcceptedAt) < 5000) return false;
-
-  lastAcceptedText = txt;
-  lastAcceptedAt = now;
-  return true;
 }
 
 //--------------------------------------------------------------
 // Load USER PROFILE
 //--------------------------------------------------------------
 async function loadUserProfile() {
-  if (!mustHaveSessionOrRedirect()) return;
-
   const res = await fetch("/api?path=user/profile", {
     headers: authHeaders()
   });
-
-  const data = await res.json();
+  const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Failed to load profile");
 
   userInfo.innerHTML =
@@ -174,12 +125,11 @@ resumeInput?.addEventListener("change", async () => {
 
   const res = await fetch("/api?path=resume/extract", {
     method: "POST",
-    headers: authHeaders(), // optional; safe
     body: fd
   });
 
-  const data = await res.json();
-  localStorage.setItem("resumeText", (data.text || "").slice(0, MAX_RESUME_CHARS));
+  const data = await res.json().catch(() => ({}));
+  localStorage.setItem("resumeText", data.text || "");
   resumeStatus.textContent = "Resume extracted.";
 });
 
@@ -206,12 +156,8 @@ function startMic() {
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
-
-      if (r.isFinal) {
-        if (shouldAcceptText(text)) addToTimeline(text);
-      } else {
-        interim = text;
-      }
+      if (r.isFinal) addToTimeline(text);
+      else interim = text;
     }
 
     if (interim) {
@@ -232,17 +178,41 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// System Audio
+// SYSTEM AUDIO — MediaRecorder (fixes corrupted WAV issue)
 //--------------------------------------------------------------
-async function ensureContext() {
-  if (!audioContext) audioContext = new AudioContext();
-  if (audioContext.state === "suspended") await audioContext.resume();
+function pickBestMimeType() {
+  const candidates = [
+    "audio/webm;codecs=opus",
+    "audio/webm",
+    "audio/ogg;codecs=opus",
+    "audio/ogg"
+  ];
+  for (const t of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
+  }
+  return "";
+}
+
+function stopSystemAudioOnly() {
+  try { sysRecorder?.stop(); } catch {}
+  sysRecorder = null;
+
+  if (sysStream) {
+    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
+  }
+  sysStream = null;
+
+  sysQueue = [];
+  sysUploading = false;
+
+  try { sysAbort?.abort(); } catch {}
+  sysAbort = null;
 }
 
 async function enableSystemAudio() {
   if (!isRunning) return;
 
-  await ensureContext();
+  stopSystemAudioOnly();
 
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
@@ -256,219 +226,238 @@ async function enableSystemAudio() {
 
   const track = sysStream.getAudioTracks()[0];
   if (!track) {
-    setStatus(audioStatus, "No audio detected (select Chrome Tab + Share audio)", "text-red-600");
+    setStatus(audioStatus, "No system audio detected. Use Chrome Tab + Share audio.", "text-red-600");
+    stopSystemAudioOnly();
     return;
   }
 
-  sysSource = audioContext.createMediaStreamSource(sysStream);
-  sysGain = audioContext.createGain();
-  sysGain.gain.value = 1;
+  // Use clean audio-only stream
+  const audioOnly = new MediaStream([track]);
 
-  sysProcessor = audioContext.createScriptProcessor(4096, 1, 1);
-  sysSilentGain = audioContext.createGain();
-  sysSilentGain.gain.value = 0;
+  const mimeType = pickBestMimeType();
+  try {
+    sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
+  } catch (e) {
+    console.error(e);
+    setStatus(audioStatus, "MediaRecorder failed. Try Chrome Tab capture.", "text-red-600");
+    stopSystemAudioOnly();
+    return;
+  }
 
-  sysSource.connect(sysGain);
-  sysGain.connect(sysProcessor);
-  sysProcessor.connect(sysSilentGain);
-  sysSilentGain.connect(audioContext.destination);
+  sysAbort = new AbortController();
 
-  lastNonSilentAt = 0;
-
-  sysProcessor.onaudioprocess = (ev) => {
+  sysRecorder.ondataavailable = (ev) => {
     if (!isRunning) return;
-
-    const data = ev.inputBuffer.getChannelData(0);
-    const rms = rmsOfFloat32(data);
-
-    if (rms >= SYS_RMS_THRESHOLD) {
-      lastNonSilentAt = Date.now();
-      sysChunks.push(new Float32Array(data));
-    }
-
-    const now = Date.now();
-
-    // flush only when we had non-silent audio recently
-    if (now - lastSysFlushAt >= SYS_FLUSH_EVERY_MS && (now - lastNonSilentAt) <= SYS_SILENCE_DROP_MS) {
-      lastSysFlushAt = now;
-      flushSystemAudio();
-    }
-
-    // if silent for too long, drop queued chunks
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS && sysChunks.length) {
-      sysChunks = [];
-    }
+    if (!ev.data || ev.data.size < 1500) return;
+    sysQueue.push(ev.data);
+    drainSysQueue();
   };
 
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = setInterval(() => {
-    const now = Date.now();
-    if (!isRunning) return;
-    if (!sysChunks.length) return;
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
-      sysChunks = [];
-      return;
-    }
-    flushSystemAudio();
-  }, SYS_FLUSH_TIMER_MS);
+  sysRecorder.onerror = (e) => console.error("sysRecorder error", e);
+
+  try {
+    sysRecorder.start(2000); // 2s slices
+  } catch (e) {
+    console.error(e);
+    setStatus(audioStatus, "System audio start failed", "text-red-600");
+    stopSystemAudioOnly();
+    return;
+  }
 
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
-function float32ToWav(float32, sr) {
-  const int16 = new Int16Array(float32.length);
-  for (let i = 0; i < float32.length; i++)
-    int16[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
+async function drainSysQueue() {
+  if (sysUploading) return;
+  if (!sysQueue.length) return;
 
-  const buf = new ArrayBuffer(44 + int16.length * 2);
-  const dv = new DataView(buf);
-
-  function w(o, s) {
-    for (let i = 0; i < s.length; i++) dv.setUint8(o + i, s.charCodeAt(i));
-  }
-
-  w(0, "RIFF");
-  dv.setUint32(4, 36 + int16.length * 2, true);
-  w(8, "WAVE");
-  w(12, "fmt ");
-  dv.setUint32(16, 16, true);
-  dv.setUint16(20, 1, true);
-  dv.setUint16(22, 1, true);
-  dv.setUint32(24, sr, true);
-  dv.setUint32(28, sr * 2, true);
-  dv.setUint16(32, 2, true);
-  dv.setUint16(34, 16, true);
-  w(36, "data");
-  dv.setUint32(40, int16.length * 2, true);
-
-  let off = 44;
-  for (let i = 0; i < int16.length; i++, off += 2)
-    dv.setInt16(off, int16[i], true);
-
-  return new Blob([buf], { type: "audio/wav" });
-}
-
-async function flushSystemAudio() {
-  if (sysFlushInFlight) return;
-  sysFlushInFlight = true;
-
+  sysUploading = true;
   try {
-    const now = Date.now();
-
-    // if silent recently, do not send anything
-    if ((now - lastNonSilentAt) > SYS_SILENCE_DROP_MS) {
-      sysChunks = [];
-      return;
+    while (sysQueue.length && isRunning) {
+      const blob = sysQueue.shift();
+      await transcribeSysBlob(blob);
     }
-
-    const chunks = sysChunks;
-    sysChunks = [];
-    if (!chunks.length) return;
-
-    const raw = chunks.reduce((acc, c) => {
-      const out = new Float32Array(acc.length + c.length);
-      out.set(acc, 0);
-      out.set(c, acc.length);
-      return out;
-    }, new Float32Array(0));
-
-    const wav = float32ToWav(raw, audioContext.sampleRate);
-
-    const fd = new FormData();
-    fd.append("file", wav, "sys.wav");
-
-    const res = await fetch("/api?path=transcribe", {
-      method: "POST",
-      headers: authHeaders(), // optional but consistent
-      body: fd
-    });
-
-    if (!res.ok) {
-      const errText = await res.text().catch(() => "");
-      console.error("transcribe failed", res.status, errText);
-      return;
-    }
-
-    const data = await res.json();
-    const txt = normalize(data.text || "");
-
-    if (shouldAcceptText(txt)) addToTimeline(txt);
-  } catch (e) {
-    console.error("flushSystemAudio error", e);
   } finally {
-    sysFlushInFlight = false;
+    sysUploading = false;
   }
 }
 
-//--------------------------------------------------------------
-// Credits deduction — BATCHED
-//--------------------------------------------------------------
-async function deductCreditsBatch(delta) {
-  if (!mustHaveSessionOrRedirect()) return { remaining: 0 };
+async function transcribeSysBlob(blob) {
+  const fd = new FormData();
 
+  const type = (blob.type || "").toLowerCase();
+  const ext =
+    type.includes("webm") ? "webm" :
+    type.includes("ogg") ? "ogg" :
+    "webm";
+
+  fd.append("file", blob, `sys.${ext}`);
+
+  const res = await fetch("/api?path=transcribe", {
+    method: "POST",
+    body: fd,
+    signal: sysAbort?.signal
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    console.error("transcribe failed", res.status, txt);
+    return;
+  }
+
+  const data = await res.json().catch(() => ({}));
+  const t = normalize(data.text || "");
+  if (t) addToTimeline(t);
+}
+
+//--------------------------------------------------------------
+// CREDITS — batched every 5 seconds
+//--------------------------------------------------------------
+async function deductCredits(delta) {
   const res = await fetch("/api?path=user/deduct", {
     method: "POST",
     headers: { "Content-Type": "application/json", ...authHeaders() },
     body: JSON.stringify({ delta })
   });
 
-  if (res.status === 401) {
-    stopAll();
-    showBanner("Session expired. Please login again.");
-    localStorage.removeItem("session");
-    window.location.href = "/auth?tab=login";
-    return { remaining: 0 };
-  }
-
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Deduction failed (${res.status})`);
-
+  if (!res.ok) throw new Error(data.error || `Deduct failed (${res.status})`);
   return data;
 }
 
-function startBilling() {
-  if (billingTimer) clearInterval(billingTimer);
+function startCreditTicking() {
+  if (creditTimer) clearInterval(creditTimer);
 
-  billLastAt = Date.now();
+  lastCreditAt = Date.now();
 
-  billingTimer = setInterval(async () => {
+  creditTimer = setInterval(async () => {
     if (!isRunning) return;
 
     const now = Date.now();
-    const elapsedMs = now - billLastAt;
-    if (elapsedMs < BILL_EVERY_MS) return;
+    const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
+    if (elapsedSec < 5) return;
 
-    const seconds = Math.floor(elapsedMs / 1000);
-    const delta = seconds * CREDITS_PER_SECOND;
-
-    billLastAt += seconds * 1000;
+    // deduct in batches: every 5 seconds deduct 5 credits
+    const batchSec = elapsedSec - (elapsedSec % 5);
+    const delta = batchSec; // 1 credit/sec
+    lastCreditAt += batchSec * 1000;
 
     try {
-      const out = await deductCreditsBatch(delta);
-
-      await loadUserProfile();
-
-      if (Number(out.remaining || 0) <= 0) {
+      const out = await deductCredits(delta);
+      if (out.remaining <= 0) {
         stopAll();
         showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+        return;
       }
+      // refresh occasionally
+      await loadUserProfile();
     } catch (e) {
-      stopAll();
-      showBanner(e.message || "Billing failed");
+      console.error(e);
+      // do not kill app immediately; show banner
+      showBanner(e.message || "Credit deduction error");
     }
   }, 500);
 }
 
 //--------------------------------------------------------------
-// START
+// CHAT STREAM CONTROL (Reset + Send priority switching)
+//--------------------------------------------------------------
+function abortChatStreamOnly() {
+  // This is EXACTLY what you asked: stop streaming + clear response box
+  try { chatAbort?.abort(); } catch {}
+  chatAbort = null;
+  chatStreamActive = false;
+}
+
+async function startChatStreaming(prompt) {
+  // Stop previous stream immediately, then start new
+  abortChatStreamOnly();
+
+  chatAbort = new AbortController();
+  chatStreamActive = true;
+  const mySeq = ++chatStreamSeq;
+
+  responseBox.textContent = "";
+  setStatus(sendStatus, "Sending…", "text-orange-600");
+
+  const body = {
+    prompt,
+    instructions: localStorage.getItem("instructions") || "",
+    resumeText: localStorage.getItem("resumeText") || ""
+  };
+
+  let pending = "";
+  let flushTimer = null;
+
+  const flush = () => {
+    if (!pending) return;
+    responseBox.textContent += pending;
+    pending = "";
+  };
+
+  try {
+    const res = await fetch("/api?path=chat/send", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: chatAbort.signal
+    });
+
+    if (!res.ok) {
+      const t = await res.text().catch(() => "");
+      throw new Error(t || `Chat failed (${res.status})`);
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    // flush every ~50ms to reduce slowness in Chrome DOM rendering
+    flushTimer = setInterval(() => {
+      // if replaced by new send/reset, stop flushing
+      if (!chatStreamActive || mySeq !== chatStreamSeq) return;
+      flush();
+    }, 50);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      // If user clicked Reset or sent a newer request -> stop immediately
+      if (!chatStreamActive || mySeq !== chatStreamSeq) break;
+
+      pending += decoder.decode(value);
+    }
+
+    // final flush if still active and same stream
+    if (chatStreamActive && mySeq === chatStreamSeq) {
+      flush();
+      setStatus(sendStatus, "Done", "text-green-600");
+    } else {
+      setStatus(sendStatus, "Interrupted", "text-orange-600");
+    }
+  } catch (e) {
+    if (e?.name === "AbortError") {
+      setStatus(sendStatus, "Interrupted", "text-orange-600");
+    } else {
+      console.error(e);
+      setStatus(sendStatus, "Failed", "text-red-600");
+    }
+  } finally {
+    if (flushTimer) clearInterval(flushTimer);
+    pending = "";
+    // do not forcibly flip streamActive here; reset/send owns it
+  }
+}
+
+//--------------------------------------------------------------
+// START / STOP
 //--------------------------------------------------------------
 async function startAll() {
   hideBanner();
-
-  if (!mustHaveSessionOrRedirect()) return;
   if (isRunning) return;
 
-  await fetch("/api?path=chat/reset", { method: "POST" });
+  // reset server-side chat state
+  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
 
   timeline = [];
   updateTranscript();
@@ -488,27 +477,26 @@ async function startAll() {
   sendBtn.classList.remove("opacity-60");
 
   startMic();
-  startBilling();
+  startCreditTicking();
 
   setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 }
 
-//--------------------------------------------------------------
-// STOP
-//--------------------------------------------------------------
 function stopAll() {
   isRunning = false;
 
   try { recognition?.stop(); } catch {}
+  recognition = null;
 
-  if (sysStream) sysStream.getTracks().forEach(t => t.stop());
-  sysStream = null;
+  stopSystemAudioOnly();
 
-  if (billingTimer) clearInterval(billingTimer);
-  billingTimer = null;
+  if (creditTimer) clearInterval(creditTimer);
+  creditTimer = null;
 
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = null;
+  // NOTE: this DOES NOT stop the response box by itself unless you call Reset/Send.
+  // But Stop should stop everything else.
+  // If you want Stop to also stop chat: uncomment next line:
+  // abortChatStreamOnly();
 
   startBtn.disabled = false;
   startBtn.classList.remove("opacity-50");
@@ -526,7 +514,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// SEND to GPT
+// SEND (priority switching)
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -536,39 +524,13 @@ sendBtn.onclick = async () => {
 
   blockMicUntil = Date.now() + 700;
 
+  // Clear transcript for next question (your current behavior)
   timeline = [];
   promptBox.value = "";
   updateTranscript();
 
-  responseBox.textContent = "";
-  setStatus(sendStatus, "Sending…", "text-orange-600");
-
-  try {
-    const body = {
-      prompt: msg,
-      instructions: (localStorage.getItem("instructions") || "").slice(0, MAX_INSTR_CHARS),
-      resumeText: (localStorage.getItem("resumeText") || "").slice(0, MAX_RESUME_CHARS)
-    };
-
-    const res = await fetch("/api?path=chat/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    });
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      responseBox.textContent += decoder.decode(value);
-    }
-
-    setStatus(sendStatus, "Done", "text-green-600");
-  } catch {
-    setStatus(sendStatus, "Failed", "text-red-600");
-  }
+  // Start streaming; if user clicks Send again, previous gets aborted
+  await startChatStreaming(msg);
 };
 
 //--------------------------------------------------------------
@@ -582,13 +544,18 @@ clearBtn.onclick = () => {
 };
 
 //--------------------------------------------------------------
-// RESET everything including GPT response
+// RESET (your exact requirement):
+// - stop ChatGPT streaming output
+// - clear response box
+// - do NOT stop mic/system/credits
 //--------------------------------------------------------------
-resetBtn.onclick = () => {
-  timeline = [];
-  promptBox.value = "";
-  responseBox.textContent = "";
-  setStatus(sendStatus, "All cleared", "text-green-600");
+resetBtn.onclick = async () => {
+  abortChatStreamOnly();          // stops remaining tokens immediately
+  responseBox.textContent = "";   // clears response box
+  setStatus(sendStatus, "Response reset", "text-green-600");
+
+  // optional: also reset backend chat state
+  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
 };
 
 //--------------------------------------------------------------
@@ -607,7 +574,8 @@ window.addEventListener("load", async () => {
   if (!session) return (window.location.href = "/auth?tab=login");
 
   await loadUserProfile();
-  await fetch("/api?path=chat/reset", { method: "POST" });
+
+  await fetch("/api?path=chat/reset", { method: "POST" }).catch(() => {});
 
   timeline = [];
   updateTranscript();
