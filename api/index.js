@@ -3,7 +3,8 @@ import OpenAI from "openai";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
-export const config = { runtime: "nodejs18.x" };
+export const config = { runtime: "nodejs" };
+
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
