@@ -1,9 +1,7 @@
-import Busboy from "busboy/lib/types/index.js";
+const Busboy = require("busboy");
 import OpenAI from "openai";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
-
-export const config = { runtime: "nodejs" };
 
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
