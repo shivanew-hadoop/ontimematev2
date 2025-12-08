@@ -16,7 +16,6 @@ const resetBtn = document.getElementById("resetBtn");
 const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
-const logoutBtn = document.getElementById("logoutBtn");
 
 //--------------------------------------------------------------
 // STATE
@@ -38,8 +37,8 @@ let sysFlushInFlight = false;
 
 let timeline = [];
 let autoFlushTimer = null;
-let creditTimer = null;
 let blockMicUntil = 0;
+let creditTimer = null;
 
 //--------------------------------------------------------------
 // Helpers
@@ -66,19 +65,6 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-function updateUserInfo(data) {
-  userInfo.innerHTML = `
-    Logged in as <b>${data.user.email}</b><br>
-    Credits: <b id="liveCredits">${data.user.credits}</b><br>
-    Joined: ${data.user.created_ymd}
-  `;
-}
-
-function setLiveCredits(c) {
-  const el = document.getElementById("liveCredits");
-  if (el) el.textContent = c;
-}
-
 //--------------------------------------------------------------
 // Load USER PROFILE
 //--------------------------------------------------------------
@@ -90,14 +76,23 @@ async function loadUserProfile() {
   const data = await res.json();
   if (!res.ok) throw new Error(data.error);
 
-  updateUserInfo(data);
-  return data.user;
+  userInfo.innerHTML = `
+    Logged in as <b>${data.user.email}</b><br>
+    Credits: <b id="liveCredits">${data.user.credits}</b><br>
+    Joined: ${data.user.created_ymd}
+  `;
+}
+
+function setLiveCredits(val) {
+  const el = document.getElementById("liveCredits");
+  if (el) el.textContent = val;
 }
 
 //--------------------------------------------------------------
 // Instructions
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
+
 instructionsBox.addEventListener("input", () => {
   localStorage.setItem("instructions", instructionsBox.value);
   instrStatus.textContent = "Saved";
@@ -129,7 +124,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC SpeechRecognition
+// MIC Speech Recognition
 //--------------------------------------------------------------
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -180,7 +175,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO
+// System Audio
 //--------------------------------------------------------------
 async function ensureContext() {
   if (!audioContext) audioContext = new AudioContext();
@@ -188,8 +183,6 @@ async function ensureContext() {
 }
 
 async function enableSystemAudio() {
-  if (!isRunning) return alert("Start mic first!");
-
   await ensureContext();
 
   try {
@@ -198,12 +191,14 @@ async function enableSystemAudio() {
       audio: true
     });
   } catch {
-    return setStatus(audioStatus, "Permission denied", "text-red-600");
+    setStatus(audioStatus, "Permission denied", "text-red-600");
+    return;
   }
 
   const track = sysStream.getAudioTracks()[0];
   if (!track) {
-    return setStatus(audioStatus, "No system audio detected", "text-red-600");
+    setStatus(audioStatus, "No system audio detected", "text-red-600");
+    return;
   }
 
   sysSource = audioContext.createMediaStreamSource(sysStream);
@@ -313,37 +308,38 @@ async function flushSystemAudio() {
 }
 
 //--------------------------------------------------------------
-// CREDITS DEDUCTION LOOP (1 credit/sec)
+// CREDITS LOOP (1/sec)
 //--------------------------------------------------------------
-async function startCreditLoop() {
+function startCreditLoop() {
   if (creditTimer) clearInterval(creditTimer);
 
   creditTimer = setInterval(async () => {
     if (!isRunning) return;
 
-    const res = await fetch("/api?path=user/deduct", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.access_token}`
-      },
-      body: JSON.stringify({ seconds: 1 })
-    });
+    try {
+      const res = await fetch("/api?path=user/deduct", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${session.access_token}`
+        },
+        body: JSON.stringify({ seconds: 1 })
+      });
 
-    const data = await res.json();
+      const data = await res.json();
+      if (data?.credits != null) setLiveCredits(data.credits);
 
-    setLiveCredits(data.credits);
-
-    if (data.stop) {
-      stopAll();
-      alert("Credits finished!");
-    }
-
+    } catch (_) {}
   }, 1000);
 }
 
+function stopCreditLoop() {
+  if (creditTimer) clearInterval(creditTimer);
+  creditTimer = null;
+}
+
 //--------------------------------------------------------------
-// START
+// START / STOP
 //--------------------------------------------------------------
 async function startAll() {
   if (isRunning) return;
@@ -354,20 +350,25 @@ async function startAll() {
   updateTranscript();
 
   isRunning = true;
-
   startBtn.disabled = true;
   stopBtn.disabled = false;
-  sysBtn.disabled = false;
 
+  // HIGH VISIBILITY BUTTONS
+  startBtn.classList.add("bg-green-700", "text-white");
+  stopBtn.classList.add("bg-red-700", "text-white");
+  sysBtn.classList.add("bg-purple-700", "text-white");
+
+  // SEND enabled only after start
+  sendBtn.disabled = false;
+  sendBtn.classList.remove("opacity-50", "cursor-not-allowed");
+
+  await ensureContext();
   startMic();
   startCreditLoop();
 
   setStatus(audioStatus, "Mic active", "text-green-600");
 }
 
-//--------------------------------------------------------------
-// STOP
-//--------------------------------------------------------------
 function stopAll() {
   isRunning = false;
 
@@ -376,18 +377,25 @@ function stopAll() {
   if (sysStream) sysStream.getTracks().forEach(t => t.stop());
   sysStream = null;
 
+  stopCreditLoop();
+
   if (autoFlushTimer) clearInterval(autoFlushTimer);
-  if (creditTimer) clearInterval(creditTimer);
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
-  sysBtn.disabled = true;
+
+  startBtn.classList.remove("bg-green-700", "text-white");
+  stopBtn.classList.remove("bg-red-700", "text-white");
+  sysBtn.classList.remove("bg-purple-700", "text-white");
+
+  sendBtn.disabled = true;
+  sendBtn.classList.add("opacity-50", "cursor-not-allowed");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
 //--------------------------------------------------------------
-// SEND ChatGPT
+// SEND to ChatGPT
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   const msg = normalize(promptBox.value);
@@ -432,7 +440,7 @@ sendBtn.onclick = async () => {
 };
 
 //--------------------------------------------------------------
-// CLEAR transcript only
+// CLEAR ONLY transcript
 //--------------------------------------------------------------
 clearBtn.onclick = () => {
   timeline = [];
@@ -442,7 +450,7 @@ clearBtn.onclick = () => {
 };
 
 //--------------------------------------------------------------
-// RESET everything
+// RESET EVERYTHING (Transcript + ChatGPT Response)
 //--------------------------------------------------------------
 resetBtn.onclick = () => {
   timeline = [];
@@ -453,25 +461,18 @@ resetBtn.onclick = () => {
 };
 
 //--------------------------------------------------------------
-// LOGOUT
-//--------------------------------------------------------------
-logoutBtn.onclick = () => {
-  localStorage.removeItem("session");
-  window.location.href = "/auth?tab=login";
-};
-
-//--------------------------------------------------------------
 // PAGE LOAD
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  const profile = await loadUserProfile();
+  sendBtn.disabled = true;
+  sendBtn.classList.add("opacity-50", "cursor-not-allowed");
+
+  await loadUserProfile();
 
   await fetch("/api?path=chat/reset", { method: "POST" });
-
-  sysBtn.disabled = true;
 
   timeline = [];
   promptBox.value = "";
@@ -482,7 +483,7 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
-// Bind
+// Bind Buttons
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
