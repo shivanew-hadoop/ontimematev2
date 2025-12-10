@@ -4,12 +4,16 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
+// NEW — STATIC IMPORTS REQUIRED BY VERCEL
+import mammoth from "mammoth";
+import pdfParse from "pdf-parse";
+
 export const config = { runtime: "nodejs" };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 /* -------------------------------------------------------------------------- */
-/* HELPERS       - New section                                                             */
+/* HELPERS                                                                    */
 /* -------------------------------------------------------------------------- */
 
 function setCors(req, res) {
@@ -104,28 +108,27 @@ function safeHistory(history) {
   return out;
 }
 
+/* -------------------------------------------------------------------------- */
+/* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
+/* -------------------------------------------------------------------------- */
+
 function guessExtAndMime(file) {
   const name = (file?.filename || "").toLowerCase();
   const mime = (file?.mime || "").toLowerCase();
 
-  if (name.endsWith(".pdf") || mime.includes("pdf")) return { ext: "pdf", mime: "application/pdf" };
-  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) {
-    return { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
-  }
-  if (name.endsWith(".txt") || mime.includes("text/plain")) return { ext: "txt", mime: "text/plain" };
+  if (name.endsWith(".pdf") || mime.includes("pdf"))
+    return { ext: "pdf", mime: "application/pdf" };
 
-  // fallback
-  return { ext: "bin", mime: (file?.mime || "application/octet-stream").split(";")[0] };
-}
+  if (name.endsWith(".docx") || mime.includes("wordprocessingml"))
+    return {
+      ext: "docx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    };
 
-// Optional dependency loader (won’t crash build if not installed)
-async function tryRequire(moduleName) {
-  try {
-    const mod = await import(moduleName);
-    return mod?.default || mod;
-  } catch {
-    return null;
-  }
+  if (name.endsWith(".txt") || mime.includes("text/plain"))
+    return { ext: "txt", mime: "text/plain" };
+
+  return { ext: "bin", mime: "application/octet-stream" };
 }
 
 async function extractResumeText(file) {
@@ -133,32 +136,26 @@ async function extractResumeText(file) {
 
   const { ext } = guessExtAndMime(file);
 
-  // TXT (fast)
-  if (ext === "txt") {
-    return file.buffer.toString("utf8");
-  }
+  if (ext === "txt") return file.buffer.toString("utf8");
 
-  // DOCX
   if (ext === "docx") {
-    const mammoth = await tryRequire("mammoth");
-    if (!mammoth?.extractRawText) {
-      return "[Resume upload received, but DOCX extraction library missing. Install: npm i mammoth]";
+    try {
+      const out = await mammoth.extractRawText({ buffer: file.buffer });
+      return String(out?.value || "");
+    } catch {
+      return "[DOCX error during extraction]";
     }
-    const out = await mammoth.extractRawText({ buffer: file.buffer });
-    return String(out?.value || "");
   }
 
-  // PDF
   if (ext === "pdf") {
-    const pdfParse = await tryRequire("pdf-parse");
-    if (!pdfParse) {
-      return "[Resume upload received, but PDF extraction library missing. Install: npm i pdf-parse]";
+    try {
+      const out = await pdfParse(file.buffer);
+      return String(out?.text || "");
+    } catch {
+      return "[PDF error during extraction]";
     }
-    const out = await pdfParse(file.buffer);
-    return String(out?.text || "");
   }
 
-  // fallback (may be garbage for binary)
   return file.buffer.toString("utf8");
 }
 
@@ -174,12 +171,16 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "http://localhost");
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
-    // HEALTH
+    /* ------------------------------------------------------- */
+    /* HEALTH                                                   */
+    /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
     }
 
-    // ENV CHECK
+    /* ------------------------------------------------------- */
+    /* ENV CHECK                                               */
+    /* ------------------------------------------------------- */
     if (req.method === "GET" && path === "envcheck") {
       return res.status(200).json({
         hasSUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -191,7 +192,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // AUTH: SIGNUP
+    /* ------------------------------------------------------- */
+    /* AUTH — SIGNUP                                           */
+    /* ------------------------------------------------------- */
     if (path === "auth/signup") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -221,13 +224,14 @@ export default async function handler(req, res) {
       return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
     }
 
-    // AUTH: LOGIN
+    /* ------------------------------------------------------- */
+    /* AUTH — LOGIN                                            */
+    /* ------------------------------------------------------- */
     if (path === "auth/login") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
-      // Admin
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
@@ -238,7 +242,6 @@ export default async function handler(req, res) {
         });
       }
 
-      // User
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return res.status(401).json({ error: error.message });
@@ -252,9 +255,8 @@ export default async function handler(req, res) {
         .eq("id", user.id)
         .single();
 
-      if (!profile.data?.approved) {
+      if (!profile.data?.approved)
         return res.status(403).json({ error: "Admin has not approved your account yet" });
-      }
 
       return res.json({
         ok: true,
@@ -268,7 +270,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // AUTH: REFRESH
+    /* ------------------------------------------------------- */
+    /* AUTH — REFRESH TOKEN                                     */
+    /* ------------------------------------------------------- */
     if (path === "auth/refresh") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -289,7 +293,9 @@ export default async function handler(req, res) {
       });
     }
 
-    // AUTH: FORGOT
+    /* ------------------------------------------------------- */
+    /* AUTH — FORGOT PASSWORD                                   */
+    /* ------------------------------------------------------- */
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -297,7 +303,9 @@ export default async function handler(req, res) {
       return res.json({ ok: true });
     }
 
-    // USER: PROFILE
+    /* ------------------------------------------------------- */
+    /* USER PROFILE                                             */
+    /* ------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -310,10 +318,15 @@ export default async function handler(req, res) {
 
       if (!profile.data) return res.status(404).json({ error: "Profile not found" });
 
-      return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
+      return res.json({
+        ok: true,
+        user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
+      });
     }
 
-    // USER: DEDUCT (batch)
+    /* ------------------------------------------------------- */
+    /* USER — CREDIT DEDUCTION                                  */
+    /* ------------------------------------------------------- */
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -345,7 +358,9 @@ export default async function handler(req, res) {
       return res.json({ ok: remaining > 0, remaining });
     }
 
-    // RESUME EXTRACT (REAL)
+    /* ------------------------------------------------------- */
+    /* RESUME EXTRACTION (FINAL, WORKING ON VERCEL)             */
+    /* ------------------------------------------------------- */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -356,7 +371,9 @@ export default async function handler(req, res) {
       return res.json({ text: String(text || "") });
     }
 
-    // TRANSCRIBE (system audio)
+    /* ------------------------------------------------------- */
+    /* TRANSCRIBE SYSTEM AUDIO                                  */
+    /* ------------------------------------------------------- */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -374,7 +391,6 @@ export default async function handler(req, res) {
           language: "en",
           temperature: 0,
           response_format: "json",
-          // optional bias prompt if frontend sends it (won’t break if absent)
           prompt: (fields?.prompt || "").slice(0, 800)
         });
 
@@ -385,7 +401,9 @@ export default async function handler(req, res) {
       }
     }
 
-    // CHAT SEND (stream + history + resume + instructions)
+    /* ------------------------------------------------------- */
+    /* CHAT SEND (INSTRUCTIONS + RESUME INCLUDED)              */
+    /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
@@ -396,26 +414,22 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-      const instr = String(instructions || "").trim();
-      const resume = String(resumeText || "").trim();
-
-      // Strong system guidance to actually USE instructions + resume
       const baseSystem =
-        "You are a helpful assistant. Be concise, human-sounding, and practical. " +
-        "Avoid textbook definitions and fluff. Use the user’s project/resume context when provided.";
+        "You are a helpful assistant. Be concise, human-like, and practical. Avoid textbook answers. " +
+        "Use user resume/project context when available.";
+
       messages.push({ role: "system", content: baseSystem });
 
-      if (instr) {
-        messages.push({ role: "system", content: instr.slice(0, 4000) });
+      if (instructions?.trim()) {
+        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
 
-      if (resume) {
+      if (resumeText?.trim()) {
         messages.push({
           role: "system",
           content:
-            "Use the following resume/project context to tailor the answer with real examples. " +
-            "If details are missing, don’t invent.\n\nRESUME:\n" +
-            resume.slice(0, 12000)
+            "Use this resume context when answering. Do not invent details.\n\n" +
+            resumeText.trim().slice(0, 12000)
         });
       }
 
@@ -436,15 +450,19 @@ export default async function handler(req, res) {
           const t = chunk?.choices?.[0]?.delta?.content || "";
           if (t) res.write(t);
         }
-      } catch {
-        // client aborted
-      }
+      } catch {}
+
       return res.end();
     }
 
+    /* ------------------------------------------------------- */
+    /* CHAT RESET                                               */
+    /* ------------------------------------------------------- */
     if (path === "chat/reset") return res.json({ ok: true });
 
-    // ADMIN: users
+    /* ------------------------------------------------------- */
+    /* ADMIN — USER LIST                                        */
+    /* ------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -457,7 +475,9 @@ export default async function handler(req, res) {
       return res.json({ users: data });
     }
 
-    // ADMIN: approve
+    /* ------------------------------------------------------- */
+    /* ADMIN — APPROVE USER                                     */
+    /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -474,7 +494,9 @@ export default async function handler(req, res) {
       return res.json({ ok: true, user: data });
     }
 
-    // ADMIN: credits
+    /* ------------------------------------------------------- */
+    /* ADMIN — UPDATE CREDITS                                   */
+    /* ------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
