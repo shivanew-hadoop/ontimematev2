@@ -24,8 +24,19 @@ const bannerTop = document.getElementById("bannerTop");
 let session = null;
 let isRunning = false;
 
+// MIC
 let recognition = null;
 let blockMicUntil = 0;
+
+// SYSTEM AUDIO (segment recorder)
+let sysStream = null;
+let sysTrack = null;
+let sysRecorder = null;
+let sysSegmentChunks = [];
+let sysSegmentTimer = null;
+let sysQueue = [];
+let sysAbort = null;
+let sysInFlight = 0;
 
 // transcript timeline
 let timeline = [];
@@ -41,28 +52,37 @@ let chatStreamSeq = 0;
 
 // in-session memory (clears on refresh/logout automatically)
 let chatHistory = [];
-const MAX_HISTORY_MESSAGES = 8;       // last 4 turns
+const MAX_HISTORY_MESSAGES = 8;     // last 4 turns
 const MAX_HISTORY_CHARS_EACH = 1500;
 
 // resume in memory (NOT localStorage)
 let resumeTextMem = "";
 
-// system transcript dedupe
+// system transcript dedupe tail
 let lastSysTail = "";
 
 //--------------------------------------------------------------
-// CONFIG
+// CONFIG (SYSTEM AUDIO tuned for lower latency WITHOUT corrupt audio)
 //--------------------------------------------------------------
-const CREDIT_BATCH_SEC = 5;
-const CREDITS_PER_SEC = 1;
+// IMPORTANT: do NOT use "rolling concatenated blobs" (creates invalid WebM).
+// We keep stop/start segments so each file is valid and OpenAI accepts it.
 
-// SYSTEM AUDIO LOW LATENCY (only system-audio changes)
-const SYS_TIMESLICE_MS = 250;     // recorder emits blobs every 250ms
-const SYS_FLUSH_MS = 900;         // attempt transcribe ~every 0.9s
-const SYS_WINDOW_MS = 1600;       // send last 1.6 seconds audio
-const SYS_OVERLAP_MS = 600;       // keep last 0.6 seconds after flush
-const SYS_MAX_BACKLOG = 2;        // drop old if lagging
-const SYS_MIN_BYTES = 4500;       // minimum blob size to transcribe
+const SYS_SEGMENT_MS = 1400;              // LOWER latency (was 2800). Try 1200 if you want even faster.
+const SYS_MIN_BYTES = 2200;              // allow smaller segments; backend already ignores too-small buffers
+const SYS_MAX_CONCURRENT = 2;            // parallel transcribes for speed
+const SYS_TYPE_MS_PER_WORD = 18;         // UI typewriter (not Whisper streaming)
+
+// credits (unchanged)
+const CREDIT_BATCH_SEC = 5;              // deduct in batches (backend update)
+const CREDITS_PER_SEC = 1;               // 1 credit per second
+
+// MIC accent handling (browser SR varies by machine/browser)
+const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
+let micLangIndex = 0;
+
+// Whisper bias/prompt (system audio only) - backend may ignore but it won't break
+const WHISPER_BIAS_PROMPT =
+  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns, numbers, and punctuation.";
 
 //--------------------------------------------------------------
 // Helpers
@@ -78,27 +98,52 @@ function hideBanner() {
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
+
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
+
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
+
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
+
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
   promptBox.scrollTop = promptBox.scrollHeight;
 }
+
 function addToTimeline(txt) {
   txt = normalize(txt);
   if (!txt) return;
   timeline.push({ t: Date.now(), text: txt });
   updateTranscript();
+}
+
+// UI-only: show system transcript word-by-word once Whisper returns chunk
+function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
+  const cleaned = normalize(txt);
+  if (!cleaned) return;
+
+  const entry = { t: Date.now(), text: "" };
+  timeline.push(entry);
+
+  const words = cleaned.split(" ");
+  let i = 0;
+
+  const timer = setInterval(() => {
+    if (!isRunning) { clearInterval(timer); return; }
+    if (i >= words.length) { clearInterval(timer); return; }
+
+    entry.text += (entry.text ? " " : "") + words[i++];
+    updateTranscript();
+  }, msPerWord);
 }
 
 //--------------------------------------------------------------
@@ -108,7 +153,7 @@ function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
   if (!exp) return false;
   const now = Math.floor(Date.now() / 1000);
-  return exp - now < 60; // refresh if <60s remaining
+  return exp - now < 60;
 }
 
 async function refreshAccessToken() {
@@ -132,10 +177,8 @@ async function refreshAccessToken() {
 }
 
 async function apiFetch(path, opts = {}, needAuth = true) {
-  if (needAuth) {
-    if (isTokenNearExpiry()) {
-      try { await refreshAccessToken(); } catch (e) { console.error(e); }
-    }
+  if (needAuth && isTokenNearExpiry()) {
+    try { await refreshAccessToken(); } catch (e) { console.error(e); }
   }
 
   const headers = { ...(opts.headers || {}) };
@@ -143,7 +186,6 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 
   const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
 
-  // retry once on expired/invalid token
   if (needAuth && res.status === 401) {
     const t = await res.text().catch(() => "");
     const looksExpired =
@@ -206,19 +248,27 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition
+// MIC — SpeechRecognition (accent friendly fallback)
 //--------------------------------------------------------------
+function stopMicOnly() {
+  try { recognition?.stop(); } catch {}
+  recognition = null;
+}
+
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    setStatus(audioStatus, "SpeechRecognition not supported", "text-red-600");
+    setStatus(audioStatus, "SpeechRecognition not supported in this browser", "text-red-600");
     return false;
   }
 
+  stopMicOnly();
+
   recognition = new SR();
-  recognition.lang = "en-US"; // browser SR is limited; system audio uses Whisper prompt for accents
   recognition.continuous = true;
   recognition.interimResults = true;
+
+  recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
 
   recognition.onresult = (ev) => {
     if (!isRunning) return;
@@ -238,11 +288,13 @@ function startMic() {
     }
   };
 
-  recognition.onerror = () => {};
+  recognition.onerror = () => {
+    micLangIndex = (micLangIndex + 1) % MIC_LANGS.length;
+  };
+
   recognition.onend = () => {
-    if (isRunning) {
-      try { recognition.start(); } catch {}
-    }
+    if (!isRunning) return;
+    try { recognition.start(); } catch {}
   };
 
   try { recognition.start(); } catch {}
@@ -250,18 +302,10 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — LOW LATENCY (timeslice + rolling window)
+// SYSTEM AUDIO — segment recorder (VALID audio) + parallel transcribe
 //--------------------------------------------------------------
-let sysStream = null;
-let sysTrack = null;
-let sysRecorder = null;
-let sysRing = [];                // [{ t:number, blob:Blob }]
-let sysFlushTimer = null;
-let sysUploading = false;
-let sysFlushPending = false;
-let sysAbort = null;
-
 function pickBestMimeType() {
+  // Prefer WebM Opus (best supported)
   const candidates = [
     "audio/webm;codecs=opus",
     "audio/webm",
@@ -271,22 +315,22 @@ function pickBestMimeType() {
   for (const t of candidates) {
     if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
   }
-  return "";
+  return ""; // let browser choose
 }
 
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
   sysAbort = null;
 
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = null;
+  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
+  sysSegmentTimer = null;
 
   try { sysRecorder?.stop(); } catch {}
   sysRecorder = null;
 
-  sysRing = [];
-  sysUploading = false;
-  sysFlushPending = false;
+  sysSegmentChunks = [];
+  sysQueue = [];
+  sysInFlight = 0;
 
   if (sysStream) {
     try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
@@ -304,12 +348,11 @@ async function enableSystemAudio() {
 
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
-      // Keep video minimal; Chrome tab capture requires video track
-      video: { frameRate: 1, width: 1, height: 1 },
+      video: true,
       audio: true
     });
   } catch {
-    setStatus(audioStatus, "System audio denied", "text-red-600");
+    setStatus(audioStatus, "System audio denied. Use Chrome TAB capture + Share audio.", "text-red-600");
     return;
   }
 
@@ -321,17 +364,16 @@ async function enableSystemAudio() {
   }
 
   sysAbort = new AbortController();
-  startSystemLowLatencyRecorder();
-
-  setStatus(audioStatus, "System audio enabled (low latency)", "text-green-600");
+  startSystemSegmentRecorder();
+  setStatus(audioStatus, `System audio enabled (segment ${SYS_SEGMENT_MS}ms)`, "text-green-600");
 }
 
-function startSystemLowLatencyRecorder() {
+function startSystemSegmentRecorder() {
   if (!sysTrack) return;
 
   const audioOnly = new MediaStream([sysTrack]);
   const mimeType = pickBestMimeType();
-  sysRing = [];
+  sysSegmentChunks = [];
 
   try {
     sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
@@ -344,25 +386,30 @@ function startSystemLowLatencyRecorder() {
 
   sysRecorder.ondataavailable = (ev) => {
     if (!isRunning) return;
-    if (!ev.data || !ev.data.size) return;
-
-    sysRing.push({ t: Date.now(), blob: ev.data });
-
-    // keep bounded by time
-    const cutoff = Date.now() - (SYS_WINDOW_MS + 2000);
-    sysRing = sysRing.filter(x => x.t >= cutoff);
-
-    // bound absolute item count
-    if (sysRing.length > 60) sysRing = sysRing.slice(-60);
+    if (ev.data && ev.data.size) sysSegmentChunks.push(ev.data);
   };
 
-  sysRecorder.onerror = (e) => {
-    console.error("sysRecorder error", e);
-    setStatus(audioStatus, "System audio error", "text-red-600");
+  sysRecorder.onstop = () => {
+    if (!isRunning) return;
+
+    // IMPORTANT: this finalized blob is a valid container -> OpenAI accepts it
+    const blobType = sysRecorder?.mimeType || "audio/webm";
+    const blob = new Blob(sysSegmentChunks, { type: blobType });
+    sysSegmentChunks = [];
+
+    if (blob.size >= SYS_MIN_BYTES) {
+      sysQueue.push(blob);
+      drainSysQueue();
+    }
+
+    // restart next segment
+    if (isRunning && sysTrack && sysTrack.readyState === "live") {
+      startSystemSegmentRecorder();
+    }
   };
 
   try {
-    sysRecorder.start(SYS_TIMESLICE_MS);
+    sysRecorder.start();
   } catch (e) {
     console.error(e);
     setStatus(audioStatus, "System audio start failed", "text-red-600");
@@ -370,53 +417,30 @@ function startSystemLowLatencyRecorder() {
     return;
   }
 
-  if (sysFlushTimer) clearInterval(sysFlushTimer);
-  sysFlushTimer = setInterval(() => {
+  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
+  sysSegmentTimer = setInterval(() => {
     if (!isRunning) return;
-    flushSystemLowLatency();
-  }, SYS_FLUSH_MS);
+    try { sysRecorder?.stop(); } catch {}
+  }, SYS_SEGMENT_MS);
 }
 
-async function flushSystemLowLatency() {
-  if (sysUploading) {
-    sysFlushPending = true;
-    return;
-  }
+function drainSysQueue() {
+  if (!isRunning) return;
 
-  const now = Date.now();
-  const from = now - SYS_WINDOW_MS;
+  while (sysInFlight < SYS_MAX_CONCURRENT && sysQueue.length) {
+    const blob = sysQueue.shift();
+    sysInFlight++;
 
-  const parts = sysRing.filter(x => x.t >= from).map(x => x.blob);
-  if (!parts.length) return;
-
-  const blob = new Blob(parts, { type: sysRecorder?.mimeType || parts[0]?.type || "audio/webm" });
-  if (blob.size < SYS_MIN_BYTES) return;
-
-  // if lagging, drop old to keep latency low
-  const approxNeeded = Math.ceil((SYS_WINDOW_MS + SYS_OVERLAP_MS) / SYS_TIMESLICE_MS);
-  if (sysRing.length > approxNeeded * SYS_MAX_BACKLOG) {
-    sysRing = sysRing.slice(-approxNeeded);
-  }
-
-  sysUploading = true;
-  sysFlushPending = false;
-
-  try {
-    await transcribeSysBlob(blob);
-
-    // keep only overlap after flush
-    const keepFrom = now - SYS_OVERLAP_MS;
-    sysRing = sysRing.filter(x => x.t >= keepFrom);
-  } finally {
-    sysUploading = false;
-    if (sysFlushPending) {
-      sysFlushPending = false;
-      flushSystemLowLatency();
-    }
+    transcribeSysBlob(blob)
+      .catch(e => console.error("sys transcribe error", e))
+      .finally(() => {
+        sysInFlight--;
+        drainSysQueue();
+      });
   }
 }
 
-// removes duplicated beginnings like repeating phrases across overlapped windows
+// overlap dedupe
 function dedupeSystemText(newText) {
   const t = normalize(newText);
   if (!t) return "";
@@ -435,10 +459,7 @@ function dedupeSystemText(newText) {
   for (let k = maxK; k >= 3; k--) {
     const tailEnd = tailWords.slice(-k).join(" ").toLowerCase();
     const newStart = newWords.slice(0, k).join(" ").toLowerCase();
-    if (tailEnd === newStart) {
-      bestK = k;
-      break;
-    }
+    if (tailEnd === newStart) { bestK = k; break; }
   }
 
   const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
@@ -450,24 +471,27 @@ function dedupeSystemText(newText) {
 }
 
 async function transcribeSysBlob(blob) {
-  const fd = new FormData();
-
+  // Defensive: ensure a sane type (OpenAI rejects unknown sometimes)
   const type = (blob.type || "").toLowerCase();
-  const ext = type.includes("ogg") ? "ogg" : "webm";
-  fd.append("file", blob, `sys.${ext}`);
+  const useOgg = type.includes("ogg");
+  const useWebm = type.includes("webm") || !useOgg;
 
-  // Accent-friendly hint (system audio only)
-  fd.append("language", "en");
-  fd.append(
-    "prompt",
-    "Transcribe into clear English. Speaker may have Indian, British, Australian accents. Keep words accurate; minimal filler."
-  );
+  const safeType = useOgg ? "audio/ogg" : "audio/webm";
+  const safeBlob = (blob.type && blob.type.toLowerCase().includes("audio/"))
+    ? blob
+    : new Blob([blob], { type: safeType });
 
-  const res = await apiFetch(
-    "transcribe",
-    { method: "POST", body: fd, signal: sysAbort?.signal },
-    false
-  );
+  const fd = new FormData();
+  fd.append("file", safeBlob, useOgg ? "sys.ogg" : "sys.webm");
+
+  // Optional hint. Backend currently ignores extra fields (safe).
+  fd.append("prompt", WHISPER_BIAS_PROMPT);
+
+  const res = await apiFetch("transcribe", {
+    method: "POST",
+    body: fd,
+    signal: sysAbort?.signal
+  }, false);
 
   if (!res.ok) {
     const t = await res.text().catch(() => "");
@@ -477,7 +501,7 @@ async function transcribeSysBlob(blob) {
 
   const data = await res.json().catch(() => ({}));
   const cleaned = dedupeSystemText(data.text || "");
-  if (cleaned) addToTimeline(cleaned);
+  if (cleaned) addToTimelineTypewriter(cleaned);
 }
 
 //--------------------------------------------------------------
@@ -504,7 +528,7 @@ function startCreditTicking() {
 
     const now = Date.now();
     const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
-    if (elapsedSec < 5) return;
+    if (elapsedSec < CREDIT_BATCH_SEC) return;
 
     const batchSec = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
     const delta = batchSec * CREDITS_PER_SEC;
@@ -638,6 +662,7 @@ async function startAll() {
 
   isRunning = true;
 
+  // button states
   startBtn.disabled = true;
   startBtn.classList.add("opacity-50");
 
@@ -650,18 +675,19 @@ async function startAll() {
   sendBtn.disabled = false;
   sendBtn.classList.remove("opacity-60");
 
-  startMic();
-  startCreditTicking();
+  micLangIndex = 0; // reset to en-IN first
+  const micOk = startMic();
 
-  setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  if (!micOk) setStatus(audioStatus, "Mic not available. You can still use System Audio.", "text-orange-600");
+  else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+
+  startCreditTicking();
 }
 
 function stopAll() {
   isRunning = false;
 
-  try { recognition?.stop(); } catch {}
-  recognition = null;
-
+  stopMicOnly();
   stopSystemAudioOnly();
 
   if (creditTimer) clearInterval(creditTimer);
@@ -727,13 +753,12 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// PAGE LOAD (memory resets automatically because JS reloads)
+// PAGE LOAD
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  // if older session has no refresh_token, force relogin for stability
   if (!session.refresh_token) {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
@@ -744,15 +769,21 @@ window.addEventListener("load", async () => {
   if (resumeStatus) resumeStatus.textContent = "Resume cleared (refresh).";
 
   await loadUserProfile();
-
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
   timeline = [];
   updateTranscript();
+
+  stopBtn.disabled = true;
+  stopBtn.classList.add("opacity-50");
+  sysBtn.disabled = true;
+  sysBtn.classList.add("opacity-50");
+  sendBtn.disabled = true;
+  sendBtn.classList.add("opacity-60");
 });
 
 //--------------------------------------------------------------
-// Bind Buttons
+// Bind Buttons - new
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
