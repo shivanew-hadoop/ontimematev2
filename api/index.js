@@ -62,20 +62,27 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host)
+    return (
+      process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app"
+    );
   return `${proto}://${host}`;
 }
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(
+    2,
+    "0"
+  )}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
 async function getUserFromBearer(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
-  if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
+  if (token.startsWith("ADMIN::"))
+    return { ok: false, error: "Admin token not valid for user" };
 
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
@@ -125,10 +132,12 @@ export default async function handler(req, res) {
 
     // AUTH: SIGNUP
     if (path === "auth/signup") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { name, phone, email, password } = await readJson(req);
-      if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
+      if (!name || !email || !password)
+        return res.status(400).json({ error: "Missing fields" });
 
       const sb = supabaseAnon();
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -150,12 +159,16 @@ export default async function handler(req, res) {
         created_at: new Date().toISOString()
       });
 
-      return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
+      return res.json({
+        ok: true,
+        message: "Account created. Verify email + wait for approval."
+      });
     }
 
     // AUTH: LOGIN (returns refresh_token to avoid expired JWT issues)
     if (path === "auth/login") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
@@ -163,7 +176,9 @@ export default async function handler(req, res) {
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
-        const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
+        const token = `ADMIN::${adminEmail}::${Math.random()
+          .toString(36)
+          .slice(2)}`;
         return res.json({
           ok: true,
           session: { is_admin: true, token, user: { id: "admin", email: adminEmail } }
@@ -176,7 +191,8 @@ export default async function handler(req, res) {
       if (error) return res.status(401).json({ error: error.message });
 
       const user = data.user;
-      if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
+      if (!user.email_confirmed_at)
+        return res.status(403).json({ error: "Email not verified yet" });
 
       const profile = await supabaseAdmin()
         .from("user_profiles")
@@ -185,7 +201,9 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved) {
-        return res.status(403).json({ error: "Admin has not approved your account yet" });
+        return res
+          .status(403)
+          .json({ error: "Admin has not approved your account yet" });
       }
 
       return res.json({
@@ -193,8 +211,8 @@ export default async function handler(req, res) {
         session: {
           is_admin: false,
           access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,       // IMPORTANT
-          expires_at: data.session.expires_at,             // IMPORTANT
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at,
           user: { id: user.id, email: user.email }
         }
       });
@@ -202,10 +220,12 @@ export default async function handler(req, res) {
 
     // AUTH: REFRESH (fixes expired JWT)
     if (path === "auth/refresh") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { refresh_token } = await readJson(req);
-      if (!refresh_token) return res.status(400).json({ error: "Missing refresh_token" });
+      if (!refresh_token)
+        return res.status(400).json({ error: "Missing refresh_token" });
 
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.refreshSession({ refresh_token });
@@ -240,14 +260,19 @@ export default async function handler(req, res) {
         .eq("id", gate.user.id)
         .single();
 
-      if (!profile.data) return res.status(404).json({ error: "Profile not found" });
+      if (!profile.data)
+        return res.status(404).json({ error: "Profile not found" });
 
-      return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
+      return res.json({
+        ok: true,
+        user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
+      });
     }
 
     // USER: DEDUCT (batch)
     if (path === "user/deduct") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -283,9 +308,9 @@ export default async function handler(req, res) {
       return res.json({ text: file?.buffer?.toString("utf8") || "" });
     }
 
-    // TRANSCRIBE
+    // TRANSCRIBE  (UPDATED: accepts optional fields.prompt + fields.language)
     if (path === "transcribe") {
-      const { file } = await readMultipart(req);
+      const { fields, file } = await readMultipart(req);
       if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
 
       try {
@@ -293,13 +318,23 @@ export default async function handler(req, res) {
         const mime = (file.mime || "audio/webm").split(";")[0]; // strip codecs
         const audioFile = await toFile(file.buffer, filename, { type: mime });
 
-        const out = await openai.audio.transcriptions.create({
+        // optional tuning from frontend
+        const prompt = typeof fields?.prompt === "string" ? fields.prompt.slice(0, 800) : "";
+        const language = typeof fields?.language === "string" ? fields.language : "en";
+
+        // Build request safely: if prompt is not supported by your SDK/API, we omit it
+        const reqPayload = {
           file: audioFile,
           model: "gpt-4o-transcribe",
-          language: "en",
+          language,
           response_format: "json",
           temperature: 0
-        });
+        };
+
+        // Add prompt only if present (safe attempt)
+        if (prompt) reqPayload.prompt = prompt;
+
+        const out = await openai.audio.transcriptions.create(reqPayload);
 
         return res.json({ text: out.text || "" });
       } catch (e) {
@@ -316,10 +351,16 @@ export default async function handler(req, res) {
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
 
       const messages = [];
-      messages.push({ role: "system", content: String(instructions || "").slice(0, 4000) });
+      messages.push({
+        role: "system",
+        content: String(instructions || "").slice(0, 4000)
+      });
 
       if (resumeText) {
-        messages.push({ role: "system", content: `RESUME:\n${String(resumeText).slice(0, 12000)}` });
+        messages.push({
+          role: "system",
+          content: `RESUME:\n${String(resumeText).slice(0, 12000)}`
+        });
       }
 
       for (const m of safeHistory(history)) messages.push(m);

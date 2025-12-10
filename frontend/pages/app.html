@@ -8,6 +8,7 @@
 
   <style>
     body { background: #f7f7f7; }
+
     #responseBox {
       height: calc(100vh - 140px);
       overflow-y: auto;
@@ -18,8 +19,10 @@
       font-size: 14px;
       line-height: 1.45;
     }
+
     #promptBox {
-      height: 180px;
+      height: 260px;              /* bigger live transcript */
+      width: 100%;
       background: #fafafa;
       border: 1px solid #ccc;
       padding: 10px;
@@ -30,8 +33,8 @@
 </head>
 <body>
 
-<!-- TOP BANNER -->
-<div id="bannerTop" class="hidden text-white text-center py-2 font-semibold"></div>
+<!-- TOP BANNER (sticky) -->
+<div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
 <div class="flex h-screen">
   <!-- LEFT PANEL -->
@@ -48,7 +51,7 @@
 
     <!-- LIVE TRANSCRIPT -->
     <h3 class="font-semibold mb-2">Live Transcript</h3>
-    <textarea id="promptBox" class="w-full border p-2 text-xs bg-white rounded"></textarea>
+    <textarea id="promptBox"></textarea>
 
     <div class="flex gap-2 mt-2">
       <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-xs rounded opacity-60">Send</button>
@@ -73,7 +76,7 @@
       </button>
     </div>
 
-    <div id="audioStatus" class="text-xs mt-2 text-gray-600"></div>
+    <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
 
     <!-- INSTRUCTIONS -->
     <h3 class="font-semibold mt-6 mb-2">Custom Instructions</h3>

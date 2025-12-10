@@ -24,18 +24,19 @@ const bannerTop = document.getElementById("bannerTop");
 let session = null;
 let isRunning = false;
 
+// MIC
 let recognition = null;
 let blockMicUntil = 0;
 
-// System audio (segment recording)
+// SYSTEM AUDIO (segment recorder)
 let sysStream = null;
 let sysTrack = null;
 let sysRecorder = null;
 let sysSegmentChunks = [];
 let sysSegmentTimer = null;
 let sysQueue = [];
-let sysUploading = false;
 let sysAbort = null;
+let sysInFlight = 0;
 
 // transcript timeline
 let timeline = [];
@@ -51,22 +52,36 @@ let chatStreamSeq = 0;
 
 // in-session memory (clears on refresh/logout automatically)
 let chatHistory = [];
-const MAX_HISTORY_MESSAGES = 8;       // last 4 turns
+const MAX_HISTORY_MESSAGES = 8;     // last 4 turns
 const MAX_HISTORY_CHARS_EACH = 1500;
 
 // resume in memory (NOT localStorage)
 let resumeTextMem = "";
 
-// system transcript dedupe
+// system transcript dedupe tail
 let lastSysTail = "";
 
 //--------------------------------------------------------------
-// CONFIG
+// CONFIG (tuned for speed but still decent accuracy)
 //--------------------------------------------------------------
-const SYS_SEGMENT_MS = 6500;          // longer improves accuracy
-const SYS_MIN_BYTES = 9000;
-const CREDIT_BATCH_SEC = 5;
-const CREDITS_PER_SEC = 1;
+const SYS_SEGMENT_MS = 2800;              // faster than 6500ms, still usable accuracy
+const SYS_MIN_BYTES = 2500;
+const SYS_MAX_CONCURRENT = 2;             // parallel transcribes for speed
+const SYS_TYPE_MS_PER_WORD = 18;          // UI typewriter (not Whisper streaming)
+
+const CREDIT_BATCH_SEC = 5;              // deduct in batches (backend update)
+const CREDITS_PER_SEC = 1;               // 1 credit per second
+
+// Accent handling (MIC recognition hints)
+// You cannot truly force multi-accent accuracy in browser SpeechRecognition.
+// This improves coverage vs only en-US.
+const MIC_LANGS = ["en-IN", "en-GB", "en-US"]; // try fallback order
+let micLangIndex = 0;
+
+// Optional Whisper bias/prompt for accents (system audio only).
+// This does not break your flow; it just helps recognition sometimes.
+const WHISPER_BIAS_PROMPT =
+  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns, numbers, and punctuation.";
 
 //--------------------------------------------------------------
 // Helpers
@@ -82,27 +97,52 @@ function hideBanner() {
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
+
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
+
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
+
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
+
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
   promptBox.scrollTop = promptBox.scrollHeight;
 }
+
 function addToTimeline(txt) {
   txt = normalize(txt);
   if (!txt) return;
   timeline.push({ t: Date.now(), text: txt });
   updateTranscript();
+}
+
+// UI-only: show system transcript word-by-word once Whisper returns chunk
+function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
+  const cleaned = normalize(txt);
+  if (!cleaned) return;
+
+  const entry = { t: Date.now(), text: "" };
+  timeline.push(entry);
+
+  const words = cleaned.split(" ");
+  let i = 0;
+
+  const timer = setInterval(() => {
+    if (!isRunning) { clearInterval(timer); return; }
+    if (i >= words.length) { clearInterval(timer); return; }
+
+    entry.text += (entry.text ? " " : "") + words[i++];
+    updateTranscript();
+  }, msPerWord);
 }
 
 //--------------------------------------------------------------
@@ -112,7 +152,7 @@ function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
   if (!exp) return false;
   const now = Math.floor(Date.now() / 1000);
-  return exp - now < 60; // refresh if <60s remaining
+  return exp - now < 60;
 }
 
 async function refreshAccessToken() {
@@ -136,10 +176,8 @@ async function refreshAccessToken() {
 }
 
 async function apiFetch(path, opts = {}, needAuth = true) {
-  if (needAuth) {
-    if (isTokenNearExpiry()) {
-      try { await refreshAccessToken(); } catch (e) { console.error(e); }
-    }
+  if (needAuth && isTokenNearExpiry()) {
+    try { await refreshAccessToken(); } catch (e) { console.error(e); }
   }
 
   const headers = { ...(opts.headers || {}) };
@@ -147,7 +185,6 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 
   const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
 
-  // retry once on expired/invalid token
   if (needAuth && res.status === 401) {
     const t = await res.text().catch(() => "");
     const looksExpired =
@@ -210,19 +247,28 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition
+// MIC — SpeechRecognition (accent friendly fallback)
 //--------------------------------------------------------------
+function stopMicOnly() {
+  try { recognition?.stop(); } catch {}
+  recognition = null;
+}
+
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    setStatus(audioStatus, "SpeechRecognition not supported", "text-red-600");
+    setStatus(audioStatus, "SpeechRecognition not supported in this browser", "text-red-600");
     return false;
   }
 
+  stopMicOnly();
+
   recognition = new SR();
-  recognition.lang = "en-US";
   recognition.continuous = true;
   recognition.interimResults = true;
+
+  // Start with en-IN, fallback to en-GB, then en-US on repeated errors
+  recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
 
   recognition.onresult = (ev) => {
     if (!isRunning) return;
@@ -242,11 +288,15 @@ function startMic() {
     }
   };
 
-  recognition.onerror = () => {};
+  recognition.onerror = () => {
+    // try another locale on errors (accent coverage)
+    micLangIndex = (micLangIndex + 1) % MIC_LANGS.length;
+  };
+
   recognition.onend = () => {
-    if (isRunning) {
-      try { recognition.start(); } catch {}
-    }
+    if (!isRunning) return;
+    // restart quickly
+    try { recognition.start(); } catch {}
   };
 
   try { recognition.start(); } catch {}
@@ -254,7 +304,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — segment recorder + basic dedupe
+// SYSTEM AUDIO — segment recorder (faster) + dedupe + typewriter UI
 //--------------------------------------------------------------
 function pickBestMimeType() {
   const candidates = [
@@ -281,7 +331,7 @@ function stopSystemAudioOnly() {
 
   sysSegmentChunks = [];
   sysQueue = [];
-  sysUploading = false;
+  sysInFlight = 0;
 
   if (sysStream) {
     try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
@@ -303,7 +353,7 @@ async function enableSystemAudio() {
       audio: true
     });
   } catch {
-    setStatus(audioStatus, "System audio denied", "text-red-600");
+    setStatus(audioStatus, "System audio denied. Use Chrome TAB capture + Share audio.", "text-red-600");
     return;
   }
 
@@ -316,7 +366,6 @@ async function enableSystemAudio() {
 
   sysAbort = new AbortController();
   startSystemSegmentRecorder();
-
   setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
@@ -373,22 +422,23 @@ function startSystemSegmentRecorder() {
   }, SYS_SEGMENT_MS);
 }
 
-async function drainSysQueue() {
-  if (sysUploading) return;
-  if (!sysQueue.length) return;
+function drainSysQueue() {
+  if (!isRunning) return;
 
-  sysUploading = true;
-  try {
-    while (sysQueue.length && isRunning) {
-      const blob = sysQueue.shift();
-      await transcribeSysBlob(blob);
-    }
-  } finally {
-    sysUploading = false;
+  while (sysInFlight < SYS_MAX_CONCURRENT && sysQueue.length) {
+    const blob = sysQueue.shift();
+    sysInFlight++;
+
+    transcribeSysBlob(blob)
+      .catch(e => console.error("sys transcribe error", e))
+      .finally(() => {
+        sysInFlight--;
+        drainSysQueue();
+      });
   }
 }
 
-// removes duplicated beginnings like: "Artificial intelligence..." repeating
+// overlap dedupe
 function dedupeSystemText(newText) {
   const t = normalize(newText);
   if (!t) return "";
@@ -399,7 +449,6 @@ function dedupeSystemText(newText) {
     return t;
   }
 
-  // find overlap of up to last 10 words
   const tailWords = tail.split(" ");
   const newWords = t.split(" ");
 
@@ -408,15 +457,11 @@ function dedupeSystemText(newText) {
   for (let k = maxK; k >= 3; k--) {
     const tailEnd = tailWords.slice(-k).join(" ").toLowerCase();
     const newStart = newWords.slice(0, k).join(" ").toLowerCase();
-    if (tailEnd === newStart) {
-      bestK = k;
-      break;
-    }
+    if (tailEnd === newStart) { bestK = k; break; }
   }
 
   const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
 
-  // update tail
   const merged = (tail + " " + cleaned).trim();
   lastSysTail = merged.split(" ").slice(-12).join(" ");
 
@@ -429,6 +474,10 @@ async function transcribeSysBlob(blob) {
   const type = (blob.type || "").toLowerCase();
   const ext = type.includes("ogg") ? "ogg" : "webm";
   fd.append("file", blob, `sys.${ext}`);
+
+  // Optional prompt to improve accent recognition (backend must accept it).
+  // If backend ignores, it won't break.
+  fd.append("prompt", WHISPER_BIAS_PROMPT);
 
   const res = await apiFetch("transcribe", {
     method: "POST",
@@ -444,7 +493,7 @@ async function transcribeSysBlob(blob) {
 
   const data = await res.json().catch(() => ({}));
   const cleaned = dedupeSystemText(data.text || "");
-  if (cleaned) addToTimeline(cleaned);
+  if (cleaned) addToTimelineTypewriter(cleaned);
 }
 
 //--------------------------------------------------------------
@@ -471,7 +520,7 @@ function startCreditTicking() {
 
     const now = Date.now();
     const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
-    if (elapsedSec < 5) return;
+    if (elapsedSec < CREDIT_BATCH_SEC) return;
 
     const batchSec = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
     const delta = batchSec * CREDITS_PER_SEC;
@@ -484,6 +533,7 @@ function startCreditTicking() {
         showBanner("No more credits. Contact admin: shiva509203@gmail.com");
         return;
       }
+      // update UI less frequently (still ok)
       await loadUserProfile();
     } catch (e) {
       console.error(e);
@@ -605,6 +655,7 @@ async function startAll() {
 
   isRunning = true;
 
+  // button states
   startBtn.disabled = true;
   startBtn.classList.add("opacity-50");
 
@@ -617,18 +668,23 @@ async function startAll() {
   sendBtn.disabled = false;
   sendBtn.classList.remove("opacity-60");
 
-  startMic();
-  startCreditTicking();
+  // start mic + credits
+  micLangIndex = 0; // reset to en-IN first
+  const micOk = startMic();
+  if (!micOk) {
+    // still allow system audio + send if they want manual typing
+    setStatus(audioStatus, "Mic not available. You can still use System Audio.", "text-orange-600");
+  } else {
+    setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  }
 
-  setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  startCreditTicking();
 }
 
 function stopAll() {
   isRunning = false;
 
-  try { recognition?.stop(); } catch {}
-  recognition = null;
-
+  stopMicOnly();
   stopSystemAudioOnly();
 
   if (creditTimer) clearInterval(creditTimer);
@@ -668,6 +724,7 @@ sendBtn.onclick = async () => {
 };
 
 clearBtn.onclick = () => {
+  // clears only transcript
   timeline = [];
   promptBox.value = "";
   updateTranscript();
@@ -675,6 +732,7 @@ clearBtn.onclick = () => {
 };
 
 resetBtn.onclick = async () => {
+  // clears only response + server memory, DOES NOT clear transcript
   abortChatStreamOnly();
   responseBox.textContent = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
@@ -694,13 +752,12 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// PAGE LOAD (memory resets automatically because JS reloads)
+// PAGE LOAD
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  // if older session has no refresh_token, force relogin for stability
   if (!session.refresh_token) {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
@@ -711,11 +768,18 @@ window.addEventListener("load", async () => {
   if (resumeStatus) resumeStatus.textContent = "Resume cleared (refresh).";
 
   await loadUserProfile();
-
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
   timeline = [];
   updateTranscript();
+
+  // initial button states
+  stopBtn.disabled = true;
+  stopBtn.classList.add("opacity-50");
+  sysBtn.disabled = true;
+  sysBtn.classList.add("opacity-50");
+  sendBtn.disabled = true;
+  sendBtn.classList.add("opacity-60");
 });
 
 //--------------------------------------------------------------
