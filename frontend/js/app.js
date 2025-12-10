@@ -26,7 +26,6 @@ let isRunning = false;
 
 // MIC
 let recognition = null;
-let micInterimEntry = null; // <--- keeps interim text visible (does not disappear)
 let blockMicUntil = 0;
 
 // SYSTEM AUDIO (segment recorder)
@@ -38,7 +37,6 @@ let sysSegmentTimer = null;
 let sysQueue = [];
 let sysAbort = null;
 let sysInFlight = 0;
-let sysSeq = 0; // <--- increments on start/stop to ignore late responses
 
 // transcript timeline
 let timeline = [];
@@ -52,36 +50,35 @@ let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
 
-// in-session memory (clears on refresh/logout automatically)
+// in-session memory
 let chatHistory = [];
-const MAX_HISTORY_MESSAGES = 8;     // last 4 turns
+const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_CHARS_EACH = 1500;
 
-// resume in memory (NOT localStorage)
+// resume in memory
 let resumeTextMem = "";
 
 // system transcript dedupe tail
 let lastSysTail = "";
 
 //--------------------------------------------------------------
-// CONFIG (SYSTEM AUDIO tuned for lower latency WITHOUT corrupt audio)
+// CONFIG
 //--------------------------------------------------------------
-const SYS_SEGMENT_MS = 1400;        // you can try 1200 if you want slightly faster
-const SYS_MIN_BYTES = 2200;
+const SYS_SEGMENT_MS = 2800;
+const SYS_MIN_BYTES = 6000;
 const SYS_MAX_CONCURRENT = 2;
 const SYS_TYPE_MS_PER_WORD = 18;
 
-// credits (unchanged)
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
-// MIC accent handling (browser SR varies by machine/browser)
+// MIC accent fallback (browser limitation, but improves coverage)
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Whisper bias/prompt (system audio only) - backend may ignore but it won't break
+// Whisper bias prompt (system audio only)
 const WHISPER_BIAS_PROMPT =
-  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns, numbers, and punctuation.";
+  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
 
 //--------------------------------------------------------------
 // Helpers
@@ -97,27 +94,22 @@ function hideBanner() {
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
-
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
-
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
-
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
-
 function updateTranscript() {
-  promptBox.value = timeline.map(t => t.text).join(" ").trim();
+  promptBox.value = timeline.map(t => t.text).join(" ");
   promptBox.scrollTop = promptBox.scrollHeight;
 }
-
 function addToTimeline(txt) {
   txt = normalize(txt);
   if (!txt) return;
@@ -144,36 +136,8 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   }, msPerWord);
 }
 
-// Remove common hallucination/apology lines (system audio only)
-function stripSystemGarbage(text) {
-  const t = normalize(text);
-  if (!t) return "";
-
-  const lower = t.toLowerCase();
-
-  // If the chunk is mostly an apology/disclaimer, drop it completely
-  const looksLikeDisclaimer =
-    lower.includes("i am sorry") ||
-    lower.includes("i'm sorry") ||
-    lower.includes("cannot transcribe") ||
-    lower.includes("can't transcribe") ||
-    lower.includes("unable to transcribe") ||
-    lower.includes("i cannot") ||
-    lower.includes("i don't know");
-
-  const veryShort = t.length < 120;
-
-  // Specific common hallucination phrase you reported
-  const hasCantWait = lower.includes("can't wait to see you");
-
-  if ((looksLikeDisclaimer && veryShort) || (hasCantWait && veryShort)) return "";
-
-  // Otherwise keep as-is
-  return t;
-}
-
 //--------------------------------------------------------------
-// TOKEN REFRESH (fix expired JWT)
+// TOKEN REFRESH
 //--------------------------------------------------------------
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
@@ -244,7 +208,7 @@ async function loadUserProfile() {
 }
 
 //--------------------------------------------------------------
-// Instructions
+// Instructions (USED IN CHAT)
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
 instructionsBox.addEventListener("input", () => {
@@ -254,8 +218,15 @@ instructionsBox.addEventListener("input", () => {
   setTimeout(() => (instrStatus.textContent = ""), 600);
 });
 
+function getEffectiveInstructions() {
+  // Always use what user currently sees in the box (most accurate)
+  const live = (instructionsBox?.value || "").trim();
+  if (live) return live;
+  return (localStorage.getItem("instructions") || "").trim();
+}
+
 //--------------------------------------------------------------
-// Resume Upload (memory only)
+// Resume Upload (USED IN CHAT)
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
@@ -269,17 +240,24 @@ resumeInput?.addEventListener("change", async () => {
   const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
   const data = await res.json().catch(() => ({}));
 
-  resumeTextMem = String(data.text || "");
-  resumeStatus.textContent = resumeTextMem ? "Resume extracted (in session)." : "Resume empty";
+  resumeTextMem = String(data.text || "").trim();
+
+  if (!resumeTextMem) {
+    resumeStatus.textContent = "Resume extracted: empty";
+  } else if (resumeTextMem.startsWith("[Resume upload received")) {
+    // backend warning message (missing pdf/docx deps)
+    resumeStatus.textContent = resumeTextMem;
+  } else {
+    resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
+  }
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition (same logic, better UI behavior: no disappearing)
+// MIC — SpeechRecognition
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
   recognition = null;
-  micInterimEntry = null;
 }
 
 function startMic() {
@@ -300,34 +278,18 @@ function startMic() {
     if (!isRunning) return;
     if (Date.now() < blockMicUntil) return;
 
-    let latestInterim = "";
-
+    let interim = "";
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
-
-      if (r.isFinal) {
-        // remove interim entry (if any) and add final as a normal timeline entry
-        if (micInterimEntry) {
-          const idx = timeline.indexOf(micInterimEntry);
-          if (idx >= 0) timeline.splice(idx, 1);
-          micInterimEntry = null;
-        }
-        addToTimeline(text);
-      } else {
-        latestInterim = text;
-      }
+      if (r.isFinal) addToTimeline(text);
+      else interim = text;
     }
 
-    // keep interim visible as its own timeline entry (no disappearing)
-    if (latestInterim) {
-      if (!micInterimEntry) {
-        micInterimEntry = { t: Date.now(), text: latestInterim };
-        timeline.push(micInterimEntry);
-      } else {
-        micInterimEntry.text = latestInterim;
-      }
-      updateTranscript();
+    // keep finalized content visible; show interim live while speaking
+    if (interim) {
+      const base = timeline.map(t => t.text).join(" ");
+      promptBox.value = (base + " " + interim).trim();
     }
   };
 
@@ -345,7 +307,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — segment recorder (VALID audio) + parallel transcribe
+// SYSTEM AUDIO — segment recorder + dedupe + typewriter UI
 //--------------------------------------------------------------
 function pickBestMimeType() {
   const candidates = [
@@ -361,9 +323,6 @@ function pickBestMimeType() {
 }
 
 function stopSystemAudioOnly() {
-  // bump sequence so any in-flight response will be ignored
-  sysSeq++;
-
   try { sysAbort?.abort(); } catch {}
   sysAbort = null;
 
@@ -409,12 +368,11 @@ async function enableSystemAudio() {
   }
 
   sysAbort = new AbortController();
-  sysSeq++; // new run id
-  startSystemSegmentRecorder(sysSeq);
-  setStatus(audioStatus, `System audio enabled (segment ${SYS_SEGMENT_MS}ms)`, "text-green-600");
+  startSystemSegmentRecorder();
+  setStatus(audioStatus, "System audio enabled (low latency)", "text-green-600");
 }
 
-function startSystemSegmentRecorder(myRunSeq) {
+function startSystemSegmentRecorder() {
   if (!sysTrack) return;
 
   const audioOnly = new MediaStream([sysTrack]);
@@ -437,19 +395,18 @@ function startSystemSegmentRecorder(myRunSeq) {
 
   sysRecorder.onstop = () => {
     if (!isRunning) return;
-    if (myRunSeq !== sysSeq) return; // ignore late stop from old run
 
-    const blobType = sysRecorder?.mimeType || "audio/webm";
-    const blob = new Blob(sysSegmentChunks, { type: blobType });
+    const blob = new Blob(sysSegmentChunks, { type: sysRecorder?.mimeType || "" });
     sysSegmentChunks = [];
 
+    // avoid sending too-small/silent clips (reduces 400 corrupted/unsupported)
     if (blob.size >= SYS_MIN_BYTES) {
-      sysQueue.push({ blob, myRunSeq });
+      sysQueue.push(blob);
       drainSysQueue();
     }
 
     if (isRunning && sysTrack && sysTrack.readyState === "live") {
-      startSystemSegmentRecorder(myRunSeq);
+      startSystemSegmentRecorder();
     }
   };
 
@@ -473,10 +430,10 @@ function drainSysQueue() {
   if (!isRunning) return;
 
   while (sysInFlight < SYS_MAX_CONCURRENT && sysQueue.length) {
-    const item = sysQueue.shift();
+    const blob = sysQueue.shift();
     sysInFlight++;
 
-    transcribeSysBlob(item.blob, item.myRunSeq)
+    transcribeSysBlob(blob)
       .catch(e => console.error("sys transcribe error", e))
       .finally(() => {
         sysInFlight--;
@@ -514,22 +471,29 @@ function dedupeSystemText(newText) {
   return normalize(cleaned);
 }
 
-async function transcribeSysBlob(blob, myRunSeq) {
-  // Ignore late responses after stop/share-end
-  if (!isRunning) return;
-  if (myRunSeq !== sysSeq) return;
-  if (!sysTrack || sysTrack.readyState !== "live") return;
+function looksLikeWhisperHallucination(t) {
+  const s = normalize(t).toLowerCase();
+  if (!s) return true;
 
-  const type = (blob.type || "").toLowerCase();
-  const useOgg = type.includes("ogg");
-  const safeType = useOgg ? "audio/ogg" : "audio/webm";
+  // common tail hallucinations on silence/end
+  const badPhrases = [
+    "thanks for watching",
+    "thank you for watching",
+    "subscribe",
+    "i'm sorry, but i cannot",
+    "i am sorry, but i cannot",
+    "i can't wait to see you",
+    "unable to transcribe",
+    "please like and subscribe"
+  ];
+  return badPhrases.some(p => s.includes(p));
+}
 
-  const safeBlob = (blob.type && blob.type.toLowerCase().includes("audio/"))
-    ? blob
-    : new Blob([blob], { type: safeType });
-
+async function transcribeSysBlob(blob) {
   const fd = new FormData();
-  fd.append("file", safeBlob, useOgg ? "sys.ogg" : "sys.webm");
+  const type = (blob.type || "").toLowerCase();
+  const ext = type.includes("ogg") ? "ogg" : "webm";
+  fd.append("file", blob, `sys.${ext}`);
   fd.append("prompt", WHISPER_BIAS_PROMPT);
 
   const res = await apiFetch("transcribe", {
@@ -545,20 +509,11 @@ async function transcribeSysBlob(blob, myRunSeq) {
   }
 
   const data = await res.json().catch(() => ({}));
+  const raw = String(data.text || "");
+  if (looksLikeWhisperHallucination(raw)) return;
 
-  // 1) strip apology/hallucination lines
-  let text = stripSystemGarbage(data.text || "");
-  if (!text) return;
-
-  // 2) dedupe overlap across segments
-  text = dedupeSystemText(text);
-  if (!text) return;
-
-  // final guard (still running?)
-  if (!isRunning) return;
-  if (myRunSeq !== sysSeq) return;
-
-  addToTimelineTypewriter(text);
+  const cleaned = dedupeSystemText(raw);
+  if (cleaned) addToTimelineTypewriter(cleaned);
 }
 
 //--------------------------------------------------------------
@@ -607,7 +562,7 @@ function startCreditTicking() {
 }
 
 //--------------------------------------------------------------
-// Chat streaming + in-session memory + resume
+// Chat streaming + in-session memory + resume + instructions
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -644,8 +599,8 @@ async function startChatStreaming(prompt) {
   const body = {
     prompt,
     history: compactHistoryForRequest(),
-    instructions: localStorage.getItem("instructions") || "",
-    resumeText: resumeTextMem || ""
+    instructions: getEffectiveInstructions(),   // IMPORTANT
+    resumeText: resumeTextMem || ""             // IMPORTANT
   };
 
   let pending = "";
@@ -715,7 +670,6 @@ async function startAll() {
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
   timeline = [];
-  micInterimEntry = null;
   updateTranscript();
 
   isRunning = true;
@@ -734,7 +688,6 @@ async function startAll() {
 
   micLangIndex = 0;
   const micOk = startMic();
-
   if (!micOk) setStatus(audioStatus, "Mic not available. You can still use System Audio.", "text-orange-600");
   else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 
@@ -777,7 +730,6 @@ sendBtn.onclick = async () => {
   blockMicUntil = Date.now() + 700;
 
   timeline = [];
-  micInterimEntry = null;
   promptBox.value = "";
   updateTranscript();
 
@@ -786,7 +738,6 @@ sendBtn.onclick = async () => {
 
 clearBtn.onclick = () => {
   timeline = [];
-  micInterimEntry = null;
   promptBox.value = "";
   updateTranscript();
   setStatus(sendStatus, "Transcript cleared", "text-green-600");
@@ -800,7 +751,7 @@ resetBtn.onclick = async () => {
 };
 
 //--------------------------------------------------------------
-// LOGOUT (hard reset all memory)
+// LOGOUT
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
@@ -831,7 +782,6 @@ window.addEventListener("load", async () => {
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
   timeline = [];
-  micInterimEntry = null;
   updateTranscript();
 
   stopBtn.disabled = true;
@@ -843,7 +793,7 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
-// Bind Buttons - better
+// Bind Buttons
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
