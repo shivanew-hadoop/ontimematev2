@@ -20,17 +20,137 @@ const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
 
 //--------------------------------------------------------------
-// STATE
+// STATE + HIDDEN MODE INSTRUCTIONS (Option A)
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
 
-// MIC (browser SpeechRecognition)
+// Hidden instructions are kept ONLY in memory, not UI, not localStorage
+let hiddenInstructions = "";
+
+//--------------------------------------------------------------
+// INTERNAL MODE INSTRUCTIONS (Interview + Sales + General)
+//--------------------------------------------------------------
+const INTERNAL_MODE_INSTRUCTIONS = {
+  general: "",
+
+  interview: `
+Always answer in two parts:
+
+1) Quick Answer (Interview Style)
+   - Short bullet points
+   - Direct, no fluff
+   - Use domain terminology based on the question
+   - Highlight challenges, decisions, solutions
+
+2) Real-Time Project Example
+   - 2–4 bullets showing real scenario
+   - Explain action taken and impact created
+
+Question Expansion Rule:
+If the user provides a short transcript, keyword, or fragment 
+(e.g., 'Triggers in data warehouse', 'Page Object Model', 'Singleton pattern'),
+automatically expand it into a complete interview-style question before answering.
+
+Use formats such as:
+- "What is ... ?"
+- "How does ... work?"
+- "How did you use ... in your project?"
+- "Explain the role of ..."
+- "What challenges arise when using ... ?"
+
+Never answer a raw fragment directly. Always rewrite it into a proper question, 
+then answer using Interview Mode.
+
+Rules:
+- No ChatGPT tone, no textbook definitions
+- No repeating the question
+- Use user's resume/project context when available
+- For behavioral questions: fast STAR format
+- For technical questions: identify core challenge + mitigation
+`,
+
+  sales: `
+Give responses in a persuasive, human-friendly tone focusing on clarity and value.
+Avoid jargon unless asked.
+Use short, confident statements.
+Include a small real-world customer scenario example.
+`
+};
+
+//--------------------------------------------------------------
+// APPLY MODE SELECTION — Updates UI + Hidden Instructions
+//--------------------------------------------------------------
+function applyModeInstructions() {
+  const mode = modeSelect.value;
+
+  if (mode === "general") {
+    hiddenInstructions = "";
+    instructionsBox.removeAttribute("disabled");
+    instructionsBox.value = localStorage.getItem("instructions") || "";
+    instrStatus.textContent = "General mode active (custom instructions allowed)";
+    instrStatus.className = "text-green-600";
+  }
+
+  if (mode === "interview") {
+    hiddenInstructions = INTERNAL_MODE_INSTRUCTIONS.interview.trim();
+    instructionsBox.value = "Interview mode instructions loaded";
+    instructionsBox.setAttribute("disabled", "disabled");
+    instrStatus.textContent = "Interview mode active";
+    instrStatus.className = "text-green-600";
+  }
+
+  if (mode === "sales") {
+    hiddenInstructions = INTERNAL_MODE_INSTRUCTIONS.sales.trim();
+    instructionsBox.value = "Sales mode instructions loaded";
+    instructionsBox.setAttribute("disabled", "disabled");
+    instrStatus.textContent = "Sales mode active";
+    instrStatus.className = "text-green-600";
+  }
+
+  setTimeout(() => (instrStatus.textContent = ""), 900);
+}
+
+modeSelect.addEventListener("change", applyModeInstructions);
+
+//--------------------------------------------------------------
+// EFFECTIVE INSTRUCTIONS SENT TO BACKEND
+//--------------------------------------------------------------
+function getEffectiveInstructions() {
+  const mode = modeSelect.value;
+
+  // Interview & Sales → return hidden instructions only
+  if (mode === "interview" || mode === "sales") {
+    return hiddenInstructions;
+  }
+
+  // General → take user’s custom typed text
+  const live = (instructionsBox?.value || "").trim();
+  if (live && !live.includes("mode instructions loaded")) return live;
+
+  return (localStorage.getItem("instructions") || "").trim();
+}
+
+//--------------------------------------------------------------
+// SAVE CUSTOM INSTRUCTIONS ONLY IN GENERAL MODE
+//--------------------------------------------------------------
+instructionsBox.value = localStorage.getItem("instructions") || "";
+
+instructionsBox.addEventListener("input", () => {
+  if (modeSelect.value !== "general") return;
+  localStorage.setItem("instructions", instructionsBox.value);
+  instrStatus.textContent = "Saved";
+  instrStatus.className = "text-green-600";
+  setTimeout(() => (instrStatus.textContent = ""), 600);
+});
+
+//--------------------------------------------------------------
+// REMAINING ORIGINAL VARIABLES (UNCHANGED)
+//--------------------------------------------------------------
 let recognition = null;
 let blockMicUntil = 0;
-let micInterimEntry = null; // live partial text entry for mic
+let micInterimEntry = null;
 
-// SYSTEM AUDIO
 let sysStream = null;
 let sysTrack = null;
 let sysRecorder = null;
@@ -40,31 +160,22 @@ let sysQueue = [];
 let sysAbort = null;
 let sysInFlight = 0;
 
-// transcript timeline
 let timeline = [];
-
-// credits
 let creditTimer = null;
 let lastCreditAt = 0;
-
-// chat stream cancellation
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
 
-// memory
 let chatHistory = [];
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_CHARS_EACH = 1500;
 
-// resume memory
 let resumeTextMem = "";
-
-// system audio dedupe
 let lastSysTail = "";
 
 //--------------------------------------------------------------
-// CONFIG
+// CONFIG SECTION (UNCHANGED)
 //--------------------------------------------------------------
 const SYS_SEGMENT_MS = 2800;
 const SYS_MIN_BYTES = 6000;
@@ -77,44 +188,8 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// kept for future use if needed, but we won't send it to Whisper anymore
-const WHISPER_BIAS_PROMPT =
-  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
-
 //--------------------------------------------------------------
-// MODE-BASED INSTRUCTIONS
-//--------------------------------------------------------------
-const MODE_INSTRUCTIONS = {
-  general: "",
-  
-  interview: `
-Give responses in human conversational tone. Prioritize real project examples. 
-Avoid ChatGPT tone and avoid textbook definitions. 
-Always give Quick Answer (Interview Style) first, crisp bullet points, then real-time example from project or resume.
-Avoid assumptions; answer based on user's resume context.`,
-
-  sales: `
-Give responses in persuasive, human-friendly tone focused on value, benefits, and clarity.
-Avoid technical jargon unless asked. 
-Use short, confident statements. 
-Include mini real-world customer scenario examples.`
-};
-
-function applyModeInstructions() {
-  const mode = modeSelect.value;
-  const text = MODE_INSTRUCTIONS[mode] || "";
-
-  instructionsBox.value = text.trim();
-  localStorage.setItem("instructions", text.trim());
-  instrStatus.textContent = "Mode instructions applied";
-  instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 800);
-}
-
-modeSelect.addEventListener("change", applyModeInstructions);
-
-//--------------------------------------------------------------
-// Helpers
+// HELPERS (UNCHANGED)
 //--------------------------------------------------------------
 function showBanner(msg) {
   bannerTop.textContent = msg;
@@ -153,7 +228,6 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-// TYPEWRITER for system audio
 function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -174,7 +248,7 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
 }
 
 //--------------------------------------------------------------
-// TOKEN REFRESH
+// TOKEN REFRESH (UNCHANGED)
 //--------------------------------------------------------------
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
@@ -229,67 +303,8 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 
   return res;
 }
-
 //--------------------------------------------------------------
-// LOAD USER PROFILE
-//--------------------------------------------------------------
-async function loadUserProfile() {
-  const res = await apiFetch("user/profile", {}, true);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Failed to load profile");
-
-  userInfo.innerHTML =
-    `Logged in as <b>${data.user.email}</b><br>` +
-    `Credits: <b>${data.user.credits}</b><br>` +
-    `Joined: ${data.user.created_ymd}`;
-}
-
-//--------------------------------------------------------------
-// INSTRUCTIONS SAVING
-//--------------------------------------------------------------
-instructionsBox.value = localStorage.getItem("instructions") || "";
-
-instructionsBox.addEventListener("input", () => {
-  localStorage.setItem("instructions", instructionsBox.value);
-  instrStatus.textContent = "Saved";
-  instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 600);
-});
-
-function getEffectiveInstructions() {
-  const live = (instructionsBox?.value || "").trim();
-  if (live) return live;
-  return (localStorage.getItem("instructions") || "").trim();
-}
-
-//--------------------------------------------------------------
-// RESUME UPLOAD
-//--------------------------------------------------------------
-resumeInput?.addEventListener("change", async () => {
-  const file = resumeInput.files?.[0];
-  if (!file) return;
-
-  resumeStatus.textContent = "Processing…";
-
-  const fd = new FormData();
-  fd.append("file", file);
-
-  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
-  const data = await res.json().catch(() => ({}));
-
-  resumeTextMem = String(data.text || "").trim();
-
-  if (!resumeTextMem) {
-    resumeStatus.textContent = "Resume extracted: empty";
-  } else if (resumeTextMem.startsWith("[Resume upload received")) {
-    resumeStatus.textContent = resumeTextMem;
-  } else {
-    resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
-  }
-});
-
-//--------------------------------------------------------------
-// MIC — SpeechRecognition (all browsers, including Chrome)
+// MIC — SpeechRecognition (Chrome/Fallback) — UNCHANGED
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
@@ -322,7 +337,6 @@ function startMic() {
       const text = normalize(r[0].transcript || "");
 
       if (r.isFinal) {
-        // remove interim entry (if any) and add final as permanent line
         if (micInterimEntry) {
           const idx = timeline.indexOf(micInterimEntry);
           if (idx >= 0) timeline.splice(idx, 1);
@@ -334,7 +348,6 @@ function startMic() {
       }
     }
 
-    // keep interim visible as its own entry and keep updating it
     if (latestInterim) {
       if (!micInterimEntry) {
         micInterimEntry = { t: Date.now(), text: latestInterim };
@@ -342,7 +355,7 @@ function startMic() {
       } else {
         micInterimEntry.text = latestInterim;
       }
-      updateTranscript(); // shows: all final + current partial, no disappearing
+      updateTranscript();
     }
   };
 
@@ -360,7 +373,7 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO
+// SYSTEM AUDIO — MediaRecorder streaming — UNCHANGED
 //--------------------------------------------------------------
 function pickBestMimeType() {
   const c = [
@@ -483,12 +496,10 @@ function drainSysQueue() {
   }
 }
 
-// slightly more aggressive dedupe to avoid repeated short sentences
 function dedupeSystemText(newText) {
   const t = normalize(newText);
   if (!t) return "";
 
-  // If this is a short chunk and already present in recent tail, drop it
   if (t.length <= 180 && lastSysTail && lastSysTail.toLowerCase().includes(t.toLowerCase())) {
     return "";
   }
@@ -504,6 +515,7 @@ function dedupeSystemText(newText) {
 
   let bestK = 0;
   const maxK = Math.min(10, tailWords.length, newWords.length);
+
   for (let k = maxK; k >= 3; k--) {
     const tw = tailWords.slice(-k).join(" ").toLowerCase();
     const nw = newWords.slice(0, k).join(" ").toLowerCase();
@@ -533,7 +545,6 @@ function looksLikeWhisperHallucination(t) {
     "i dont know"
   ];
 
-  // very short generic sentences → likely garbage
   if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) {
     return true;
   }
@@ -545,10 +556,8 @@ async function transcribeSysBlob(blob) {
   const fd = new FormData();
   const type = (blob.type || "").toLowerCase();
   const ext = type.includes("ogg") ? "ogg" : "webm";
-  fd.append("file", blob, `sys.${ext}`);
 
-  // IMPORTANT: do NOT send the bias prompt anymore → avoids that sentence showing up in output
-  // fd.append("prompt", WHISPER_BIAS_PROMPT);
+  fd.append("file", blob, `sys.${ext}`);
 
   const res = await apiFetch("transcribe", {
     method: "POST",
@@ -609,9 +618,8 @@ function startCreditTicking() {
     }
   }, 500);
 }
-
 //--------------------------------------------------------------
-// CHAT STREAMING
+// CHAT STREAMING — UNCHANGED LOGIC
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -716,7 +724,7 @@ async function startAll() {
 
   isRunning = true;
 
-  // ENABLE BUTTONS
+  // Enable correct buttons
   startBtn.disabled = true;
   stopBtn.disabled = false;
   sysBtn.disabled = false;
@@ -727,8 +735,11 @@ async function startAll() {
   sendBtn.classList.remove("opacity-60");
 
   const micOk = startMic();
-  if (!micOk) setStatus(audioStatus, "Mic not available.", "text-orange-600");
-  else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  if (!micOk) {
+    setStatus(audioStatus, "Mic not available.", "text-orange-600");
+  } else {
+    setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  }
 
   startCreditTicking();
 }
@@ -787,6 +798,32 @@ resetBtn.onclick = async () => {
 };
 
 //--------------------------------------------------------------
+// RESUME UPLOAD
+//--------------------------------------------------------------
+resumeInput?.addEventListener("change", async () => {
+  const file = resumeInput.files?.[0];
+  if (!file) return;
+
+  resumeStatus.textContent = "Processing…";
+
+  const fd = new FormData();
+  fd.append("file", file);
+
+  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
+  const data = await res.json().catch(() => ({}));
+
+  resumeTextMem = String(data.text || "").trim();
+
+  if (!resumeTextMem) {
+    resumeStatus.textContent = "Resume extracted: empty";
+  } else if (resumeTextMem.startsWith("[Resume upload received")) {
+    resumeStatus.textContent = resumeTextMem;
+  } else {
+    resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
+  }
+});
+
+//--------------------------------------------------------------
 // LOGOUT
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
@@ -799,7 +836,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// PAGE LOAD
+// PAGE LOAD INITIALIZER
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");

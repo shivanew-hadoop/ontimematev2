@@ -33,10 +33,11 @@
 </head>
 <body>
 
-<!-- TOP BANNER (sticky) -->
+<!-- TOP BANNER -->
 <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
 <div class="flex h-screen">
+
   <!-- LEFT PANEL -->
   <div class="w-1/3 bg-white p-6 border-r overflow-y-auto">
 
@@ -63,13 +64,10 @@
 
     <!-- CONTROLS -->
     <h3 class="font-semibold mt-6 mb-2">Controls</h3>
-
     <div class="flex gap-2">
       <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-xs rounded">Start</button>
-
-      <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-xs rounded">Stop</button>
-
-      <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-xs rounded">System Audio</button>
+      <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-xs rounded opacity-50">Stop</button>
+      <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-xs rounded opacity-50">System Audio</button>
     </div>
 
     <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
@@ -82,12 +80,12 @@
       <option value="sales">Sales Mode</option>
     </select>
 
-    <!-- INSTRUCTIONS -->
+    <!-- CUSTOM INSTRUCTIONS -->
     <h3 class="font-semibold mt-6 mb-2">Custom Instructions</h3>
     <textarea id="instructionsBox" rows="5" class="w-full border p-2 text-xs bg-white rounded"></textarea>
     <div id="instrStatus" class="text-xs mt-1 text-gray-600"></div>
 
-    <!-- RESUME -->
+    <!-- RESUME UPLOAD -->
     <h3 class="font-semibold mt-6 mb-2">Resume Upload</h3>
     <input type="file" id="resumeInput" class="text-xs">
     <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
@@ -99,6 +97,7 @@
     <h3 class="text-lg font-semibold mb-2">ChatGPT Response</h3>
     <div id="responseBox"></div>
   </div>
+
 </div>
 
 <script src="/js/app.js"></script>
