@@ -35,7 +35,9 @@ const INTERNAL_MODE_INSTRUCTIONS = {
 
   interview: `
 Always answer in two parts:
-
+1) create the question first with exapansion rule
+2) then answer in interview mode
+Use Interview Mode:
 1) Quick Answer (Interview Style)
    - Short bullet points
    - Direct, no fluff
