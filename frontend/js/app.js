@@ -5,18 +5,22 @@ function renderMarkdown(md) {
   if (!md) return "";
 
   return md
-    // Escape unsafe HTML first
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-
-    // Convert markdown bold **text**
+    // Handle markdown bold **text**
     .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")
 
-    // Convert newlines to <br>
-    .replace(/\\n/g, "<br>")
-    .replace(/\n/g, "<br>");
+    // Convert double newlines into paragraph spacing
+    .replace(/\n\s*\n/g, "<br><br>")
+
+    // Convert normal newlines into <br>
+    .replace(/\n/g, "<br>")
+
+    // Convert literal <br> text coming from OpenAI into real breaks
+    .replace(/<br\s*\/?>/g, "<br>")
+
+    // Clean trailing whitespace
+    .trim();
 }
+
 
 //--------------------------------------------------------------
 // DOM ELEMENTS
