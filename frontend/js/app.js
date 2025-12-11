@@ -25,19 +25,10 @@ const modeSelect = document.getElementById("modeSelect");
 let session = null;
 let isRunning = false;
 
-// MIC (browser SR)
+// MIC (browser SpeechRecognition)
 let recognition = null;
 let blockMicUntil = 0;
 let micInterimEntry = null; // live partial text entry for mic
-
-// MIC via Whisper (Chrome-only)
-let micStream = null;
-let micRecorder = null;
-let micChunks = [];
-let micTimer = null;
-let micAbort = null;
-let micQueue = [];
-let micInFlight = 0;
 
 // SYSTEM AUDIO
 let sysStream = null;
@@ -86,20 +77,9 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
+// kept for future use if needed, but we won't send it to Whisper anymore
 const WHISPER_BIAS_PROMPT =
   "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
-
-// Chrome detection (not Edge / Opera)
-const ua = navigator.userAgent || "";
-const IS_CHROME =
-  ua.includes("Chrome") &&
-  !ua.includes("Edg") &&
-  !ua.includes("OPR");
-
-// Mic-via-Whisper segment config (Chrome only)
-const MIC_SEGMENT_MS = 1300;
-const MIC_MIN_BYTES = 1500;
-const MIC_MAX_CONCURRENT = 2;
 
 //--------------------------------------------------------------
 // MODE-BASED INSTRUCTIONS
@@ -173,7 +153,7 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-// TYPEWRITER for audio (system + mic-Whisper)
+// TYPEWRITER for system audio
 function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -309,7 +289,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition (Edge / non-Chrome path)
+// MIC — SpeechRecognition (all browsers, including Chrome)
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
@@ -377,138 +357,6 @@ function startMic() {
 
   try { recognition.start(); } catch {}
   return true;
-}
-
-//--------------------------------------------------------------
-// MIC via Whisper (Chrome-only path)
-//--------------------------------------------------------------
-function stopMicWhisperOnly() {
-  try { micAbort?.abort(); } catch {}
-  micAbort = null;
-
-  if (micTimer) clearInterval(micTimer);
-  micTimer = null;
-
-  try { micRecorder?.stop(); } catch {}
-  micRecorder = null;
-
-  micChunks = [];
-  micQueue = [];
-  micInFlight = 0;
-
-  if (micStream) {
-    try { micStream.getTracks().forEach(t => t.stop()); } catch {}
-  }
-  micStream = null;
-}
-
-async function startMicWhisper() {
-  stopMicWhisperOnly();
-
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-  } catch (e) {
-    console.error(e);
-    setStatus(audioStatus, "Mic capture denied.", "text-red-600");
-    return false;
-  }
-
-  const audioOnly = new MediaStream(micStream.getAudioTracks());
-  const mimeType = pickBestMimeType();
-  micChunks = [];
-  micAbort = new AbortController();
-
-  try {
-    micRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
-  } catch (e) {
-    console.error(e);
-    setStatus(audioStatus, "Mic recorder failed.", "text-red-600");
-    stopMicWhisperOnly();
-    return false;
-  }
-
-  micRecorder.ondataavailable = (ev) => {
-    if (!isRunning) return;
-    if (ev.data && ev.data.size) micChunks.push(ev.data);
-  };
-
-  micRecorder.onstop = () => {
-    if (!isRunning) return;
-
-    const blob = new Blob(micChunks, { type: micRecorder?.mimeType || "" });
-    micChunks = [];
-
-    if (blob.size >= MIC_MIN_BYTES) {
-      micQueue.push(blob);
-      drainMicQueue();
-    }
-
-    if (
-      isRunning &&
-      micStream &&
-      micStream.getAudioTracks()[0] &&
-      micStream.getAudioTracks()[0].readyState === "live"
-    ) {
-      startMicWhisperRecorderLoop();
-    }
-  };
-
-  function startMicWhisperRecorderLoop() {
-    try { micRecorder.start(); } catch (e) { console.error(e); return; }
-
-    if (micTimer) clearInterval(micTimer);
-    micTimer = setInterval(() => {
-      if (!isRunning) return;
-      try { micRecorder?.stop(); } catch {}
-    }, MIC_SEGMENT_MS);
-  }
-
-  startMicWhisperRecorderLoop();
-  setStatus(audioStatus, "Mic (Whisper) active.", "text-green-600");
-  return true;
-}
-
-function drainMicQueue() {
-  if (!isRunning) return;
-
-  while (micInFlight < MIC_MAX_CONCURRENT && micQueue.length) {
-    const blob = micQueue.shift();
-    micInFlight++;
-
-    transcribeMicBlob(blob)
-      .catch(e => console.error("mic transcribe error", e))
-      .finally(() => {
-        micInFlight--;
-        drainMicQueue();
-      });
-  }
-}
-
-async function transcribeMicBlob(blob) {
-  if (!isRunning) return;
-
-  const fd = new FormData();
-  fd.append("file", blob, "mic.webm");
-  fd.append("prompt", WHISPER_BIAS_PROMPT);
-
-  const res = await apiFetch("transcribe", {
-    method: "POST",
-    body: fd,
-    signal: micAbort?.signal
-  }, false);
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("mic transcribe failed", res.status, t);
-    return;
-  }
-
-  const data = await res.json().catch(() => ({}));
-  const raw = String(data.text || "").trim();
-  if (!raw) return;
-
-  // Stream back into transcript UI
-  addToTimelineTypewriter(raw);
 }
 
 //--------------------------------------------------------------
@@ -677,8 +525,19 @@ function looksLikeWhisperHallucination(t) {
     "subscribe",
     "i'm sorry",
     "i am sorry",
-    "please like and subscribe"
+    "please like and subscribe",
+    "transcribe clearly in english",
+    "handle indian, british, australian, and american accents",
+    "keep proper nouns and numbers",
+    "i don't know",
+    "i dont know"
   ];
+
+  // very short generic sentences → likely garbage
+  if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) {
+    return true;
+  }
+
   return bad.some(p => s.includes(p));
 }
 
@@ -687,7 +546,9 @@ async function transcribeSysBlob(blob) {
   const type = (blob.type || "").toLowerCase();
   const ext = type.includes("ogg") ? "ogg" : "webm";
   fd.append("file", blob, `sys.${ext}`);
-  fd.append("prompt", WHISPER_BIAS_PROMPT);
+
+  // IMPORTANT: do NOT send the bias prompt anymore → avoids that sentence showing up in output
+  // fd.append("prompt", WHISPER_BIAS_PROMPT);
 
   const res = await apiFetch("transcribe", {
     method: "POST",
@@ -865,27 +726,16 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  let micOk = false;
-  if (IS_CHROME) {
-    // Chrome → use Whisper mic pipeline
-    micOk = await startMicWhisper();
-  } else {
-    // Edge / others → keep SpeechRecognition
-    micOk = startMic();
-  }
-
+  const micOk = startMic();
   if (!micOk) setStatus(audioStatus, "Mic not available.", "text-orange-600");
-  else if (!IS_CHROME)
-    setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 
   startCreditTicking();
 }
 
 function stopAll() {
   isRunning = false;
-
   stopMicOnly();
-  stopMicWhisperOnly();
   stopSystemAudioOnly();
 
   if (creditTimer) clearInterval(creditTimer);
@@ -981,7 +831,7 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
-// BUTTON BINDINGS - new
+// BUTTON BINDINGS
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
