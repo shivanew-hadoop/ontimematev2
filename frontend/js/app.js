@@ -28,8 +28,7 @@ let isRunning = false;
 // MIC
 let recognition = null;
 let blockMicUntil = 0;
-// NEW: keep interim mic text as its own entry in timeline (so it doesn't disappear)
-let micInterimEntry = null;
+let micInterimEntry = null; // live partial text entry for mic
 
 // SYSTEM AUDIO
 let sysStream = null;
@@ -169,7 +168,6 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
     if (i >= words.length) return clearInterval(timer);
 
     entry.text += (entry.text ? " " : "") + words[i++];
-
     updateTranscript();
   }, msPerWord);
 }
@@ -290,12 +288,11 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition
+// MIC — SpeechRecognition (HuddleMate-like behaviour)
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
   recognition = null;
-  // clear any interim entry when mic stops
   micInterimEntry = null;
 }
 
@@ -322,10 +319,9 @@ function startMic() {
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
-      if (!text) continue;
 
       if (r.isFinal) {
-        // remove interim entry from timeline if present
+        // remove interim entry (if any) and add final as permanent line
         if (micInterimEntry) {
           const idx = timeline.indexOf(micInterimEntry);
           if (idx >= 0) timeline.splice(idx, 1);
@@ -337,7 +333,7 @@ function startMic() {
       }
     }
 
-    // keep interim visible as a dedicated entry so text doesn't disappear
+    // keep interim visible as its own entry and keep updating it
     if (latestInterim) {
       if (!micInterimEntry) {
         micInterimEntry = { t: Date.now(), text: latestInterim };
@@ -345,7 +341,7 @@ function startMic() {
       } else {
         micInterimEntry.text = latestInterim;
       }
-      updateTranscript();
+      updateTranscript(); // shows: all final + current partial, no disappearing
     }
   };
 
@@ -486,9 +482,15 @@ function drainSysQueue() {
   }
 }
 
+// slightly more aggressive dedupe to avoid repeated short sentences
 function dedupeSystemText(newText) {
   const t = normalize(newText);
   if (!t) return "";
+
+  // If this is a short chunk and already present in recent tail, drop it
+  if (t.length <= 180 && lastSysTail && lastSysTail.toLowerCase().includes(t.toLowerCase())) {
+    return "";
+  }
 
   const tail = lastSysTail;
   if (!tail) {
@@ -512,7 +514,6 @@ function dedupeSystemText(newText) {
   return normalize(cleaned);
 }
 
-// STRONGER hallucination filter (adds "can't wait to see you", etc.)
 function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
   if (!s) return true;
@@ -523,14 +524,7 @@ function looksLikeWhisperHallucination(t) {
     "subscribe",
     "i'm sorry",
     "i am sorry",
-    "please like and subscribe",
-    "i can't wait to see you",
-    "i cant wait to see you",
-    "i am sorry, but i cannot",
-    "i'm sorry, but i cannot",
-    "cannot transcribe the audio",
-    "unable to transcribe the audio",
-    "i don't know"
+    "please like and subscribe"
   ];
   return bad.some(p => s.includes(p));
 }
