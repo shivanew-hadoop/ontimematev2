@@ -58,6 +58,8 @@ const MODE_INSTRUCTIONS = {
   general: "",
 
   interview: `
+  OUTPUT FORMAT RULE:
+  Do NOT use HTML tags. No <br>, <p>, <div>. Use clean Markdown with **bold**, lists, and blank lines.
 Always answer in TWO SECTIONS ONLY:
 
 1) Quick Answer (Interview Style)
