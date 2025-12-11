@@ -1,6 +1,12 @@
 //--------------------------------------------------------------
 // DOM
 //--------------------------------------------------------------
+function renderMarkdown(md) {
+  return md
+    .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")     // bold
+    .replace(/\n/g, "<br>");                    // new lines
+}
+
 const userInfo = document.getElementById("userInfo");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
@@ -88,27 +94,12 @@ function applyModeInstructions() {
   const mode = modeSelect.value;
 
   if (mode === "general") {
-    hiddenInstructions = "";
-    instructionsBox.removeAttribute("disabled");
-    instructionsBox.value = localStorage.getItem("instructions") || "";
-    instrStatus.textContent = "General mode active";
-    instrStatus.className = "text-green-600";
-  }
-
-  if (mode === "interview") {
-    hiddenInstructions = INTERNAL_MODE_INSTRUCTIONS.interview.trim();
-    instructionsBox.value = "Interview mode instructions loaded";
-    instructionsBox.setAttribute("disabled", "disabled");
-    instrStatus.textContent = "Interview mode active";
-    instrStatus.className = "text-green-600";
-  }
-
-  if (mode === "sales") {
-    hiddenInstructions = INTERNAL_MODE_INSTRUCTIONS.sales.trim();
-    instructionsBox.value = "Sales mode instructions loaded";
-    instructionsBox.setAttribute("disabled", "disabled");
-    instrStatus.textContent = "Sales mode active";
-    instrStatus.className = "text-green-600";
+   instructionsBox.disabled = false;
+    instrStatus.textContent = "You can enter custom instructions.";
+  }else {
+    instructionsBox.disabled = true;
+    instructionsBox.value = "";
+    instrStatus.textContent = `${mode.charAt(0).toUpperCase() + mode.slice(1)} mode selected. Custom instructions disabled.`;
   }
 
   setTimeout(() => (instrStatus.textContent = ""), 900);
@@ -709,7 +700,7 @@ async function startChatStreaming(prompt) {
 
   const flush = () => {
     if (!pending) return;
-    responseBox.textContent += pending;
+    responseBox.textContent += renderMarkdown(pending)
     finalAnswer += pending;
     pending = "";
   };
