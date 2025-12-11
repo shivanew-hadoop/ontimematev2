@@ -465,14 +465,6 @@ Convert it into a natural interview-style question such as:
 - "What challenges arise when using __ ?"
 - "Why is __ important, and when should it be used?"
 - "Walk me through the end-to-end workflow of __ with a real example."
-- "What problem does __ solve in your system?"
-- "What are the best practices for implementing __ ?"
-- "What common mistakes occur with __, and how do you avoid them?"
-- "How does __ integrate with the rest of your architecture?"
-- "What performance or scalability issues can happen with __ ?"
-- "How would you debug or troubleshoot issues related to __ ?"
-- "How is __ different from similar tools or techniques?"
-- "How would you explain __ to a junior engineer in your team?"
 
 Never answer a raw fragment. Convert → then answer.
 

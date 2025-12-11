@@ -1,12 +1,26 @@
 //--------------------------------------------------------------
-// DOM
+// MARKDOWN → HTML RENDERER (BOLD + LINE BREAKS)
 //--------------------------------------------------------------
 function renderMarkdown(md) {
+  if (!md) return "";
+
   return md
-    .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")     // bold
-    .replace(/\n/g, "<br>");                    // new lines
+    // Escape unsafe HTML first
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+
+    // Convert markdown bold **text**
+    .replace(/\*\*(.*?)\*\*/g, "<b>$1</b>")
+
+    // Convert newlines to <br>
+    .replace(/\\n/g, "<br>")
+    .replace(/\n/g, "<br>");
 }
 
+//--------------------------------------------------------------
+// DOM ELEMENTS
+//--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
@@ -26,18 +40,15 @@ const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
 
 //--------------------------------------------------------------
-// STATE + HIDDEN MODE INSTRUCTIONS
+// SESSION + STATE
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
 
-let hiddenInstructions = ""; // Internal only (Option A)
+let hiddenInstructions = ""; // internal-only instructions for Interview/Sales
 
 //--------------------------------------------------------------
-// INTERNAL MODE INSTRUCTIONS (Interview/Sales/General)
-//--------------------------------------------------------------
-//--------------------------------------------------------------
-
+// MODE INSTRUCTIONS (UPDATED)
 //--------------------------------------------------------------
 const MODE_INSTRUCTIONS = {
   general: "",
@@ -76,7 +87,7 @@ If the user gives only a keyword/phrase (e.g., "POM", "data masking", "triggers"
 - "How is __ different from similar tools or techniques?"
 - "How would you explain __ to a junior engineer in your team?"
 
-Never answer a raw fragment. Convert it → then respond using the 2-part format above.
+Never answer a raw fragment. Convert it → then answer using the 2-part format above.
 `,
 
   sales: `
@@ -86,17 +97,16 @@ Use brief examples showing customer impact.
 `
 };
 
-
 //--------------------------------------------------------------
-// APPLY MODE INSTRUCTIONS + UI BEHAVIOR
+// APPLY MODE INSTRUCTIONS + TOGGLE CUSTOM INSTRUCTION INPUT
 //--------------------------------------------------------------
 function applyModeInstructions() {
   const mode = modeSelect.value;
 
   if (mode === "general") {
-   instructionsBox.disabled = false;
+    instructionsBox.disabled = false;
     instrStatus.textContent = "You can enter custom instructions.";
-  }else {
+  } else {
     instructionsBox.disabled = true;
     instructionsBox.value = "";
     instrStatus.textContent = `${mode.charAt(0).toUpperCase() + mode.slice(1)} mode selected. Custom instructions disabled.`;
@@ -107,18 +117,22 @@ function applyModeInstructions() {
 
 modeSelect.addEventListener("change", applyModeInstructions);
 
+// Set default mode to INTERVIEW
+modeSelect.value = "interview";
+applyModeInstructions();
+
 //--------------------------------------------------------------
 // EFFECTIVE INSTRUCTIONS SENT TO BACKEND
 //--------------------------------------------------------------
 function getEffectiveInstructions() {
   const mode = modeSelect.value;
 
-  // Interview & Sales use hidden instructions only
+  // Interview/Sales use internal instructions only
   if (mode === "interview" || mode === "sales") {
     return hiddenInstructions;
   }
 
-  // General mode uses user-defined custom instructions
+  // General mode = user custom instructions
   const live = (instructionsBox?.value || "").trim();
   if (live && !live.includes("mode instructions loaded")) return live;
 
@@ -126,20 +140,24 @@ function getEffectiveInstructions() {
 }
 
 //--------------------------------------------------------------
-// SAVE CUSTOM INSTRUCTIONS (General mode only)
+// SAVE CUSTOM INSTRUCTIONS (GENERAL MODE ONLY)
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
 
 instructionsBox.addEventListener("input", () => {
   if (modeSelect.value !== "general") return;
+
   localStorage.setItem("instructions", instructionsBox.value);
   instrStatus.textContent = "Saved";
   instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 600);
+
+  setTimeout(() => {
+    instrStatus.textContent = "";
+  }, 600);
 });
 
 //--------------------------------------------------------------
-// FIXED loadUserProfile() — SHOW USER + CREDITS + JOINED DATE
+// LOAD USER PROFILE (Credits + Email + Joined Date)
 //--------------------------------------------------------------
 async function loadUserProfile() {
   try {
@@ -166,7 +184,7 @@ async function loadUserProfile() {
 }
 
 //--------------------------------------------------------------
-// REMAINING VARIABLES (UNCHANGED)
+// REMAINING STATE VARIABLES (UNCHANGED)
 //--------------------------------------------------------------
 let recognition = null;
 let blockMicUntil = 0;
@@ -265,6 +283,8 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
     updateTranscript();
   }, msPerWord);
 }
+
+//-------------------------- END OF BATCH 1 --------------------------
 //--------------------------------------------------------------
 // TOKEN REFRESH — UNCHANGED
 //--------------------------------------------------------------
@@ -303,7 +323,10 @@ async function apiFetch(path, opts = {}, needAuth = true) {
   const headers = { ...(opts.headers || {}) };
   if (needAuth) Object.assign(headers, authHeaders());
 
-  const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
+  const res = await fetch(`/api?path=${encodeURIComponent(path)}`, {
+    ...opts,
+    headers
+  });
 
   if (needAuth && res.status === 401) {
     const t = await res.text().catch(() => "");
@@ -517,7 +540,7 @@ function drainSysQueue() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — Deduping + Hallucination Filter
+// SYSTEM AUDIO — Deduplication + Hallucination Filters
 //--------------------------------------------------------------
 function dedupeSystemText(text) {
   const t = normalize(text);
@@ -565,7 +588,6 @@ function looksLikeWhisperHallucination(t) {
     "i am sorry",
     "please like and subscribe",
     "transcribe clearly in english",
-    "keep proper nouns and numbers",
     "handle indian",
     "i don't know",
     "i dont know"
@@ -579,7 +601,7 @@ function looksLikeWhisperHallucination(t) {
 }
 
 //--------------------------------------------------------------
-// TRANSCRIBE BLOB → Whisper Endpoint
+// SEND AUDIO TO /transcribe
 //--------------------------------------------------------------
 async function transcribeSysBlob(blob) {
   const fd = new FormData();
@@ -606,7 +628,7 @@ async function transcribeSysBlob(blob) {
 }
 
 //--------------------------------------------------------------
-// CREDITS — Already auto-refreshes every 5 seconds
+// CREDIT DEDUCTION — AUTO REFRESH EVERY 5 SECONDS
 //--------------------------------------------------------------
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
@@ -644,16 +666,17 @@ function startCreditTicking() {
         return;
       }
 
-      // refresh UI credits every 5 sec
-      await loadUserProfile();
+      await loadUserProfile(); // refresh credit count every 5s
 
     } catch (err) {
       console.error(err);
     }
   }, 500);
 }
+
+//-------------------- END OF BATCH 2 --------------------
 //--------------------------------------------------------------
-// CHAT STREAMING — UNCHANGED LOGIC
+// CHAT STREAMING (FIXED WITH innerHTML + renderMarkdown)
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -682,7 +705,8 @@ async function startChatStreaming(prompt) {
   chatStreamActive = true;
   const mySeq = ++chatStreamSeq;
 
-  responseBox.textContent = "";
+  // Use HTML mode for bold formatting
+  responseBox.innerHTML = "";
   setStatus(sendStatus, "Sending…", "text-orange-600");
 
   pushHistory("user", prompt);
@@ -700,7 +724,7 @@ async function startChatStreaming(prompt) {
 
   const flush = () => {
     if (!pending) return;
-    responseBox.textContent += renderMarkdown(pending)
+    responseBox.innerHTML += renderMarkdown(pending);
     finalAnswer += pending;
     pending = "";
   };
@@ -744,7 +768,7 @@ async function startChatStreaming(prompt) {
 }
 
 //--------------------------------------------------------------
-// START / STOP LOGIC
+// START / STOP SESSION
 //--------------------------------------------------------------
 async function startAll() {
   hideBanner();
@@ -798,7 +822,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// SEND / CLEAR / RESET
+// SEND BUTTON
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -816,6 +840,9 @@ sendBtn.onclick = async () => {
   await startChatStreaming(msg);
 };
 
+//--------------------------------------------------------------
+// CLEAR + RESET
+//--------------------------------------------------------------
 clearBtn.onclick = () => {
   timeline = [];
   micInterimEntry = null;
@@ -826,13 +853,13 @@ clearBtn.onclick = () => {
 
 resetBtn.onclick = async () => {
   abortChatStreamOnly();
-  responseBox.textContent = "";
+  responseBox.innerHTML = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 };
 
 //--------------------------------------------------------------
-// RESUME UPLOAD — UNCHANGED
+// RESUME UPLOAD
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
@@ -843,22 +870,23 @@ resumeInput?.addEventListener("change", async () => {
   const fd = new FormData();
   fd.append("file", file);
 
-  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
-  const data = await res.json().catch(() => ({}));
+  const res = await apiFetch("resume/extract", {
+    method: "POST",
+    body: fd
+  }, false);
 
+  const data = await res.json().catch(() => ({}));
   resumeTextMem = String(data.text || "").trim();
 
   if (!resumeTextMem) {
     resumeStatus.textContent = "Resume extracted: empty";
-  } else if (resumeTextMem.startsWith("[Resume upload received")) {
-    resumeStatus.textContent = resumeTextMem;
   } else {
     resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
   }
 });
 
 //--------------------------------------------------------------
-// LOGOUT BUTTON
+// LOGOUT
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
@@ -875,10 +903,8 @@ document.getElementById("logoutBtn").onclick = () => {
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
 
-  // No session → go to login
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  // Missing refresh_token (old sessions)
   if (!session.refresh_token) {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
@@ -888,18 +914,14 @@ window.addEventListener("load", async () => {
   resumeTextMem = "";
   if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
 
-  // Load profile (credits, email, joined date)
   await loadUserProfile();
 
-  // Clear chat history on backend
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
-  // Reset transcript UI
   timeline = [];
   micInterimEntry = null;
   updateTranscript();
 
-  // Disable buttons until start
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
@@ -915,3 +937,5 @@ window.addEventListener("load", async () => {
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 sysBtn.onclick = enableSystemAudio;
+
+//------------------------- END OF BATCH 3 -------------------------
