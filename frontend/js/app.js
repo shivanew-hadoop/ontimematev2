@@ -2,7 +2,7 @@
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
-const instructionsBox = document.getElementById("instructionsBox");
+const instructionsBox = document.getElementBygetElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
 const resumeInput = document.getElementById("resumeInput");
 const resumeStatus = document.getElementById("resumeStatus");
@@ -27,6 +27,7 @@ let isRunning = false;
 
 // MIC
 let recognition = null;
+let micInterimEntry = null;
 let blockMicUntil = 0;
 
 // SYSTEM AUDIO
@@ -38,109 +39,58 @@ let sysSegmentTimer = null;
 let sysQueue = [];
 let sysAbort = null;
 let sysInFlight = 0;
+let sysSeq = 0;
 
-// transcript timeline
+// Transcript timeline
 let timeline = [];
 
-// credits
+// Credits
 let creditTimer = null;
 let lastCreditAt = 0;
 
-// chat stream cancellation
+// Chat
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
-
-// memory
 let chatHistory = [];
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_CHARS_EACH = 1500;
 
-// resume memory
+// Resume memory
 let resumeTextMem = "";
 
-// system audio dedupe
+// System dedupe
 let lastSysTail = "";
 
 //--------------------------------------------------------------
-// CONFIG
+// CONFIG (2200ms CHOSEN)
 //--------------------------------------------------------------
-const SYS_SEGMENT_MS = 2800;
-const SYS_MIN_BYTES = 6000;
+const SYS_SEGMENT_MS = 2200;
+const SYS_MIN_BYTES = 3000;
 const SYS_MAX_CONCURRENT = 2;
 const SYS_TYPE_MS_PER_WORD = 18;
 
+// Credits
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
+// MIC fallback accents
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
+// System audio bias prompt
 const WHISPER_BIAS_PROMPT =
-  "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
-
-//--------------------------------------------------------------
-// MODE-BASED INSTRUCTIONS
-//--------------------------------------------------------------
-const MODE_INSTRUCTIONS = {
-  general: "",
-  
-  interview: `
-Give responses in human conversational tone. Prioritize real project examples. 
-Avoid ChatGPT tone and avoid textbook definitions. 
-Always give Quick Answer (Interview Style) first, crisp bullet points, then real-time example from project or resume.
-Avoid assumptions; answer based on user's resume context.`,
-
-  sales: `
-Give responses in persuasive, human-friendly tone focused on value, benefits, and clarity.
-Avoid technical jargon unless asked. 
-Use short, confident statements. 
-Include mini real-world customer scenario examples.`
-};
-
-function applyModeInstructions() {
-  const mode = modeSelect.value;
-  const text = MODE_INSTRUCTIONS[mode] || "";
-
-  instructionsBox.value = text.trim();
-  localStorage.setItem("instructions", text.trim());
-  instrStatus.textContent = "Mode instructions applied";
-  instrStatus.className = "text-green-600";
-  setTimeout(() => instrStatus.textContent = "", 800);
-}
-
-modeSelect.addEventListener("change", applyModeInstructions);
+  "Transcribe clearly in English. Handle Indian, British, Australian and American accents. Keep proper nouns and numbers.";
 
 //--------------------------------------------------------------
 // Helpers
 //--------------------------------------------------------------
-function showBanner(msg) {
-  bannerTop.textContent = msg;
-  bannerTop.classList.remove("hidden");
-  bannerTop.classList.add("bg-red-600");
-}
-
-function hideBanner() {
-  bannerTop.classList.add("hidden");
-  bannerTop.textContent = "";
-}
-
-function setStatus(el, text, cls = "") {
-  el.textContent = text;
-  el.className = cls;
-}
-
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-function authHeaders() {
-  const token = session?.access_token;
-  return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
 function updateTranscript() {
-  promptBox.value = timeline.map(t => t.text).join(" ");
+  promptBox.value = timeline.map(t => t.text).join(" ").trim();
   promptBox.scrollTop = promptBox.scrollHeight;
 }
 
@@ -151,8 +101,7 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-// TYPEWRITER for system audio
-function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
+function addToTimelineTypewriter(txt) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
 
@@ -168,160 +117,131 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
 
     entry.text += (entry.text ? " " : "") + words[i++];
     updateTranscript();
-  }, msPerWord);
-}
-//--------------------------------------------------------------
-// TOKEN REFRESH
-//--------------------------------------------------------------
-function isTokenNearExpiry() {
-  const exp = Number(session?.expires_at || 0);
-  if (!exp) return false;
-  const now = Math.floor(Date.now() / 1000);
-  return exp - now < 60;
+  }, SYS_TYPE_MS_PER_WORD);
 }
 
-async function refreshAccessToken() {
-  const refresh_token = session?.refresh_token;
-  if (!refresh_token) throw new Error("Missing refresh_token. Please login again.");
+// Clean hallucinations
+function cleanSysText(t) {
+  const s = normalize(t).toLowerCase();
+  if (!s) return "";
 
-  const res = await fetch("/api?path=auth/refresh", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token })
-  });
+  const bad = [
+    "i'm sorry",
+    "i am sorry",
+    "cannot transcribe",
+    "can't transcribe",
+    "unable to transcribe",
+    "i don't know",
+    "i can't wait to see you",
+    "thanks for watching",
+    "please like and subscribe"
+  ];
 
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Refresh failed");
-
-  session.access_token = data.session.access_token;
-  session.refresh_token = data.session.refresh_token;
-  session.expires_at = data.session.expires_at;
-
-  localStorage.setItem("session", JSON.stringify(session));
-}
-
-async function apiFetch(path, opts = {}, needAuth = true) {
-  if (needAuth && isTokenNearExpiry()) {
-    try { await refreshAccessToken(); } catch (e) { console.error(e); }
-  }
-
-  const headers = { ...(opts.headers || {}) };
-  if (needAuth) Object.assign(headers, authHeaders());
-
-  const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
-
-  if (needAuth && res.status === 401) {
-    const t = await res.text().catch(() => "");
-    const looksExpired =
-      t.includes("token is expired") ||
-      t.includes("invalid JWT") ||
-      t.includes("Missing token");
-
-    if (looksExpired) {
-      await refreshAccessToken();
-      const headers2 = { ...(opts.headers || {}), ...authHeaders() };
-      return fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers: headers2 });
-    }
-  }
-
-  return res;
+  if (bad.some(b => s.includes(b))) return "";
+  return t;
 }
 
 //--------------------------------------------------------------
-// LOAD USER PROFILE
+// MODE SELECTOR (Interview / Sales / General)
 //--------------------------------------------------------------
-async function loadUserProfile() {
-  const res = await apiFetch("user/profile", {}, true);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Failed to load profile");
-
-  userInfo.innerHTML =
-    `Logged in as <b>${data.user.email}</b><br>` +
-    `Credits: <b>${data.user.credits}</b><br>` +
-    `Joined: ${data.user.created_ymd}`;
-}
-
-//--------------------------------------------------------------
-// INSTRUCTIONS SAVING
-//--------------------------------------------------------------
-instructionsBox.value = localStorage.getItem("instructions") || "";
-
-instructionsBox.addEventListener("input", () => {
-  localStorage.setItem("instructions", instructionsBox.value);
-  instrStatus.textContent = "Saved";
-  instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 600);
-});
+const MODES = {
+  general: "",
+  interview:
+    "Always answer like a real professional, not ChatGPT. Use real-world project examples, resume context, and explain in natural spoken tone.",
+  sales:
+    "Respond in a persuasive, customer-centric tone. Focus on value, clarity, and real-world selling situations."
+};
 
 function getEffectiveInstructions() {
-  const live = (instructionsBox?.value || "").trim();
-  if (live) return live;
-  return (localStorage.getItem("instructions") || "").trim();
+  const base = MODES[modeSelect.value] || "";
+  const userCustom = instructionsBox.value.trim();
+  return base + "\n" + userCustom;
 }
 
+modeSelect.onchange = () => {
+  instructionsBox.value = MODES[modeSelect.value];
+  localStorage.setItem("instructions", instructionsBox.value);
+  instrStatus.textContent = "Mode applied";
+  instrStatus.className = "text-green-600";
+  setTimeout(() => (instrStatus.textContent = ""), 600);
+};
+
 //--------------------------------------------------------------
-// RESUME UPLOAD
+// Resume Upload
 //--------------------------------------------------------------
-resumeInput?.addEventListener("change", async () => {
-  const file = resumeInput.files?.[0];
-  if (!file) return;
+resumeInput.addEventListener("change", async () => {
+  const f = resumeInput.files?.[0];
+  if (!f) return;
 
   resumeStatus.textContent = "Processing…";
 
   const fd = new FormData();
-  fd.append("file", file);
+  fd.append("file", f);
 
-  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
+  const res = await apiFetch("resume/extract", {
+    method: "POST",
+    body: fd
+  }, false);
+
   const data = await res.json().catch(() => ({}));
+  resumeTextMem = data.text || "";
 
-  resumeTextMem = String(data.text || "").trim();
-
-  if (!resumeTextMem) {
-    resumeStatus.textContent = "Resume extracted: empty";
-  } else if (resumeTextMem.startsWith("[Resume upload received")) {
-    resumeStatus.textContent = resumeTextMem;
-  } else {
-    resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
-  }
+  resumeStatus.textContent =
+    resumeTextMem.startsWith("[Resume upload") ?
+      resumeTextMem :
+      `Resume extracted (${resumeTextMem.length} chars)`;
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition
+// MIC
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
   recognition = null;
+  micInterimEntry = null;
 }
 
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  if (!SR) {
-    setStatus(audioStatus, "SpeechRecognition not supported.", "text-red-600");
-    return false;
-  }
+  if (!SR) return false;
 
   stopMicOnly();
 
   recognition = new SR();
   recognition.continuous = true;
   recognition.interimResults = true;
-  recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
+  recognition.lang = MIC_LANGS[micLangIndex];
 
-  recognition.onresult = (ev) => {
+  recognition.onresult = ev => {
     if (!isRunning) return;
     if (Date.now() < blockMicUntil) return;
 
     let interim = "";
+
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
-      const text = normalize(r[0].transcript || "");
-      if (r.isFinal) addToTimeline(text);
-      else interim = text;
+      const text = normalize(r[0].transcript);
+
+      if (r.isFinal) {
+        if (micInterimEntry) {
+          const idx = timeline.indexOf(micInterimEntry);
+          if (idx >= 0) timeline.splice(idx, 1);
+          micInterimEntry = null;
+        }
+        addToTimeline(text);
+      } else {
+        interim = text;
+      }
     }
 
     if (interim) {
-      const base = timeline.map(t => t.text).join(" ");
-      promptBox.value = (base + " " + interim).trim();
+      if (!micInterimEntry) {
+        micInterimEntry = { t: Date.now(), text: interim };
+        timeline.push(micInterimEntry);
+      } else {
+        micInterimEntry.text = interim;
+      }
+      updateTranscript();
     }
   };
 
@@ -330,8 +250,7 @@ function startMic() {
   };
 
   recognition.onend = () => {
-    if (!isRunning) return;
-    try { recognition.start(); } catch {}
+    if (isRunning) try { recognition.start(); } catch {}
   };
 
   try { recognition.start(); } catch {}
@@ -341,39 +260,20 @@ function startMic() {
 //--------------------------------------------------------------
 // SYSTEM AUDIO
 //--------------------------------------------------------------
-function pickBestMimeType() {
-  const c = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-    "audio/ogg"
-  ];
-  for (const t of c) {
-    if (MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return "";
-}
-
 function stopSystemAudioOnly() {
+  sysSeq++;
   try { sysAbort?.abort(); } catch {}
   sysAbort = null;
 
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
-  sysSegmentTimer = null;
+  sysRecorder?.stop();
 
-  try { sysRecorder?.stop(); } catch {}
+  sysStream?.getTracks().forEach(t => t.stop());
+  sysTrack = null;
   sysRecorder = null;
 
-  sysSegmentChunks = [];
   sysQueue = [];
   sysInFlight = 0;
-
-  if (sysStream) {
-    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
-  }
-  sysStream = null;
-  sysTrack = null;
-
   lastSysTail = "";
 }
 
@@ -388,73 +288,60 @@ async function enableSystemAudio() {
       audio: true
     });
   } catch {
-    setStatus(audioStatus, "Share audio denied.", "text-red-600");
+    setStatus(audioStatus, "Denied — Use Chrome TAB + Share audio", "text-red-600");
     return;
   }
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
-    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    setStatus(audioStatus, "No system audio", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
 
   sysAbort = new AbortController();
-  startSystemSegmentRecorder();
-  setStatus(audioStatus, "System audio enabled.", "text-green-600");
+  sysSeq++;
+
+  startSystemRecorder(sysSeq);
+  setStatus(audioStatus, "System audio enabled (fast + stable)", "text-green-600");
 }
 
-function startSystemSegmentRecorder() {
-  if (!sysTrack) return;
-
-  const audioOnly = new MediaStream([sysTrack]);
-  const mimeType = pickBestMimeType();
+function startSystemRecorder(runId) {
+  const ms = new MediaStream([sysTrack]);
+  sysRecorder = new MediaRecorder(ms, { mimeType: "audio/webm;codecs=opus" });
   sysSegmentChunks = [];
 
-  try {
-    sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
-  } catch {
-    setStatus(audioStatus, "System audio start failed.", "text-red-600");
-    return;
-  }
-
-  sysRecorder.ondataavailable = (ev) => {
-    if (!isRunning) return;
-    if (ev.data.size) sysSegmentChunks.push(ev.data);
+  sysRecorder.ondataavailable = ev => {
+    if (ev.data?.size) sysSegmentChunks.push(ev.data);
   };
 
   sysRecorder.onstop = () => {
-    if (!isRunning) return;
+    if (!isRunning || runId !== sysSeq) return;
 
-    const blob = new Blob(sysSegmentChunks, { type: sysRecorder?.mimeType || "" });
+    const blob = new Blob(sysSegmentChunks, { type: "audio/webm" });
     sysSegmentChunks = [];
 
     if (blob.size >= SYS_MIN_BYTES) {
-      sysQueue.push(blob);
+      sysQueue.push({ blob, runId });
       drainSysQueue();
     }
 
-    if (isRunning && sysTrack.readyState === "live") startSystemSegmentRecorder();
+    if (isRunning && sysTrack.readyState === "live") {
+      startSystemRecorder(runId);
+    }
   };
 
-  try { sysRecorder.start(); } catch {}
-  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
-
+  sysRecorder.start();
   sysSegmentTimer = setInterval(() => {
-    if (!isRunning) return;
-    try { sysRecorder?.stop(); } catch {}
+    if (isRunning) sysRecorder.stop();
   }, SYS_SEGMENT_MS);
 }
 
 function drainSysQueue() {
-  if (!isRunning) return;
-
   while (sysInFlight < SYS_MAX_CONCURRENT && sysQueue.length) {
-    const blob = sysQueue.shift();
+    const item = sysQueue.shift();
     sysInFlight++;
-
-    transcribeSysBlob(blob)
-      .catch(e => console.error("sys transcribe error", e))
+    transcribeSys(item.blob, item.runId)
       .finally(() => {
         sysInFlight--;
         drainSysQueue();
@@ -462,116 +349,92 @@ function drainSysQueue() {
   }
 }
 
-function dedupeSystemText(newText) {
-  const t = normalize(newText);
-  if (!t) return "";
+function dedupeSystemText(t) {
+  const newText = normalize(t);
+  if (!newText) return "";
 
-  const tail = lastSysTail;
-  if (!tail) {
-    lastSysTail = t.split(" ").slice(-12).join(" ");
-    return t;
+  if (!lastSysTail) {
+    lastSysTail = newText.split(" ").slice(-12).join(" ");
+    return newText;
   }
 
-  const tailWords = tail.split(" ");
-  const newWords = t.split(" ");
+  const tailWords = lastSysTail.split(" ");
+  const newWords = newText.split(" ");
 
-  let bestK = 0;
+  let overlap = 0;
   const maxK = Math.min(10, tailWords.length, newWords.length);
+
   for (let k = maxK; k >= 3; k--) {
-    const tw = tailWords.slice(-k).join(" ").toLowerCase();
-    const nw = newWords.slice(0, k).join(" ").toLowerCase();
-    if (tw === nw) { bestK = k; break; }
+    if (tailWords.slice(-k).join(" ").toLowerCase() === newWords.slice(0, k).join(" ").toLowerCase()) {
+      overlap = k;
+      break;
+    }
   }
 
-  const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
-  lastSysTail = (tail + " " + cleaned).trim().split(" ").slice(-12).join(" ");
-  return normalize(cleaned);
+  const cleaned = overlap ? newWords.slice(overlap).join(" ") : newText;
+
+  lastSysTail = (lastSysTail + " " + cleaned).split(" ").slice(-12).join(" ");
+  return cleaned;
 }
 
-function looksLikeWhisperHallucination(t) {
-  const s = normalize(t).toLowerCase();
-  if (!s) return true;
+async function transcribeSys(blob, runId) {
+  if (!isRunning || runId !== sysSeq) return;
 
-  const bad = [
-    "thanks for watching",
-    "thank you for watching",
-    "subscribe",
-    "i'm sorry",
-    "i am sorry",
-    "please like and subscribe"
-  ];
-  return bad.some(p => s.includes(p));
-}
-
-async function transcribeSysBlob(blob) {
   const fd = new FormData();
-  const type = (blob.type || "").toLowerCase();
-  const ext = type.includes("ogg") ? "ogg" : "webm";
-  fd.append("file", blob, `sys.${ext}`);
+  fd.append("file", blob, "sys.webm");
   fd.append("prompt", WHISPER_BIAS_PROMPT);
 
-  const res = await apiFetch("transcribe", {
-    method: "POST",
-    body: fd,
-    signal: sysAbort?.signal
-  }, false);
-
-  if (!res.ok) return;
-
+  const res = await apiFetch("transcribe", { method: "POST", body: fd }, false);
   const data = await res.json().catch(() => ({}));
-  const raw = String(data.text || "");
-  if (looksLikeWhisperHallucination(raw)) return;
 
-  const cleaned = dedupeSystemText(raw);
-  if (cleaned) addToTimelineTypewriter(cleaned);
+  let text = cleanSysText(data.text || "");
+  if (!text) return;
+
+  text = dedupeSystemText(text);
+  if (!text) return;
+
+  addToTimelineTypewriter(text);
 }
 
 //--------------------------------------------------------------
-// CREDIT DEDUCTION
+// Credits
 //--------------------------------------------------------------
 async function deductCredits(delta) {
-  const res = await apiFetch("user/deduct", {
+  return apiFetch("user/deduct", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ delta })
-  }, true);
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Deduct failed");
-  return data;
+  }).then(r => r.json());
 }
 
 function startCreditTicking() {
-  if (creditTimer) clearInterval(creditTimer);
   lastCreditAt = Date.now();
+  if (creditTimer) clearInterval(creditTimer);
 
   creditTimer = setInterval(async () => {
     if (!isRunning) return;
 
     const now = Date.now();
-    const sec = Math.floor((now - lastCreditAt) / 1000);
-    if (sec < CREDIT_BATCH_SEC) return;
+    const elapsed = Math.floor((now - lastCreditAt) / 1000);
+    if (elapsed < CREDIT_BATCH_SEC) return;
 
-    const batchSec = sec - (sec % CREDIT_BATCH_SEC);
-    const delta = batchSec * CREDITS_PER_SEC;
-    lastCreditAt += batchSec * 1000;
+    const batch = elapsed - (elapsed % CREDIT_BATCH_SEC);
+    const delta = batch * CREDITS_PER_SEC;
 
-    try {
-      const out = await deductCredits(delta);
-      if (out.remaining <= 0) {
-        stopAll();
-        showBanner("No credits remaining.");
-        return;
-      }
-      await loadUserProfile();
-    } catch (e) {
-      console.error(e);
+    lastCreditAt += batch * 1000;
+
+    const out = await deductCredits(delta);
+    if (out.remaining <= 0) {
+      stopAll();
+      showBanner("Out of credits. Contact admin.");
+      return;
     }
+    await loadUserProfile();
   }, 500);
 }
 
 //--------------------------------------------------------------
-// CHAT STREAMING
+// Chat
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -579,23 +442,15 @@ function abortChatStreamOnly() {
   chatStreamActive = false;
 }
 
-function pushHistory(role, content) {
-  const c = normalize(content);
-  if (!c) return;
-  chatHistory.push({ role, content: c });
-  if (chatHistory.length > 50) chatHistory.splice(0, chatHistory.length - 50);
-}
-
-function compactHistoryForRequest() {
+function compactHistory() {
   return chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
     role: m.role,
-    content: String(m.content || "").slice(0, MAX_HISTORY_CHARS_EACH)
+    content: m.content.slice(0, MAX_HISTORY_CHARS_EACH)
   }));
 }
 
 async function startChatStreaming(prompt) {
   abortChatStreamOnly();
-
   chatAbort = new AbortController();
   chatStreamActive = true;
   const mySeq = ++chatStreamSeq;
@@ -603,18 +458,17 @@ async function startChatStreaming(prompt) {
   responseBox.textContent = "";
   setStatus(sendStatus, "Sending…", "text-orange-600");
 
-  pushHistory("user", prompt);
+  chatHistory.push({ role: "user", content: prompt });
 
   const body = {
     prompt,
-    history: compactHistoryForRequest(),
+    history: compactHistory(),
     instructions: getEffectiveInstructions(),
-    resumeText: resumeTextMem || ""
+    resumeText: resumeTextMem
   };
 
   let pending = "";
   let finalAnswer = "";
-  let flushTimer = null;
 
   const flush = () => {
     if (!pending) return;
@@ -623,41 +477,34 @@ async function startChatStreaming(prompt) {
     pending = "";
   };
 
-  try {
-    const res = await apiFetch("chat/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-      signal: chatAbort.signal
-    }, false);
+  const res = await apiFetch("chat/send", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: chatAbort.signal
+  }, false);
 
-    if (!res.ok) throw new Error(await res.text());
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
+  const flushTimer = setInterval(() => {
+    if (chatStreamActive && mySeq === chatStreamSeq) flush();
+  }, 50);
 
-    flushTimer = setInterval(() => {
-      if (!chatStreamActive || mySeq !== chatStreamSeq) return;
-      flush();
-    }, 40);
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done || !chatStreamActive || mySeq !== chatStreamSeq) break;
+    pending += decoder.decode(value);
+  }
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!chatStreamActive || mySeq !== chatStreamSeq) break;
-      pending += decoder.decode(value);
-    }
+  clearInterval(flushTimer);
+  flush();
 
-    if (chatStreamActive && mySeq === chatStreamSeq) {
-      flush();
-      setStatus(sendStatus, "Done", "text-green-600");
-      pushHistory("assistant", finalAnswer);
-    }
-
-  } catch (e) {
-    setStatus(sendStatus, "Failed", "text-red-600");
-  } finally {
-    if (flushTimer) clearInterval(flushTimer);
+  if (chatStreamActive && mySeq === chatStreamSeq) {
+    setStatus(sendStatus, "Done", "text-green-600");
+    chatHistory.push({ role: "assistant", content: finalAnswer });
+  } else {
+    setStatus(sendStatus, "Interrupted", "text-orange-600");
   }
 }
 
@@ -665,50 +512,52 @@ async function startChatStreaming(prompt) {
 // START / STOP
 //--------------------------------------------------------------
 async function startAll() {
-  hideBanner();
   if (isRunning) return;
+  hideBanner();
 
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false);
 
   timeline = [];
+  micInterimEntry = null;
   updateTranscript();
 
   isRunning = true;
 
-  // ENABLE BUTTONS
   startBtn.disabled = true;
   stopBtn.disabled = false;
   sysBtn.disabled = false;
   sendBtn.disabled = false;
 
+  startBtn.classList.add("opacity-50");
   stopBtn.classList.remove("opacity-50");
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
   const micOk = startMic();
-  if (!micOk) setStatus(audioStatus, "Mic not available.", "text-orange-600");
-  else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
+  setStatus(audioStatus, micOk ? "Mic active" : "Mic unavailable", micOk ? "text-green-600" : "text-red-600");
 
   startCreditTicking();
 }
 
 function stopAll() {
   isRunning = false;
+
   stopMicOnly();
   stopSystemAudioOnly();
-
-  if (creditTimer) clearInterval(creditTimer);
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
 
+  startBtn.classList.remove("opacity-50");
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
+
+  clearInterval(creditTimer);
 }
 
 //--------------------------------------------------------------
@@ -723,6 +572,7 @@ sendBtn.onclick = async () => {
   blockMicUntil = Date.now() + 700;
 
   timeline = [];
+  micInterimEntry = null;
   promptBox.value = "";
   updateTranscript();
 
@@ -731,28 +581,17 @@ sendBtn.onclick = async () => {
 
 clearBtn.onclick = () => {
   timeline = [];
+  micInterimEntry = null;
   promptBox.value = "";
   updateTranscript();
-  setStatus(sendStatus, "Transcript cleared", "text-green-600");
+  setStatus(sendStatus, "Cleared", "text-green-600");
 };
 
 resetBtn.onclick = async () => {
   abortChatStreamOnly();
   responseBox.textContent = "";
+  await apiFetch("chat/reset", { method: "POST" }, false);
   setStatus(sendStatus, "Response reset", "text-green-600");
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-};
-
-//--------------------------------------------------------------
-// LOGOUT
-//--------------------------------------------------------------
-document.getElementById("logoutBtn").onclick = () => {
-  chatHistory = [];
-  resumeTextMem = "";
-  abortChatStreamOnly();
-  stopAll();
-  localStorage.removeItem("session");
-  window.location.href = "/auth?tab=login";
 };
 
 //--------------------------------------------------------------
@@ -762,20 +601,11 @@ window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
 
-  if (!session.refresh_token) {
-    localStorage.removeItem("session");
-    return (window.location.href = "/auth?tab=login");
-  }
-
-  chatHistory = [];
-  resumeTextMem = "";
-  if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
-
   await loadUserProfile();
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false);
 
-  timeline = [];
-  updateTranscript();
+  instructionsBox.value = localStorage.getItem("instructions") || "";
+  modeSelect.value = "general";
 
   stopBtn.disabled = true;
   sysBtn.disabled = true;
@@ -787,7 +617,18 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
-// BUTTON BINDINGS
+// LOGOUT
+//--------------------------------------------------------------
+document.getElementById("logoutBtn").onclick = () => {
+  chatHistory = [];
+  resumeTextMem = "";
+  stopAll();
+  localStorage.removeItem("session");
+  window.location.href = "/auth?tab=login";
+};
+
+//--------------------------------------------------------------
+// BUTTONS
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
