@@ -20,16 +20,15 @@ const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
 
 //--------------------------------------------------------------
-// STATE + HIDDEN MODE INSTRUCTIONS (Option A)
+// STATE + HIDDEN MODE INSTRUCTIONS
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
 
-// Hidden instructions are kept ONLY in memory, not UI, not localStorage
-let hiddenInstructions = "";
+let hiddenInstructions = ""; // Internal only (Option A)
 
 //--------------------------------------------------------------
-// INTERNAL MODE INSTRUCTIONS (Interview + Sales + General)
+// INTERNAL MODE INSTRUCTIONS (Interview/Sales/General)
 //--------------------------------------------------------------
 const INTERNAL_MODE_INSTRUCTIONS = {
   general: "",
@@ -74,12 +73,12 @@ Rules:
 Give responses in a persuasive, human-friendly tone focusing on clarity and value.
 Avoid jargon unless asked.
 Use short, confident statements.
-Include a small real-world customer scenario example.
+Include one short real-world customer scenario example.
 `
 };
 
 //--------------------------------------------------------------
-// APPLY MODE SELECTION — Updates UI + Hidden Instructions
+// APPLY MODE INSTRUCTIONS + UI BEHAVIOR
 //--------------------------------------------------------------
 function applyModeInstructions() {
   const mode = modeSelect.value;
@@ -88,7 +87,7 @@ function applyModeInstructions() {
     hiddenInstructions = "";
     instructionsBox.removeAttribute("disabled");
     instructionsBox.value = localStorage.getItem("instructions") || "";
-    instrStatus.textContent = "General mode active (custom instructions allowed)";
+    instrStatus.textContent = "General mode active";
     instrStatus.className = "text-green-600";
   }
 
@@ -119,12 +118,12 @@ modeSelect.addEventListener("change", applyModeInstructions);
 function getEffectiveInstructions() {
   const mode = modeSelect.value;
 
-  // Interview & Sales → return hidden instructions only
+  // Interview & Sales use hidden instructions only
   if (mode === "interview" || mode === "sales") {
     return hiddenInstructions;
   }
 
-  // General → take user’s custom typed text
+  // General mode uses user-defined custom instructions
   const live = (instructionsBox?.value || "").trim();
   if (live && !live.includes("mode instructions loaded")) return live;
 
@@ -132,7 +131,7 @@ function getEffectiveInstructions() {
 }
 
 //--------------------------------------------------------------
-// SAVE CUSTOM INSTRUCTIONS ONLY IN GENERAL MODE
+// SAVE CUSTOM INSTRUCTIONS (General mode only)
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
 
@@ -145,7 +144,34 @@ instructionsBox.addEventListener("input", () => {
 });
 
 //--------------------------------------------------------------
-// REMAINING ORIGINAL VARIABLES (UNCHANGED)
+// FIXED loadUserProfile() — SHOW USER + CREDITS + JOINED DATE
+//--------------------------------------------------------------
+async function loadUserProfile() {
+  try {
+    const res = await apiFetch("user/profile", {}, true);
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data?.user) {
+      userInfo.innerHTML = `<span class='text-red-600 text-sm'>Unable to load profile</span>`;
+      return;
+    }
+
+    const u = data.user;
+
+    userInfo.innerHTML = `
+      <div class="text-sm text-gray-800">
+        <b>User:</b> ${u.email || "N/A"}<br>
+        <b>Credits:</b> ${u.credits ?? 0}<br>
+        <b>Joined:</b> ${u.created_ymd || ""}
+      </div>
+    `;
+  } catch (err) {
+    userInfo.innerHTML = `<span class='text-red-600 text-sm'>Error loading profile</span>`;
+  }
+}
+
+//--------------------------------------------------------------
+// REMAINING VARIABLES (UNCHANGED)
 //--------------------------------------------------------------
 let recognition = null;
 let blockMicUntil = 0;
@@ -163,6 +189,7 @@ let sysInFlight = 0;
 let timeline = [];
 let creditTimer = null;
 let lastCreditAt = 0;
+
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
@@ -174,9 +201,6 @@ const MAX_HISTORY_CHARS_EACH = 1500;
 let resumeTextMem = "";
 let lastSysTail = "";
 
-//--------------------------------------------------------------
-// CONFIG SECTION (UNCHANGED)
-//--------------------------------------------------------------
 const SYS_SEGMENT_MS = 2800;
 const SYS_MIN_BYTES = 6000;
 const SYS_MAX_CONCURRENT = 2;
@@ -246,9 +270,8 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
     updateTranscript();
   }, msPerWord);
 }
-
 //--------------------------------------------------------------
-// TOKEN REFRESH (UNCHANGED)
+// TOKEN REFRESH — UNCHANGED
 //--------------------------------------------------------------
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
@@ -303,8 +326,9 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 
   return res;
 }
+
 //--------------------------------------------------------------
-// MIC — SpeechRecognition (Chrome/Fallback) — UNCHANGED
+// MIC — SpeechRecognition
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
@@ -320,7 +344,6 @@ function startMic() {
   }
 
   stopMicOnly();
-
   recognition = new SR();
   recognition.continuous = true;
   recognition.interimResults = true;
@@ -373,16 +396,16 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — MediaRecorder streaming — UNCHANGED
+// SYSTEM AUDIO — MediaRecorder + Segments
 //--------------------------------------------------------------
 function pickBestMimeType() {
-  const c = [
+  const candidates = [
     "audio/webm;codecs=opus",
     "audio/webm",
     "audio/ogg;codecs=opus",
     "audio/ogg"
   ];
-  for (const t of c) {
+  for (const t of candidates) {
     if (MediaRecorder.isTypeSupported(t)) return t;
   }
   return "";
@@ -405,9 +428,9 @@ function stopSystemAudioOnly() {
   if (sysStream) {
     try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
   }
+
   sysStream = null;
   sysTrack = null;
-
   lastSysTail = "";
 }
 
@@ -442,11 +465,12 @@ function startSystemSegmentRecorder() {
   if (!sysTrack) return;
 
   const audioOnly = new MediaStream([sysTrack]);
-  const mimeType = pickBestMimeType();
+  const mime = pickBestMimeType();
+
   sysSegmentChunks = [];
 
   try {
-    sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
+    sysRecorder = new MediaRecorder(audioOnly, mime ? { mimeType: mime } : undefined);
   } catch {
     setStatus(audioStatus, "System audio start failed.", "text-red-600");
     return;
@@ -472,6 +496,7 @@ function startSystemSegmentRecorder() {
   };
 
   try { sysRecorder.start(); } catch {}
+
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
 
   sysSegmentTimer = setInterval(() => {
@@ -488,7 +513,7 @@ function drainSysQueue() {
     sysInFlight++;
 
     transcribeSysBlob(blob)
-      .catch(e => console.error("sys transcribe error", e))
+      .catch(err => console.error("sys transcribe error", err))
       .finally(() => {
         sysInFlight--;
         drainSysQueue();
@@ -496,15 +521,18 @@ function drainSysQueue() {
   }
 }
 
-function dedupeSystemText(newText) {
-  const t = normalize(newText);
+//--------------------------------------------------------------
+// SYSTEM AUDIO — Deduping + Hallucination Filter
+//--------------------------------------------------------------
+function dedupeSystemText(text) {
+  const t = normalize(text);
   if (!t) return "";
 
   if (t.length <= 180 && lastSysTail && lastSysTail.toLowerCase().includes(t.toLowerCase())) {
     return "";
   }
 
-  const tail = lastSysTail;
+  const tail = lastSysTail || "";
   if (!tail) {
     lastSysTail = t.split(" ").slice(-12).join(" ");
     return t;
@@ -513,16 +541,19 @@ function dedupeSystemText(newText) {
   const tailWords = tail.split(" ");
   const newWords = t.split(" ");
 
-  let bestK = 0;
-  const maxK = Math.min(10, tailWords.length, newWords.length);
+  let bestMatch = 0;
+  const maxCheck = Math.min(10, tailWords.length, newWords.length);
 
-  for (let k = maxK; k >= 3; k--) {
-    const tw = tailWords.slice(-k).join(" ").toLowerCase();
-    const nw = newWords.slice(0, k).join(" ").toLowerCase();
-    if (tw === nw) { bestK = k; break; }
+  for (let k = maxCheck; k >= 3; k--) {
+    const endTail = tailWords.slice(-k).join(" ").toLowerCase();
+    const startNew = newWords.slice(0, k).join(" ").toLowerCase();
+    if (endTail === startNew) {
+      bestMatch = k;
+      break;
+    }
   }
 
-  const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
+  const cleaned = bestMatch ? newWords.slice(bestMatch).join(" ") : t;
   lastSysTail = (tail + " " + cleaned).trim().split(" ").slice(-12).join(" ");
   return normalize(cleaned);
 }
@@ -531,7 +562,7 @@ function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
   if (!s) return true;
 
-  const bad = [
+  const noise = [
     "thanks for watching",
     "thank you for watching",
     "subscribe",
@@ -539,8 +570,8 @@ function looksLikeWhisperHallucination(t) {
     "i am sorry",
     "please like and subscribe",
     "transcribe clearly in english",
-    "handle indian, british, australian, and american accents",
     "keep proper nouns and numbers",
+    "handle indian",
     "i don't know",
     "i dont know"
   ];
@@ -549,9 +580,12 @@ function looksLikeWhisperHallucination(t) {
     return true;
   }
 
-  return bad.some(p => s.includes(p));
+  return noise.some(p => s.includes(p));
 }
 
+//--------------------------------------------------------------
+// TRANSCRIBE BLOB → Whisper Endpoint
+//--------------------------------------------------------------
 async function transcribeSysBlob(blob) {
   const fd = new FormData();
   const type = (blob.type || "").toLowerCase();
@@ -569,6 +603,7 @@ async function transcribeSysBlob(blob) {
 
   const data = await res.json().catch(() => ({}));
   const raw = String(data.text || "");
+
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeSystemText(raw);
@@ -576,7 +611,7 @@ async function transcribeSysBlob(blob) {
 }
 
 //--------------------------------------------------------------
-// CREDIT DEDUCTION
+// CREDITS — Already auto-refreshes every 5 seconds
 //--------------------------------------------------------------
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
@@ -601,9 +636,10 @@ function startCreditTicking() {
     const sec = Math.floor((now - lastCreditAt) / 1000);
     if (sec < CREDIT_BATCH_SEC) return;
 
-    const batchSec = sec - (sec % CREDIT_BATCH_SEC);
-    const delta = batchSec * CREDITS_PER_SEC;
-    lastCreditAt += batchSec * 1000;
+    const billableSec = sec - (sec % CREDIT_BATCH_SEC);
+    const delta = billableSec * CREDITS_PER_SEC;
+
+    lastCreditAt += billableSec * 1000;
 
     try {
       const out = await deductCredits(delta);
@@ -612,9 +648,12 @@ function startCreditTicking() {
         showBanner("No credits remaining.");
         return;
       }
+
+      // refresh UI credits every 5 sec
       await loadUserProfile();
-    } catch (e) {
-      console.error(e);
+
+    } catch (err) {
+      console.error(err);
     }
   }, 500);
 }
@@ -710,7 +749,7 @@ async function startChatStreaming(prompt) {
 }
 
 //--------------------------------------------------------------
-// START / STOP
+// START / STOP LOGIC
 //--------------------------------------------------------------
 async function startAll() {
   hideBanner();
@@ -724,7 +763,6 @@ async function startAll() {
 
   isRunning = true;
 
-  // Enable correct buttons
   startBtn.disabled = true;
   stopBtn.disabled = false;
   sysBtn.disabled = false;
@@ -746,6 +784,7 @@ async function startAll() {
 
 function stopAll() {
   isRunning = false;
+
   stopMicOnly();
   stopSystemAudioOnly();
 
@@ -798,7 +837,7 @@ resetBtn.onclick = async () => {
 };
 
 //--------------------------------------------------------------
-// RESUME UPLOAD
+// RESUME UPLOAD — UNCHANGED
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
@@ -824,7 +863,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// LOGOUT
+// LOGOUT BUTTON
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
@@ -840,8 +879,11 @@ document.getElementById("logoutBtn").onclick = () => {
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
+
+  // No session → go to login
   if (!session) return (window.location.href = "/auth?tab=login");
 
+  // Missing refresh_token (old sessions)
   if (!session.refresh_token) {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
@@ -851,13 +893,18 @@ window.addEventListener("load", async () => {
   resumeTextMem = "";
   if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
 
+  // Load profile (credits, email, joined date)
   await loadUserProfile();
+
+  // Clear chat history on backend
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
+  // Reset transcript UI
   timeline = [];
   micInterimEntry = null;
   updateTranscript();
 
+  // Disable buttons until start
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
