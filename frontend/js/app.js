@@ -17,7 +17,7 @@ const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
 const bannerTop = document.getElementById("bannerTop");
-const modeSelect = document.getElementById("modeSelect");
+const modeSelect = document.getElementById("modeSelect");   // NEW
 
 //--------------------------------------------------------------
 // STATE
@@ -51,7 +51,7 @@ let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
 
-// memory
+// in-session memory
 let chatHistory = [];
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_CHARS_EACH = 1500;
@@ -59,7 +59,7 @@ const MAX_HISTORY_CHARS_EACH = 1500;
 // resume memory
 let resumeTextMem = "";
 
-// system transcript tail
+// system dedupe tail
 let lastSysTail = "";
 
 //--------------------------------------------------------------
@@ -80,35 +80,18 @@ const WHISPER_BIAS_PROMPT =
   "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
 
 //--------------------------------------------------------------
-// MODE SELECTOR → Built-in instructions
+// MODE-SPECIFIC INSTRUCTIONS  (NEW)
 //--------------------------------------------------------------
+const MODE_INSTRUCTIONS = {
+  general: `Give responses in a clear human tone. Avoid textbook definitions. Provide practical, real-world clarity.`,
+  
+  interview: `Give responses in human conversational tone. Prioritize real project examples. Avoid ChatGPT style, avoid textbook definitions, avoid fluff. Be crisp, confident, structured. If asked technical concepts, explain using practical industry examples.`,
+  
+  sales: `Respond in a friendly human tone. Focus on problem-solving, value, storytelling, and persuasion. Do not sound like AI. Keep sentences short and confident.`
+};
+
 function getModeInstructions() {
-  const mode = modeSelect.value;
-
-  if (mode === "interview") {
-    return `
-Answer like a real professional, not like ChatGPT.
-Use real project examples based on the resume when relevant.
-Keep tone natural, human, confident.
-Avoid definitions — explain how YOU used the concept in real projects.
-Structure:
-• Quick Answer first (interview style)
-• Bullet points
-• Real-time example from resume
-• No sugar-coating, no generic textbook lines.
-`;
-  }
-
-  if (mode === "sales") {
-    return `
-Respond in a persuasive, crisp, business tone.
-Focus on value, ROI, client impact.
-Use short sentences and real use cases.
-Keep messaging confident, non-technical unless required.
-`;
-  }
-
-  return ""; // general
+  return MODE_INSTRUCTIONS[modeSelect.value] || MODE_INSTRUCTIONS.general;
 }
 
 //--------------------------------------------------------------
@@ -131,7 +114,8 @@ function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 function authHeaders() {
-  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
+  const token = session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
 }
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
@@ -144,18 +128,20 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-// typewriter UI for system audio
+// typewriter for system audio
 function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
+
   const entry = { t: Date.now(), text: "" };
   timeline.push(entry);
 
   const words = cleaned.split(" ");
   let i = 0;
+
   const timer = setInterval(() => {
-    if (!isRunning) return clearInterval(timer);
-    if (i >= words.length) return clearInterval(timer);
+    if (!isRunning) { clearInterval(timer); return; }
+    if (i >= words.length) { clearInterval(timer); return; }
     entry.text += (entry.text ? " " : "") + words[i++];
     updateTranscript();
   }, msPerWord);
@@ -166,64 +152,51 @@ function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
 //--------------------------------------------------------------
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
-  if (!exp) return false;
   const now = Math.floor(Date.now() / 1000);
-  return exp - now < 60;
+  return exp && (exp - now < 60);
 }
 
 async function refreshAccessToken() {
-  const rt = session?.refresh_token;
-  if (!rt) throw new Error("Missing refresh token.");
+  const refresh_token = session?.refresh_token;
+  if (!refresh_token) return;
 
   const res = await fetch("/api?path=auth/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token: rt })
+    body: JSON.stringify({ refresh_token })
   });
 
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Refresh failed");
+  if (!res.ok) return;
 
   session.access_token = data.session.access_token;
   session.refresh_token = data.session.refresh_token;
   session.expires_at = data.session.expires_at;
+
   localStorage.setItem("session", JSON.stringify(session));
 }
 
 async function apiFetch(path, opts = {}, needAuth = true) {
   if (needAuth && isTokenNearExpiry()) {
-    try { await refreshAccessToken(); } catch {}
+    await refreshAccessToken().catch(() => {});
   }
 
   const headers = { ...(opts.headers || {}) };
   if (needAuth) Object.assign(headers, authHeaders());
 
-  const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers });
-
-  if (needAuth && res.status === 401) {
-    const t = await res.text().catch(() => "");
-    if (
-      t.includes("expired") ||
-      t.includes("invalid JWT") ||
-      t.includes("Missing token")
-    ) {
-      await refreshAccessToken();
-      return fetch(`/api?path=${encodeURIComponent(path)}`, {
-        ...opts,
-        headers: { ...(opts.headers || {}), ...authHeaders() }
-      });
-    }
-  }
-
-  return res;
+  return fetch(`/api?path=${encodeURIComponent(path)}`, {
+    ...opts,
+    headers
+  });
 }
 
 //--------------------------------------------------------------
-// Load Profile
+// Load User Profile
 //--------------------------------------------------------------
 async function loadUserProfile() {
-  const res = await apiFetch("user/profile");
+  const res = await apiFetch("user/profile", {}, true);
   const data = await res.json().catch(() => ({}));
+
   userInfo.innerHTML =
     `Logged in as <b>${data.user.email}</b><br>` +
     `Credits: <b>${data.user.credits}</b><br>` +
@@ -231,7 +204,7 @@ async function loadUserProfile() {
 }
 
 //--------------------------------------------------------------
-// Custom Instructions
+// INSTRUCTIONS — with MODE SUPPORT
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
 
@@ -239,51 +212,66 @@ instructionsBox.addEventListener("input", () => {
   localStorage.setItem("instructions", instructionsBox.value);
   instrStatus.textContent = "Saved";
   instrStatus.className = "text-green-600";
-  setTimeout(() => (instrStatus.textContent = ""), 600);
+  setTimeout(() => instrStatus.textContent = "", 700);
+});
+
+// NEW — auto apply mode rules
+modeSelect.addEventListener("change", () => {
+  const baseInstr = getModeInstructions();
+  let existing = instructionsBox.value || "";
+
+  // remove old mode instructions
+  Object.values(MODE_INSTRUCTIONS).forEach(m => {
+    existing = existing.replace(m, "").trim();
+  });
+
+  const final = baseInstr + "\n" + existing;
+  instructionsBox.value = final;
+  localStorage.setItem("instructions", final);
+
+  instrStatus.textContent = "Mode applied";
+  instrStatus.className = "text-green-600";
+  setTimeout(() => instrStatus.textContent = "", 700);
 });
 
 function getEffectiveInstructions() {
-  const base = (instructionsBox.value || "").trim();
-  return (getModeInstructions() + "\n" + base).trim();
+  return (instructionsBox.value || "").trim();
 }
 
 //--------------------------------------------------------------
 // Resume Upload
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
-  const f = resumeInput.files?.[0];
-  if (!f) return;
+  const file = resumeInput.files?.[0];
+  if (!file) return;
+
   resumeStatus.textContent = "Processing…";
 
   const fd = new FormData();
-  fd.append("file", f);
+  fd.append("file", file);
 
   const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
   const data = await res.json().catch(() => ({}));
 
   resumeTextMem = (data.text || "").trim();
 
-  if (!resumeTextMem) resumeStatus.textContent = "Resume: empty";
-  else resumeStatus.textContent = `Resume loaded (${resumeTextMem.length} chars)`;
+  if (!resumeTextMem) resumeStatus.textContent = "Resume extracted: empty";
+  else resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
 });
 
 //--------------------------------------------------------------
 // MIC
 //--------------------------------------------------------------
-function stopMicOnly() {
-  try { recognition?.stop(); } catch {}
-  recognition = null;
-}
+function stopMicOnly() { try { recognition?.stop(); } catch{} }
 
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    setStatus(audioStatus, "Browser does not support SpeechRecognition", "text-red-600");
+    setStatus(audioStatus, "SpeechRecognition not supported", "text-red-600");
     return false;
   }
 
   stopMicOnly();
-
   recognition = new SR();
   recognition.continuous = true;
   recognition.interimResults = true;
@@ -294,7 +282,6 @@ function startMic() {
     if (Date.now() < blockMicUntil) return;
 
     let interim = "";
-
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript);
@@ -325,13 +312,13 @@ function startMic() {
 // SYSTEM AUDIO
 //--------------------------------------------------------------
 function pickBestMimeType() {
-  const opts = [
+  const c = [
     "audio/webm;codecs=opus",
     "audio/webm",
     "audio/ogg;codecs=opus",
     "audio/ogg"
   ];
-  return opts.find(t => MediaRecorder.isTypeSupported(t)) || "";
+  return c.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
 function stopSystemAudioOnly() {
@@ -341,7 +328,7 @@ function stopSystemAudioOnly() {
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
   sysSegmentTimer = null;
 
-  try { sysRecorder?.stop(); } catch {}
+  try { sysRecorder?.stop(); } catch{}
   sysRecorder = null;
 
   sysSegmentChunks = [];
@@ -349,7 +336,7 @@ function stopSystemAudioOnly() {
   sysInFlight = 0;
 
   if (sysStream) {
-    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
+    try { sysStream.getTracks().forEach(t => t.stop()); } catch{}
   }
   sysStream = null;
   sysTrack = null;
@@ -362,15 +349,18 @@ async function enableSystemAudio() {
   stopSystemAudioOnly();
 
   try {
-    sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-  } catch {
-    setStatus(audioStatus, "System audio denied. Use Chrome → Share tab audio.", "text-red-600");
+    sysStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: true
+    });
+  } catch (e) {
+    setStatus(audioStatus, "System audio denied", "text-red-600");
     return;
   }
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
-    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    setStatus(audioStatus, "No system audio found", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
@@ -389,21 +379,21 @@ function startSystemSegmentRecorder() {
 
   try {
     sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
-  } catch {
-    setStatus(audioStatus, "Recorder failed.", "text-red-600");
-    stopSystemAudioOnly();
+  } catch (e) {
+    console.error(e);
+    setStatus(audioStatus, "MediaRecorder failed", "text-red-600");
     return;
   }
 
-  sysRecorder.ondataavailable = ev => {
+  sysRecorder.ondataavailable = e => {
     if (!isRunning) return;
-    if (ev.data && ev.data.size) sysSegmentChunks.push(ev.data);
+    if (e.data?.size) sysSegmentChunks.push(e.data);
   };
 
   sysRecorder.onstop = () => {
     if (!isRunning) return;
 
-    const blob = new Blob(sysSegmentChunks);
+    const blob = new Blob(sysSegmentChunks, { type: sysRecorder.mimeType });
     sysSegmentChunks = [];
 
     if (blob.size >= SYS_MIN_BYTES) {
@@ -411,17 +401,19 @@ function startSystemSegmentRecorder() {
       drainSysQueue();
     }
 
-    if (isRunning && sysTrack.readyState === "live") {
+    if (isRunning && sysTrack && sysTrack.readyState === "live") {
       startSystemSegmentRecorder();
     }
   };
 
-  try { sysRecorder.start(); } catch {}
+  try { sysRecorder.start(); } catch (e) {
+    console.error(e);
+    return;
+  }
 
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
   sysSegmentTimer = setInterval(() => {
-    if (!isRunning) return;
-    try { sysRecorder.stop(); } catch {}
+    try { sysRecorder?.stop(); } catch{}
   }, SYS_SEGMENT_MS);
 }
 
@@ -433,7 +425,6 @@ function drainSysQueue() {
     sysInFlight++;
 
     transcribeSysBlob(blob)
-      .catch(() => {})
       .finally(() => {
         sysInFlight--;
         drainSysQueue();
@@ -441,8 +432,8 @@ function drainSysQueue() {
   }
 }
 
-function dedupeSystemText(raw) {
-  const t = normalize(raw);
+function dedupeSystemText(txt) {
+  const t = normalize(txt);
   if (!t) return "";
 
   if (!lastSysTail) {
@@ -452,46 +443,36 @@ function dedupeSystemText(raw) {
 
   const tailWords = lastSysTail.split(" ");
   const newWords = t.split(" ");
-
   let best = 0;
-  const max = Math.min(10, tailWords.length, newWords.length);
-  for (let k = max; k >= 3; k--) {
-    if (
-      tailWords.slice(-k).join(" ").toLowerCase() ===
-      newWords.slice(0, k).join(" ").toLowerCase()
-    ) {
-      best = k;
-      break;
-    }
+
+  for (let k = Math.min(10, tailWords.length, newWords.length); k >= 3; k--) {
+    const tailPart = tailWords.slice(-k).join(" ").toLowerCase();
+    const newPart = newWords.slice(0, k).join(" ").toLowerCase();
+    if (tailPart === newPart) { best = k; break; }
   }
 
   const cleaned = best ? newWords.slice(best).join(" ") : t;
-  lastSysTail = (lastSysTail + " " + cleaned).split(" ").slice(-12).join(" ");
-  return normalize(cleaned);
-}
+  const merged = (lastSysTail + " " + cleaned).trim();
+  lastSysTail = merged.split(" ").slice(-12).join(" ");
 
-function looksLikeWhisperHallucination(t) {
-  const s = normalize(t).toLowerCase();
-  return (
-    !s ||
-    s.includes("i'm sorry") ||
-    s.includes("cannot transcribe") ||
-    s.includes("thanks for watching") ||
-    s.includes("please like and subscribe")
-  );
+  return normalize(cleaned);
 }
 
 async function transcribeSysBlob(blob) {
   const fd = new FormData();
-  fd.append("file", blob, "sys.webm");
+  const type = (blob.type || "").toLowerCase();
+  fd.append("file", blob, type.includes("ogg") ? "sys.ogg" : "sys.webm");
   fd.append("prompt", WHISPER_BIAS_PROMPT);
 
   const res = await apiFetch("transcribe", { method: "POST", body: fd }, false);
   if (!res.ok) return;
 
   const data = await res.json().catch(() => ({}));
-  const raw = data.text || "";
-  if (looksLikeWhisperHallucination(raw)) return;
+  const raw = (data.text || "").trim();
+
+  const bad = ["i can't wait to see you", "unable to transcribe", "subscribe"];
+  const s = raw.toLowerCase();
+  if (!raw || bad.some(b => s.includes(b))) return;
 
   const cleaned = dedupeSystemText(raw);
   if (cleaned) addToTimelineTypewriter(cleaned);
@@ -501,12 +482,18 @@ async function transcribeSysBlob(blob) {
 // Credits
 //--------------------------------------------------------------
 async function deductCredits(delta) {
-  const res = await apiFetch("user/deduct", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ delta })
-  });
-  return res.json().catch(() => ({}));
+  const res = await apiFetch(
+    "user/deduct",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ delta })
+    },
+    true
+  );
+
+  const data = await res.json();
+  return data;
 }
 
 function startCreditTicking() {
@@ -517,21 +504,24 @@ function startCreditTicking() {
     if (!isRunning) return;
 
     const now = Date.now();
-    const sec = Math.floor((now - lastCreditAt) / 1000);
-    if (sec < CREDIT_BATCH_SEC) return;
+    const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
+    if (elapsedSec < CREDIT_BATCH_SEC) return;
 
-    const batch = sec - (sec % CREDIT_BATCH_SEC);
+    const batch = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
     const delta = batch * CREDITS_PER_SEC;
     lastCreditAt += batch * 1000;
 
-    const out = await deductCredits(delta);
-    if (out.remaining <= 0) {
-      stopAll();
-      showBanner("No more credits. Contact admin: shiva509203@gmail.com");
-      return;
+    try {
+      const out = await deductCredits(delta);
+      if (out.remaining <= 0) {
+        stopAll();
+        showBanner("No more credits left.");
+        return;
+      }
+      await loadUserProfile();
+    } catch (e) {
+      console.error(e);
     }
-
-    loadUserProfile();
   }, 500);
 }
 
@@ -539,27 +529,28 @@ function startCreditTicking() {
 // Chat Streaming
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
-  try { chatAbort?.abort(); } catch {}
-  chatAbort = null;
+  try { chatAbort?.abort(); } catch{}
   chatStreamActive = false;
 }
 
 function pushHistory(role, content) {
   const c = normalize(content);
   if (!c) return;
+
   chatHistory.push({ role, content: c });
   if (chatHistory.length > 50) chatHistory = chatHistory.slice(-50);
 }
 
-function compactHistory() {
+function compactHistoryForRequest() {
   return chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
     role: m.role,
-    content: m.content.slice(0, MAX_HISTORY_CHARS_EACH)
+    content: String(m.content).slice(0, MAX_HISTORY_CHARS_EACH)
   }));
 }
 
 async function startChatStreaming(prompt) {
   abortChatStreamOnly();
+
   chatAbort = new AbortController();
   chatStreamActive = true;
   const seq = ++chatStreamSeq;
@@ -571,20 +562,21 @@ async function startChatStreaming(prompt) {
 
   const body = {
     prompt,
-    history: compactHistory(),
+    history: compactHistoryForRequest(),
     instructions: getEffectiveInstructions(),
-    resumeText: resumeTextMem
+    resumeText: resumeTextMem || ""
   };
 
   let pending = "";
   let finalAnswer = "";
-  let flushTimer = setInterval(() => {
-    if (!chatStreamActive || seq !== chatStreamSeq) return;
-    if (!pending) return;
-    responseBox.textContent += pending;
-    finalAnswer += pending;
-    pending = "";
-  }, 50);
+
+  const flush = () => {
+    if (pending) {
+      responseBox.textContent += pending;
+      finalAnswer += pending;
+      pending = "";
+    }
+  };
 
   try {
     const res = await apiFetch("chat/send", {
@@ -594,8 +586,17 @@ async function startChatStreaming(prompt) {
       signal: chatAbort.signal
     }, false);
 
+    if (!res.ok) {
+      setStatus(sendStatus, "Failed", "text-red-600");
+      return;
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+
+    const flushTimer = setInterval(() => {
+      if (chatStreamActive && seq === chatStreamSeq) flush();
+    }, 40);
 
     while (true) {
       const { done, value } = await reader.read();
@@ -604,51 +605,38 @@ async function startChatStreaming(prompt) {
       pending += decoder.decode(value);
     }
 
-    if (chatStreamActive && seq === chatStreamSeq) {
-      if (pending) {
-        responseBox.textContent += pending;
-        finalAnswer += pending;
-      }
-      setStatus(sendStatus, "Done", "text-green-600");
-      pushHistory("assistant", finalAnswer);
-    } else {
-      setStatus(sendStatus, "Interrupted", "text-orange-600");
-    }
-  } catch {
-    setStatus(sendStatus, "Failed", "text-red-600");
-  } finally {
     clearInterval(flushTimer);
+    flush();
+    pushHistory("assistant", finalAnswer);
+    setStatus(sendStatus, "Done", "text-green-600");
+
+  } catch (e) {
+    setStatus(sendStatus, "Interrupted", "text-orange-600");
   }
 }
 
 //--------------------------------------------------------------
-// Start / Stop
+// START / STOP
 //--------------------------------------------------------------
 async function startAll() {
   hideBanner();
   if (isRunning) return;
 
-  await apiFetch("chat/reset", { method: "POST" }, false);
+  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+
   timeline = [];
   updateTranscript();
 
   isRunning = true;
 
   startBtn.disabled = true;
-  startBtn.classList.add("opacity-50");
-
   stopBtn.disabled = false;
-  stopBtn.classList.remove("opacity-50");
-
   sysBtn.disabled = false;
-  sysBtn.classList.remove("opacity-50");
-
   sendBtn.disabled = false;
-  sendBtn.classList.remove("opacity-60");
 
   micLangIndex = 0;
-  const micOK = startMic();
-  if (!micOK) setStatus(audioStatus, "Mic not available", "text-orange-600");
+  const ok = startMic();
+  if (!ok) setStatus(audioStatus, "Mic unavailable", "text-orange-600");
   else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 
   startCreditTicking();
@@ -661,25 +649,17 @@ function stopAll() {
   stopSystemAudioOnly();
 
   if (creditTimer) clearInterval(creditTimer);
-  creditTimer = null;
 
   startBtn.disabled = false;
-  startBtn.classList.remove("opacity-50");
-
   stopBtn.disabled = true;
-  stopBtn.classList.add("opacity-50");
-
   sysBtn.disabled = true;
-  sysBtn.classList.add("opacity-50");
-
   sendBtn.disabled = true;
-  sendBtn.classList.add("opacity-60");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
 //--------------------------------------------------------------
-// Send / Clear / Reset
+// SEND / CLEAR / RESET
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -688,7 +668,6 @@ sendBtn.onclick = async () => {
   if (!msg) return;
 
   blockMicUntil = Date.now() + 700;
-
   timeline = [];
   promptBox.value = "";
   updateTranscript();
@@ -706,12 +685,12 @@ clearBtn.onclick = () => {
 resetBtn.onclick = async () => {
   abortChatStreamOnly();
   responseBox.textContent = "";
-  setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false);
+  setStatus(sendStatus, "Response reset", "text-green-600");
 };
 
 //--------------------------------------------------------------
-// Logout
+// LOGOUT
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
@@ -723,7 +702,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// Page Load
+// PAGE LOAD
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
@@ -736,7 +715,7 @@ window.addEventListener("load", async () => {
 
   chatHistory = [];
   resumeTextMem = "";
-  resumeStatus.textContent = "Resume cleared (refresh)";
+  if (resumeStatus) resumeStatus.textContent = "Resume cleared (refresh).";
 
   await loadUserProfile();
   await apiFetch("chat/reset", { method: "POST" }, false);
@@ -747,4 +726,16 @@ window.addEventListener("load", async () => {
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
+
+  // NEW — apply mode instructions on load
+  modeSelect.dispatchEvent(new Event("change"));
 });
+
+//--------------------------------------------------------------
+// Bind Buttons
+//--------------------------------------------------------------
+startBtn.onclick = startAll;
+stopBtn.onclick = stopAll;
+
+// VERY IMPORTANT — direct user gesture for window picker
+sysBtn.onclick = () => enableSystemAudio();
