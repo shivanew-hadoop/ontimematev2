@@ -30,54 +30,56 @@ let hiddenInstructions = ""; // Internal only (Option A)
 //--------------------------------------------------------------
 // INTERNAL MODE INSTRUCTIONS (Interview/Sales/General)
 //--------------------------------------------------------------
-const INTERNAL_MODE_INSTRUCTIONS = {
+//--------------------------------------------------------------
+
+//--------------------------------------------------------------
+const MODE_INSTRUCTIONS = {
   general: "",
 
   interview: `
-Always answer in two parts:
-1) create the question first with exapansion rule
-2) then answer in interview mode
-Use Interview Mode:
+Always answer in TWO SECTIONS ONLY:
+
 1) Quick Answer (Interview Style)
-   - Short bullet points
-   - Direct, no fluff
-   - Use domain terminology based on the question
-   - Highlight challenges, decisions, solutions
+   - 4–6 crisp bullet points
+   - Direct, domain-specific, no fluff
+   - Define the concept in clear terms
+   - Highlight challenges, decisions, trade-offs
+   - Mention where it fits in real engineering work
 
 2) Real-Time Project Example
-   - 2–4 bullets showing real scenario
-   - Explain action taken and impact created
+   - Provide 2–4 bullets from practical experience
+   - Show how YOU implemented it
+   - Include the problem, action taken, and impact
+   - Tailor examples using the user's resume context when available
 
-Question Expansion Rule:
-If the user provides a short transcript, keyword, or fragment 
-(e.g., 'Triggers in data warehouse', 'Page Object Model', 'Singleton pattern'),
-automatically expand it into a complete interview-style question before answering.
+QUESTION EXPANSION RULE:
+If the user gives only a keyword/phrase (e.g., "POM", "data masking", "triggers"), convert it into a full interviewer-style question such as:
+- "What is __ ?"
+- "How does __ work?"
+- "How did you use __ in your project?"
+- "Explain the role of __."
+- "What challenges arise when using __ ?"
+- "Why is __ important, and when should it be used?"
+- "Walk me through the end-to-end workflow of __ with a real example."
+- "What problem does __ solve in your system?"
+- "What are the best practices for implementing __ ?"
+- "What common mistakes occur with __, and how do you avoid them?"
+- "How does __ integrate with the rest of your architecture?"
+- "What performance or scalability issues can happen with __ ?"
+- "How would you debug or troubleshoot issues related to __ ?"
+- "How is __ different from similar tools or techniques?"
+- "How would you explain __ to a junior engineer in your team?"
 
-Use formats such as:
-- "What is ... ?"
-- "How does ... work?"
-- "How did you use ... in your project?"
-- "Explain the role of ..."
-- "What challenges arise when using ... ?"
-
-Never answer a raw fragment directly. Always rewrite it into a proper question, 
-then answer using Interview Mode.
-
-Rules:
-- No ChatGPT tone, no textbook definitions
-- No repeating the question
-- Use user's resume/project context when available
-- For behavioral questions: fast STAR format
-- For technical questions: identify core challenge + mitigation
+Never answer a raw fragment. Convert it → then respond using the 2-part format above.
 `,
 
   sales: `
-Give responses in a persuasive, human-friendly tone focusing on clarity and value.
-Avoid jargon unless asked.
-Use short, confident statements.
-Include one short real-world customer scenario example.
+Respond in a persuasive, value-driven style.
+Highlight benefits, outcomes, clarity.
+Use brief examples showing customer impact.
 `
 };
+
 
 //--------------------------------------------------------------
 // APPLY MODE INSTRUCTIONS + UI BEHAVIOR

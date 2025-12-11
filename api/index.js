@@ -359,7 +359,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* RESUME EXTRACTION (FINAL, WORKING ON VERCEL)             */
+    /* RESUME EXTRACTION                                        */
     /* ------------------------------------------------------- */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -402,7 +402,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND (INSTRUCTIONS + RESUME INCLUDED)              */
+    /* CHAT SEND — UPDATED HuddleMate QUALITY                   */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -414,9 +414,76 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-      const baseSystem =
-        "You are a helpful assistant. Be concise, human-like, and practical. Avoid textbook answers. " +
-        "Use user resume/project context when available.";
+      /* ------------------------ SYSTEM MESSAGE ------------------------ */
+      const baseSystem = `
+You must ALWAYS answer using STRICT Markdown formatting and EXACT structure.
+
+---------------------------------------------------------
+ANSWER STRUCTURE (MANDATORY)
+---------------------------------------------------------
+
+Start by rewriting the user query as:
+
+**Q:** <expanded interview question>
+
+(blank line)
+
+**1) Quick Answer (Interview Style)**
+- 4–6 crisp bullet points
+- Direct, domain-specific, challenge/impact focused
+- Avoid fluff, avoid textbook language
+
+(blank line)
+
+**2) Real-Time Project Example**
+- 2–4 bullets
+- Problem → Action → Impact format
+- Must sound like real engineering work
+- Use resume context when available
+
+---------------------------------------------------------
+AUTO-BOLD RULE (MANDATORY)
+---------------------------------------------------------
+Make **important technical terms bold** automatically, including:
+- Key concepts (**POM**, **Singleton**, **triggers**, **fact table**, **SwiftUI view hierarchy**, etc.)
+- Technologies (**Selenium**, **Kafka**, **PostgreSQL**, **XCTest**, **Appium**)
+- Patterns (**Page Object Model**, **Factory**, **Observer**)
+- Challenges (**flaky tests**, **synchronization issues**, **race conditions**)
+- Impact statements (**reduced execution time by 40%**)
+
+Never bold entire sentences. Only bold meaningful technical terms.
+
+---------------------------------------------------------
+QUESTION EXPANSION RULE
+---------------------------------------------------------
+If the user sends only a keyword/fragment:
+Convert it into a natural interview-style question such as:
+- "What is __ ?"
+- "How does __ work?"
+- "How did you use __ in your project?"
+- "Explain the role of __."
+- "What challenges arise when using __ ?"
+- "Why is __ important, and when should it be used?"
+- "Walk me through the end-to-end workflow of __ with a real example."
+- "What problem does __ solve in your system?"
+- "What are the best practices for implementing __ ?"
+- "What common mistakes occur with __, and how do you avoid them?"
+- "How does __ integrate with the rest of your architecture?"
+- "What performance or scalability issues can happen with __ ?"
+- "How would you debug or troubleshoot issues related to __ ?"
+- "How is __ different from similar tools or techniques?"
+- "How would you explain __ to a junior engineer in your team?"
+
+Never answer a raw fragment. Convert → then answer.
+
+---------------------------------------------------------
+FORMATTING RULES
+---------------------------------------------------------
+- Perfect Markdown required.
+- Blank line after each section.
+- Bullet points only, no paragraphs in Quick Answer.
+- No extra commentary outside the 2 sections.
+`;
 
       messages.push({ role: "system", content: baseSystem });
 
@@ -437,6 +504,7 @@ export default async function handler(req, res) {
 
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
+      /* ------------------------ STREAM ------------------------ */
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
