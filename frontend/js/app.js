@@ -82,13 +82,45 @@ const WHISPER_BIAS_PROMPT =
 //--------------------------------------------------------------
 // MODE-SPECIFIC INSTRUCTIONS  (NEW)
 //--------------------------------------------------------------
+// const MODE_INSTRUCTIONS = {
+//   general: `Give responses in a clear human tone. Avoid textbook definitions. Provide practical, real-world clarity.`,
+  
+//   interview: `Give responses in human conversational tone. Prioritize real project examples. Avoid ChatGPT style, avoid textbook definitions, avoid fluff. Be crisp, confident, structured. If asked technical concepts, explain using practical industry examples.`,
+  
+//   sales: `Respond in a friendly human tone. Focus on problem-solving, value, storytelling, and persuasion. Do not sound like AI. Keep sentences short and confident.`
+// };
+
 const MODE_INSTRUCTIONS = {
-  general: `Give responses in a clear human tone. Avoid textbook definitions. Provide practical, real-world clarity.`,
-  
-  interview: `Give responses in human conversational tone. Prioritize real project examples. Avoid ChatGPT style, avoid textbook definitions, avoid fluff. Be crisp, confident, structured. If asked technical concepts, explain using practical industry examples.`,
-  
-  sales: `Respond in a friendly human tone. Focus on problem-solving, value, storytelling, and persuasion. Do not sound like AI. Keep sentences short and confident.`
+  general: `
+Give responses in a clear human tone. Avoid textbook definitions.
+Keep answers practical and grounded in real-world clarity.
+`,
+
+  interview: `
+Always answer in two parts:
+
+1) Quick Answer (Interview Style)
+- Bullet points only
+- Short, direct, no fluff
+- Use domain terminology based on the question
+- Highlight challenges, decisions, and solutions
+
+2) Real-Time Project Example
+- 2–4 bullets
+- Practical scenario of how this applies in real work
+- Focus on action taken and impact created
+
+Rules:
+- No ChatGPT-style generic explanations
+- No intros, no conclusions, no sugar-coating
+- No repeating the question
+- Always sound like a candidate answering instantly
+- Blend user's resume/project details when provided
+- For behavioral questions, use fast STAR in bullets
+- For technical questions, identify core challenge + mitigation
+`
 };
+
 
 function getModeInstructions() {
   return MODE_INSTRUCTIONS[modeSelect.value] || MODE_INSTRUCTIONS.general;
