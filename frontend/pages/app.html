@@ -21,7 +21,7 @@
     }
 
     #promptBox {
-      height: 260px;              /* bigger live transcript */
+      height: 260px;
       width: 100%;
       background: #fafafa;
       border: 1px solid #ccc;
@@ -77,6 +77,14 @@
     </div>
 
     <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
+
+    <!-- MODE SELECTOR -->
+    <h3 class="font-semibold mt-6 mb-2">Mode</h3>
+    <select id="modeSelect" class="w-full border p-2 text-xs bg-white rounded">
+      <option value="general">General</option>
+      <option value="interview">Interview Mode</option>
+      <option value="sales">Sales Mode</option>
+    </select>
 
     <!-- INSTRUCTIONS -->
     <h3 class="font-semibold mt-6 mb-2">Custom Instructions</h3>

@@ -17,6 +17,7 @@ const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
 const bannerTop = document.getElementById("bannerTop");
+const modeSelect = document.getElementById("modeSelect");
 
 //--------------------------------------------------------------
 // STATE
@@ -28,7 +29,7 @@ let isRunning = false;
 let recognition = null;
 let blockMicUntil = 0;
 
-// SYSTEM AUDIO (segment recorder)
+// SYSTEM AUDIO
 let sysStream = null;
 let sysTrack = null;
 let sysRecorder = null;
@@ -45,20 +46,20 @@ let timeline = [];
 let creditTimer = null;
 let lastCreditAt = 0;
 
-// chat stream cancellation
+// chat stream
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
 
-// in-session memory
+// memory
 let chatHistory = [];
 const MAX_HISTORY_MESSAGES = 8;
 const MAX_HISTORY_CHARS_EACH = 1500;
 
-// resume in memory
+// resume memory
 let resumeTextMem = "";
 
-// system transcript dedupe tail
+// system transcript tail
 let lastSysTail = "";
 
 //--------------------------------------------------------------
@@ -72,30 +73,57 @@ const SYS_TYPE_MS_PER_WORD = 18;
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
-// MIC accent fallback (browser limitation, but improves coverage)
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Whisper bias prompt (system audio only)
 const WHISPER_BIAS_PROMPT =
   "Transcribe clearly in English. Handle Indian, British, Australian, and American accents. Keep proper nouns and numbers.";
+
+//--------------------------------------------------------------
+// MODE SELECTOR → Built-in instructions
+//--------------------------------------------------------------
+function getModeInstructions() {
+  const mode = modeSelect.value;
+
+  if (mode === "interview") {
+    return `
+Answer like a real professional, not like ChatGPT.
+Use real project examples based on the resume when relevant.
+Keep tone natural, human, confident.
+Avoid definitions — explain how YOU used the concept in real projects.
+Structure:
+• Quick Answer first (interview style)
+• Bullet points
+• Real-time example from resume
+• No sugar-coating, no generic textbook lines.
+`;
+  }
+
+  if (mode === "sales") {
+    return `
+Respond in a persuasive, crisp, business tone.
+Focus on value, ROI, client impact.
+Use short sentences and real use cases.
+Keep messaging confident, non-technical unless required.
+`;
+  }
+
+  return ""; // general
+}
 
 //--------------------------------------------------------------
 // Helpers
 //--------------------------------------------------------------
 function showBanner(msg) {
-  if (!bannerTop) return;
   bannerTop.textContent = msg;
   bannerTop.classList.remove("hidden");
   bannerTop.classList.add("bg-red-600");
 }
 function hideBanner() {
-  if (!bannerTop) return;
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
 function setStatus(el, text, cls = "") {
-  if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
@@ -103,8 +131,7 @@ function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 function authHeaders() {
-  const token = session?.access_token;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {};
 }
 function updateTranscript() {
   promptBox.value = timeline.map(t => t.text).join(" ");
@@ -117,20 +144,18 @@ function addToTimeline(txt) {
   updateTranscript();
 }
 
-// UI-only: show system transcript word-by-word once Whisper returns chunk
+// typewriter UI for system audio
 function addToTimelineTypewriter(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
-
   const entry = { t: Date.now(), text: "" };
   timeline.push(entry);
 
   const words = cleaned.split(" ");
   let i = 0;
-
   const timer = setInterval(() => {
-    if (!isRunning) { clearInterval(timer); return; }
-    if (i >= words.length) { clearInterval(timer); return; }
+    if (!isRunning) return clearInterval(timer);
+    if (i >= words.length) return clearInterval(timer);
     entry.text += (entry.text ? " " : "") + words[i++];
     updateTranscript();
   }, msPerWord);
@@ -147,13 +172,13 @@ function isTokenNearExpiry() {
 }
 
 async function refreshAccessToken() {
-  const refresh_token = session?.refresh_token;
-  if (!refresh_token) throw new Error("Missing refresh_token. Please login again.");
+  const rt = session?.refresh_token;
+  if (!rt) throw new Error("Missing refresh token.");
 
   const res = await fetch("/api?path=auth/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ refresh_token })
+    body: JSON.stringify({ refresh_token: rt })
   });
 
   const data = await res.json().catch(() => ({}));
@@ -162,13 +187,12 @@ async function refreshAccessToken() {
   session.access_token = data.session.access_token;
   session.refresh_token = data.session.refresh_token;
   session.expires_at = data.session.expires_at;
-
   localStorage.setItem("session", JSON.stringify(session));
 }
 
 async function apiFetch(path, opts = {}, needAuth = true) {
   if (needAuth && isTokenNearExpiry()) {
-    try { await refreshAccessToken(); } catch (e) { console.error(e); }
+    try { await refreshAccessToken(); } catch {}
   }
 
   const headers = { ...(opts.headers || {}) };
@@ -178,15 +202,16 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 
   if (needAuth && res.status === 401) {
     const t = await res.text().catch(() => "");
-    const looksExpired =
-      t.includes("token is expired") ||
+    if (
+      t.includes("expired") ||
       t.includes("invalid JWT") ||
-      t.includes("Missing token");
-
-    if (looksExpired) {
+      t.includes("Missing token")
+    ) {
       await refreshAccessToken();
-      const headers2 = { ...(opts.headers || {}), ...authHeaders() };
-      return fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers: headers2 });
+      return fetch(`/api?path=${encodeURIComponent(path)}`, {
+        ...opts,
+        headers: { ...(opts.headers || {}), ...authHeaders() }
+      });
     }
   }
 
@@ -194,13 +219,11 @@ async function apiFetch(path, opts = {}, needAuth = true) {
 }
 
 //--------------------------------------------------------------
-// Load USER PROFILE
+// Load Profile
 //--------------------------------------------------------------
 async function loadUserProfile() {
-  const res = await apiFetch("user/profile", {}, true);
+  const res = await apiFetch("user/profile");
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Failed to load profile");
-
   userInfo.innerHTML =
     `Logged in as <b>${data.user.email}</b><br>` +
     `Credits: <b>${data.user.credits}</b><br>` +
@@ -208,9 +231,10 @@ async function loadUserProfile() {
 }
 
 //--------------------------------------------------------------
-// Instructions (USED IN CHAT)
+// Custom Instructions
 //--------------------------------------------------------------
 instructionsBox.value = localStorage.getItem("instructions") || "";
+
 instructionsBox.addEventListener("input", () => {
   localStorage.setItem("instructions", instructionsBox.value);
   instrStatus.textContent = "Saved";
@@ -219,41 +243,32 @@ instructionsBox.addEventListener("input", () => {
 });
 
 function getEffectiveInstructions() {
-  // Always use what user currently sees in the box (most accurate)
-  const live = (instructionsBox?.value || "").trim();
-  if (live) return live;
-  return (localStorage.getItem("instructions") || "").trim();
+  const base = (instructionsBox.value || "").trim();
+  return (getModeInstructions() + "\n" + base).trim();
 }
 
 //--------------------------------------------------------------
-// Resume Upload (USED IN CHAT)
+// Resume Upload
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
-  const file = resumeInput.files?.[0];
-  if (!file) return;
-
+  const f = resumeInput.files?.[0];
+  if (!f) return;
   resumeStatus.textContent = "Processing…";
 
   const fd = new FormData();
-  fd.append("file", file);
+  fd.append("file", f);
 
   const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
   const data = await res.json().catch(() => ({}));
 
-  resumeTextMem = String(data.text || "").trim();
+  resumeTextMem = (data.text || "").trim();
 
-  if (!resumeTextMem) {
-    resumeStatus.textContent = "Resume extracted: empty";
-  } else if (resumeTextMem.startsWith("[Resume upload received")) {
-    // backend warning message (missing pdf/docx deps)
-    resumeStatus.textContent = resumeTextMem;
-  } else {
-    resumeStatus.textContent = `Resume extracted (${resumeTextMem.length} chars)`;
-  }
+  if (!resumeTextMem) resumeStatus.textContent = "Resume: empty";
+  else resumeStatus.textContent = `Resume loaded (${resumeTextMem.length} chars)`;
 });
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition
+// MIC
 //--------------------------------------------------------------
 function stopMicOnly() {
   try { recognition?.stop(); } catch {}
@@ -263,7 +278,7 @@ function stopMicOnly() {
 function startMic() {
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
-    setStatus(audioStatus, "SpeechRecognition not supported in this browser", "text-red-600");
+    setStatus(audioStatus, "Browser does not support SpeechRecognition", "text-red-600");
     return false;
   }
 
@@ -272,21 +287,21 @@ function startMic() {
   recognition = new SR();
   recognition.continuous = true;
   recognition.interimResults = true;
-  recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
+  recognition.lang = MIC_LANGS[micLangIndex];
 
-  recognition.onresult = (ev) => {
+  recognition.onresult = ev => {
     if (!isRunning) return;
     if (Date.now() < blockMicUntil) return;
 
     let interim = "";
+
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
-      const text = normalize(r[0].transcript || "");
+      const text = normalize(r[0].transcript);
       if (r.isFinal) addToTimeline(text);
       else interim = text;
     }
 
-    // keep finalized content visible; show interim live while speaking
     if (interim) {
       const base = timeline.map(t => t.text).join(" ");
       promptBox.value = (base + " " + interim).trim();
@@ -307,19 +322,16 @@ function startMic() {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO — segment recorder + dedupe + typewriter UI
+// SYSTEM AUDIO
 //--------------------------------------------------------------
 function pickBestMimeType() {
-  const candidates = [
+  const opts = [
     "audio/webm;codecs=opus",
     "audio/webm",
     "audio/ogg;codecs=opus",
     "audio/ogg"
   ];
-  for (const t of candidates) {
-    if (window.MediaRecorder && MediaRecorder.isTypeSupported(t)) return t;
-  }
-  return "";
+  return opts.find(t => MediaRecorder.isTypeSupported(t)) || "";
 }
 
 function stopSystemAudioOnly() {
@@ -341,7 +353,6 @@ function stopSystemAudioOnly() {
   }
   sysStream = null;
   sysTrack = null;
-
   lastSysTail = "";
 }
 
@@ -351,25 +362,22 @@ async function enableSystemAudio() {
   stopSystemAudioOnly();
 
   try {
-    sysStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: true
-    });
+    sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
   } catch {
-    setStatus(audioStatus, "System audio denied. Use Chrome TAB capture + Share audio.", "text-red-600");
+    setStatus(audioStatus, "System audio denied. Use Chrome → Share tab audio.", "text-red-600");
     return;
   }
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
-    setStatus(audioStatus, "No system audio detected. Use Chrome TAB + Share audio.", "text-red-600");
+    setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
 
   sysAbort = new AbortController();
   startSystemSegmentRecorder();
-  setStatus(audioStatus, "System audio enabled (low latency)", "text-green-600");
+  setStatus(audioStatus, "System audio enabled", "text-green-600");
 }
 
 function startSystemSegmentRecorder() {
@@ -381,14 +389,13 @@ function startSystemSegmentRecorder() {
 
   try {
     sysRecorder = new MediaRecorder(audioOnly, mimeType ? { mimeType } : undefined);
-  } catch (e) {
-    console.error(e);
-    setStatus(audioStatus, "MediaRecorder failed. Use Chrome TAB capture.", "text-red-600");
+  } catch {
+    setStatus(audioStatus, "Recorder failed.", "text-red-600");
     stopSystemAudioOnly();
     return;
   }
 
-  sysRecorder.ondataavailable = (ev) => {
+  sysRecorder.ondataavailable = ev => {
     if (!isRunning) return;
     if (ev.data && ev.data.size) sysSegmentChunks.push(ev.data);
   };
@@ -396,33 +403,25 @@ function startSystemSegmentRecorder() {
   sysRecorder.onstop = () => {
     if (!isRunning) return;
 
-    const blob = new Blob(sysSegmentChunks, { type: sysRecorder?.mimeType || "" });
+    const blob = new Blob(sysSegmentChunks);
     sysSegmentChunks = [];
 
-    // avoid sending too-small/silent clips (reduces 400 corrupted/unsupported)
     if (blob.size >= SYS_MIN_BYTES) {
       sysQueue.push(blob);
       drainSysQueue();
     }
 
-    if (isRunning && sysTrack && sysTrack.readyState === "live") {
+    if (isRunning && sysTrack.readyState === "live") {
       startSystemSegmentRecorder();
     }
   };
 
-  try {
-    sysRecorder.start();
-  } catch (e) {
-    console.error(e);
-    setStatus(audioStatus, "System audio start failed", "text-red-600");
-    stopSystemAudioOnly();
-    return;
-  }
+  try { sysRecorder.start(); } catch {}
 
   if (sysSegmentTimer) clearInterval(sysSegmentTimer);
   sysSegmentTimer = setInterval(() => {
     if (!isRunning) return;
-    try { sysRecorder?.stop(); } catch {}
+    try { sysRecorder.stop(); } catch {}
   }, SYS_SEGMENT_MS);
 }
 
@@ -434,7 +433,7 @@ function drainSysQueue() {
     sysInFlight++;
 
     transcribeSysBlob(blob)
-      .catch(e => console.error("sys transcribe error", e))
+      .catch(() => {})
       .finally(() => {
         sysInFlight--;
         drainSysQueue();
@@ -442,74 +441,56 @@ function drainSysQueue() {
   }
 }
 
-function dedupeSystemText(newText) {
-  const t = normalize(newText);
+function dedupeSystemText(raw) {
+  const t = normalize(raw);
   if (!t) return "";
 
-  const tail = lastSysTail;
-  if (!tail) {
+  if (!lastSysTail) {
     lastSysTail = t.split(" ").slice(-12).join(" ");
     return t;
   }
 
-  const tailWords = tail.split(" ");
+  const tailWords = lastSysTail.split(" ");
   const newWords = t.split(" ");
 
-  let bestK = 0;
-  const maxK = Math.min(10, tailWords.length, newWords.length);
-  for (let k = maxK; k >= 3; k--) {
-    const tailEnd = tailWords.slice(-k).join(" ").toLowerCase();
-    const newStart = newWords.slice(0, k).join(" ").toLowerCase();
-    if (tailEnd === newStart) { bestK = k; break; }
+  let best = 0;
+  const max = Math.min(10, tailWords.length, newWords.length);
+  for (let k = max; k >= 3; k--) {
+    if (
+      tailWords.slice(-k).join(" ").toLowerCase() ===
+      newWords.slice(0, k).join(" ").toLowerCase()
+    ) {
+      best = k;
+      break;
+    }
   }
 
-  const cleaned = bestK ? newWords.slice(bestK).join(" ") : t;
-
-  const merged = (tail + " " + cleaned).trim();
-  lastSysTail = merged.split(" ").slice(-12).join(" ");
-
+  const cleaned = best ? newWords.slice(best).join(" ") : t;
+  lastSysTail = (lastSysTail + " " + cleaned).split(" ").slice(-12).join(" ");
   return normalize(cleaned);
 }
 
 function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
-  if (!s) return true;
-
-  // common tail hallucinations on silence/end
-  const badPhrases = [
-    "thanks for watching",
-    "thank you for watching",
-    "subscribe",
-    "i'm sorry, but i cannot",
-    "i am sorry, but i cannot",
-    "i can't wait to see you",
-    "unable to transcribe",
-    "please like and subscribe"
-  ];
-  return badPhrases.some(p => s.includes(p));
+  return (
+    !s ||
+    s.includes("i'm sorry") ||
+    s.includes("cannot transcribe") ||
+    s.includes("thanks for watching") ||
+    s.includes("please like and subscribe")
+  );
 }
 
 async function transcribeSysBlob(blob) {
   const fd = new FormData();
-  const type = (blob.type || "").toLowerCase();
-  const ext = type.includes("ogg") ? "ogg" : "webm";
-  fd.append("file", blob, `sys.${ext}`);
+  fd.append("file", blob, "sys.webm");
   fd.append("prompt", WHISPER_BIAS_PROMPT);
 
-  const res = await apiFetch("transcribe", {
-    method: "POST",
-    body: fd,
-    signal: sysAbort?.signal
-  }, false);
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    console.error("transcribe failed", res.status, t);
-    return;
-  }
+  const res = await apiFetch("transcribe", { method: "POST", body: fd }, false);
+  if (!res.ok) return;
 
   const data = await res.json().catch(() => ({}));
-  const raw = String(data.text || "");
+  const raw = data.text || "";
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeSystemText(raw);
@@ -517,18 +498,15 @@ async function transcribeSysBlob(blob) {
 }
 
 //--------------------------------------------------------------
-// Credits deduction (batch)
+// Credits
 //--------------------------------------------------------------
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ delta })
-  }, true);
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `Deduct failed (${res.status})`);
-  return data;
+  });
+  return res.json().catch(() => ({}));
 }
 
 function startCreditTicking() {
@@ -539,30 +517,26 @@ function startCreditTicking() {
     if (!isRunning) return;
 
     const now = Date.now();
-    const elapsedSec = Math.floor((now - lastCreditAt) / 1000);
-    if (elapsedSec < CREDIT_BATCH_SEC) return;
+    const sec = Math.floor((now - lastCreditAt) / 1000);
+    if (sec < CREDIT_BATCH_SEC) return;
 
-    const batchSec = elapsedSec - (elapsedSec % CREDIT_BATCH_SEC);
-    const delta = batchSec * CREDITS_PER_SEC;
-    lastCreditAt += batchSec * 1000;
+    const batch = sec - (sec % CREDIT_BATCH_SEC);
+    const delta = batch * CREDITS_PER_SEC;
+    lastCreditAt += batch * 1000;
 
-    try {
-      const out = await deductCredits(delta);
-      if (out.remaining <= 0) {
-        stopAll();
-        showBanner("No more credits. Contact admin: shiva509203@gmail.com");
-        return;
-      }
-      await loadUserProfile();
-    } catch (e) {
-      console.error(e);
-      showBanner(e.message || "Credit deduction error");
+    const out = await deductCredits(delta);
+    if (out.remaining <= 0) {
+      stopAll();
+      showBanner("No more credits. Contact admin: shiva509203@gmail.com");
+      return;
     }
+
+    loadUserProfile();
   }, 500);
 }
 
 //--------------------------------------------------------------
-// Chat streaming + in-session memory + resume + instructions
+// Chat Streaming
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -577,19 +551,18 @@ function pushHistory(role, content) {
   if (chatHistory.length > 50) chatHistory = chatHistory.slice(-50);
 }
 
-function compactHistoryForRequest() {
+function compactHistory() {
   return chatHistory.slice(-MAX_HISTORY_MESSAGES).map(m => ({
     role: m.role,
-    content: String(m.content || "").slice(0, MAX_HISTORY_CHARS_EACH)
+    content: m.content.slice(0, MAX_HISTORY_CHARS_EACH)
   }));
 }
 
 async function startChatStreaming(prompt) {
   abortChatStreamOnly();
-
   chatAbort = new AbortController();
   chatStreamActive = true;
-  const mySeq = ++chatStreamSeq;
+  const seq = ++chatStreamSeq;
 
   responseBox.textContent = "";
   setStatus(sendStatus, "Sending…", "text-orange-600");
@@ -598,21 +571,20 @@ async function startChatStreaming(prompt) {
 
   const body = {
     prompt,
-    history: compactHistoryForRequest(),
-    instructions: getEffectiveInstructions(),   // IMPORTANT
-    resumeText: resumeTextMem || ""             // IMPORTANT
+    history: compactHistory(),
+    instructions: getEffectiveInstructions(),
+    resumeText: resumeTextMem
   };
 
   let pending = "";
-  let flushTimer = null;
   let finalAnswer = "";
-
-  const flush = () => {
+  let flushTimer = setInterval(() => {
+    if (!chatStreamActive || seq !== chatStreamSeq) return;
     if (!pending) return;
     responseBox.textContent += pending;
     finalAnswer += pending;
     pending = "";
-  };
+  }, 50);
 
   try {
     const res = await apiFetch("chat/send", {
@@ -622,53 +594,41 @@ async function startChatStreaming(prompt) {
       signal: chatAbort.signal
     }, false);
 
-    if (!res.ok) {
-      const t = await res.text().catch(() => "");
-      throw new Error(t || `Chat failed (${res.status})`);
-    }
-
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-
-    flushTimer = setInterval(() => {
-      if (!chatStreamActive || mySeq !== chatStreamSeq) return;
-      flush();
-    }, 50);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (!chatStreamActive || mySeq !== chatStreamSeq) break;
+      if (!chatStreamActive || seq !== chatStreamSeq) break;
       pending += decoder.decode(value);
     }
 
-    if (chatStreamActive && mySeq === chatStreamSeq) {
-      flush();
+    if (chatStreamActive && seq === chatStreamSeq) {
+      if (pending) {
+        responseBox.textContent += pending;
+        finalAnswer += pending;
+      }
       setStatus(sendStatus, "Done", "text-green-600");
       pushHistory("assistant", finalAnswer);
     } else {
       setStatus(sendStatus, "Interrupted", "text-orange-600");
     }
-  } catch (e) {
-    if (e?.name === "AbortError") setStatus(sendStatus, "Interrupted", "text-orange-600");
-    else {
-      console.error(e);
-      setStatus(sendStatus, "Failed", "text-red-600");
-    }
+  } catch {
+    setStatus(sendStatus, "Failed", "text-red-600");
   } finally {
-    if (flushTimer) clearInterval(flushTimer);
+    clearInterval(flushTimer);
   }
 }
 
 //--------------------------------------------------------------
-// START / STOP
+// Start / Stop
 //--------------------------------------------------------------
 async function startAll() {
   hideBanner();
   if (isRunning) return;
 
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-
+  await apiFetch("chat/reset", { method: "POST" }, false);
   timeline = [];
   updateTranscript();
 
@@ -687,8 +647,8 @@ async function startAll() {
   sendBtn.classList.remove("opacity-60");
 
   micLangIndex = 0;
-  const micOk = startMic();
-  if (!micOk) setStatus(audioStatus, "Mic not available. You can still use System Audio.", "text-orange-600");
+  const micOK = startMic();
+  if (!micOK) setStatus(audioStatus, "Mic not available", "text-orange-600");
   else setStatus(audioStatus, "Mic active. System audio optional.", "text-green-600");
 
   startCreditTicking();
@@ -719,7 +679,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// SEND / CLEAR / RESET
+// Send / Clear / Reset
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
@@ -747,11 +707,11 @@ resetBtn.onclick = async () => {
   abortChatStreamOnly();
   responseBox.textContent = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false);
 };
 
 //--------------------------------------------------------------
-// LOGOUT
+// Logout
 //--------------------------------------------------------------
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
@@ -763,7 +723,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 //--------------------------------------------------------------
-// PAGE LOAD
+// Page Load
 //--------------------------------------------------------------
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
@@ -776,25 +736,15 @@ window.addEventListener("load", async () => {
 
   chatHistory = [];
   resumeTextMem = "";
-  if (resumeStatus) resumeStatus.textContent = "Resume cleared (refresh).";
+  resumeStatus.textContent = "Resume cleared (refresh)";
 
   await loadUserProfile();
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+  await apiFetch("chat/reset", { method: "POST" }, false);
 
   timeline = [];
   updateTranscript();
 
   stopBtn.disabled = true;
-  stopBtn.classList.add("opacity-50");
   sysBtn.disabled = true;
-  sysBtn.classList.add("opacity-50");
   sendBtn.disabled = true;
-  sendBtn.classList.add("opacity-60");
 });
-
-//--------------------------------------------------------------
-// Bind Buttons
-//--------------------------------------------------------------
-startBtn.onclick = startAll;
-stopBtn.onclick = stopAll;
-sysBtn.onclick = enableSystemAudio;
