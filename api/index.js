@@ -426,32 +426,44 @@ export default async function handler(req, res) {
     /* ------------------------------------------------------- */
     /* TRANSCRIBE (mic/system audio)                           */
     /* ------------------------------------------------------- */
-    if (path === "transcribe") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+    /* ------------------------------------------------------- */
+/* TRANSCRIBE (mic/system audio)                           */
+/* ------------------------------------------------------- */
+if (path === "transcribe") {
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      const { fields, file } = await readMultipart(req);
-      if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
+  const { fields, file } = await readMultipart(req);
+  if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
 
-      try {
-        const filename = file.filename || "audio.webm";
-        const mime = (file.mime || "audio/webm").split(";")[0];
-        const audioFile = await toFile(file.buffer, filename, { type: mime });
+  try {
+    const filename = file.filename || "audio.webm";
+    const mime = (file.mime || "audio/webm").split(";")[0];
+    const audioFile = await toFile(file.buffer, filename, { type: mime });
 
-        const out = await openai.audio.transcriptions.create({
-          file: audioFile,
-          model: "gpt-4o-transcribe",
-          language: "en",
-          temperature: 0,
-          response_format: "json",
-          prompt: (fields?.prompt || "").slice(0, 800)
-        });
+    const basePrompt =
+      "Transcribe EXACTLY what is spoken in English. " +
+      "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
+      "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
-        return res.json({ text: out.text || "" });
-      } catch (e) {
-        const status = e?.status || e?.response?.status || 500;
-        return res.status(status).json({ error: e?.message || String(e) });
-      }
-    }
+    const userPrompt = String(fields?.prompt || "").slice(0, 500);
+    const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
+
+    const out = await openai.audio.transcriptions.create({
+      file: audioFile,
+      model: "gpt-4o-transcribe",
+      language: "en",
+      temperature: 0,
+      response_format: "json",
+      prompt: finalPrompt
+    });
+
+    return res.json({ text: out.text || "" });
+  } catch (e) {
+    const status = e?.status || e?.response?.status || 500;
+    return res.status(status).json({ error: e?.message || String(e) });
+  }
+}
+
 
     /* ------------------------------------------------------- */
     /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
