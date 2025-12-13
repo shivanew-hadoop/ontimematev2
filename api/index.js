@@ -4,7 +4,7 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
-// NEW — STATIC IMPORTS REQUIRED BY VERCEL
+// STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 
@@ -71,7 +71,7 @@ function readMultipart(req) {
 
     const bb = Busboy({
       headers,
-      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
+      limits: { fileSize: 25 * 1024 * 1024 } // 25MB
     });
 
     const fields = {};
@@ -161,7 +161,7 @@ function safeHistory(history) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
+/* RESUME EXTRACTION                                                          */
 /* -------------------------------------------------------------------------- */
 
 function guessExtAndMime(file) {
@@ -209,6 +209,67 @@ async function extractResumeText(file) {
   }
 
   return file.buffer.toString("utf8");
+}
+
+/* -------------------------------------------------------------------------- */
+/* REALTIME TOKEN (EPHEMERAL CLIENT SECRET)                                   */
+/* -------------------------------------------------------------------------- */
+
+const REALTIME_PROMPT =
+  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
+
+async function getCreditsForUser(userId) {
+  const { data } = await supabaseAdmin()
+    .from("user_profiles")
+    .select("credits")
+    .eq("id", userId)
+    .single();
+  return Number(data?.credits || 0);
+}
+
+async function createRealtimeClientSecret({ ttlSec = 600 } = {}) {
+  const ttl = Math.max(60, Math.min(900, Number(ttlSec || 600))); // 1–15 min
+
+  // GA endpoint: POST /v1/realtime/client_secrets :contentReference[oaicite:4]{index=4}
+  const payload = {
+    expires_after: { anchor: "created_at", seconds: ttl },
+    session: {
+      type: "transcription",
+      audio: {
+        input: {
+          // format is used when appending audio buffers; safe to include for transcription sessions :contentReference[oaicite:5]{index=5}
+          format: { type: "audio/pcm", rate: 24000 },
+          transcription: {
+            model: "gpt-4o-mini-transcribe",
+            language: "en",
+            prompt: REALTIME_PROMPT
+          },
+          noise_reduction: { type: "far_field" },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 350
+          }
+        }
+      }
+    }
+  };
+
+  const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(payload)
+  });
+
+  const out = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    throw new Error(out?.error?.message || out?.error || "Failed to create realtime client secret");
+  }
+  return { value: out.value, expires_at: out.expires_at || 0 };
 }
 
 /* -------------------------------------------------------------------------- */
@@ -411,68 +472,22 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* REALTIME — CLIENT SECRET (NEW)                           */
+    /* REALTIME — EPHEMERAL CLIENT SECRET (FIXED)               */
     /* ------------------------------------------------------- */
-    if (path === "realtime/client_secret") {
+    if (path === "realtime/client_secret" || path === "realtime/transcription_token") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      // basic credit gate (don’t start ASR if no credits)
-      const { data: row } = await supabaseAdmin()
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", gate.user.id)
-        .single();
-
-      const credits = Number(row?.credits || 0);
+      const credits = await getCreditsForUser(gate.user.id);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
 
       const body = await readJson(req).catch(() => ({}));
-      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
+      const ttl_sec = Number(body?.ttl_sec || 600);
 
-      // Create ephemeral client secret for Realtime transcription sessions :contentReference[oaicite:13]{index=13}
-      const payload = {
-        expires_after: { anchor: "created_at", seconds: ttl },
-        session: {
-          type: "transcription",
-          audio: {
-            input: {
-              format: { type: "audio/pcm", rate: 24000 },
-              transcription: {
-                model: "gpt-4o-mini-transcribe",
-                language: "en",
-                prompt:
-                  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit."
-              },
-              noise_reduction: { type: "far_field" },
-              turn_detection: {
-                type: "server_vad",
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 350
-              }
-            }
-          }
-        }
-      };
-
-      const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(payload)
-      });
-
-      const out = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        return res.status(r.status).json({ error: out?.error?.message || out?.error || "Failed to create client secret" });
-      }
-
-      return res.json({ value: out.value, expires_at: out.expires_at || 0 });
+      const token = await createRealtimeClientSecret({ ttlSec: ttl_sec });
+      return res.json(token); // { value, expires_at }
     }
 
     /* ------------------------------------------------------- */
@@ -535,14 +550,12 @@ export default async function handler(req, res) {
       const { prompt, instructions, resumeText, history } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // STREAM-SAFE HEADERS
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
       res.flushHeaders?.();
 
-      // Kick chunk so UI receives "first token" immediately
       res.write(" ");
 
       const messages = [];
@@ -669,7 +682,6 @@ Make **important technical terms bold** (only terms, not whole sentences).
   } catch (err) {
     const msg = String(err?.message || err);
 
-    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
       return res.status(400).json({ error: "Unexpected end of form (multipart stream was consumed or interrupted)." });
     }
