@@ -1238,7 +1238,7 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
-// NEW: streaming ASR system audio
+// NEW: streaming ASR system audio.
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
