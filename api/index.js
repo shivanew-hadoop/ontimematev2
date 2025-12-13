@@ -8,7 +8,19 @@ import { requireAdmin } from "../_utils/adminAuth.js";
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 
-export const config = { runtime: "nodejs" };
+/**
+ * CRITICAL:
+ * - bodyParser MUST be false for multipart/form-data
+ * - otherwise Busboy sees a drained stream -> "Unexpected end of form"
+ */
+export const config = {
+  runtime: "nodejs",
+  api: {
+    bodyParser: false,
+    responseLimit: false,
+    externalResolver: true
+  }
+};
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
@@ -21,7 +33,10 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Accept, X-Requested-With"
+  );
 }
 
 function readJson(req) {
@@ -39,29 +54,66 @@ function readJson(req) {
   });
 }
 
+/**
+ * Hardened multipart reader:
+ * - waits for file stream completion
+ * - handles aborted/limit/error
+ * - avoids "finish" resolving before file end in edge cases
+ */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
-    const bb = Busboy({ headers: req.headers });
+    const headers = req.headers || {};
+    const ct = String(headers["content-type"] || "");
+
+    if (!ct.toLowerCase().includes("multipart/form-data")) {
+      return reject(new Error("Expected multipart/form-data"));
+    }
+
+    const bb = Busboy({
+      headers,
+      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
+    });
+
     const fields = {};
     let file = null;
+
+    let fileDone = Promise.resolve();
 
     bb.on("field", (name, val) => (fields[name] = val));
 
     bb.on("file", (name, stream, info) => {
       const chunks = [];
-      stream.on("data", d => chunks.push(d));
-      stream.on("end", () => {
-        file = {
-          field: name,
-          filename: info.filename,
-          mime: info.mimeType,
-          buffer: Buffer.concat(chunks)
-        };
+
+      fileDone = new Promise((resDone, rejDone) => {
+        stream.on("data", d => chunks.push(d));
+        stream.on("limit", () => rejDone(new Error("File too large")));
+        stream.on("error", rejDone);
+        stream.on("end", () => {
+          file = {
+            field: name,
+            filename: info?.filename || "upload.bin",
+            mime: info?.mimeType || "application/octet-stream",
+            buffer: Buffer.concat(chunks)
+          };
+          resDone();
+        });
       });
     });
 
-    bb.on("finish", () => resolve({ fields, file }));
     bb.on("error", reject);
+
+    bb.on("finish", async () => {
+      try {
+        await fileDone;
+        resolve({ fields, file });
+      } catch (e) {
+        reject(e);
+      }
+    });
+
+    req.on("aborted", () => reject(new Error("Request aborted")));
+    req.on("error", reject);
+
     req.pipe(bb);
   });
 }
@@ -142,8 +194,8 @@ async function extractResumeText(file) {
     try {
       const out = await mammoth.extractRawText({ buffer: file.buffer });
       return String(out?.value || "");
-    } catch {
-      return "[DOCX error during extraction]";
+    } catch (e) {
+      return `[DOCX error during extraction] ${e?.message || ""}`;
     }
   }
 
@@ -151,8 +203,8 @@ async function extractResumeText(file) {
     try {
       const out = await pdfParse(file.buffer);
       return String(out?.text || "");
-    } catch {
-      return "[PDF error during extraction]";
+    } catch (e) {
+      return `[PDF error during extraction] ${e?.message || ""}`;
     }
   }
 
@@ -172,7 +224,7 @@ export default async function handler(req, res) {
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
     /* ------------------------------------------------------- */
-    /* HEALTH                                                   */
+    /* HEALTH                                                  */
     /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
@@ -271,7 +323,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* AUTH — REFRESH TOKEN                                     */
+    /* AUTH — REFRESH TOKEN                                    */
     /* ------------------------------------------------------- */
     if (path === "auth/refresh") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -294,7 +346,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* AUTH — FORGOT PASSWORD                                   */
+    /* AUTH — FORGOT PASSWORD                                  */
     /* ------------------------------------------------------- */
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
@@ -304,7 +356,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* USER PROFILE                                             */
+    /* USER PROFILE                                            */
     /* ------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
@@ -325,7 +377,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* USER — CREDIT DEDUCTION                                  */
+    /* USER — CREDIT DEDUCTION                                 */
     /* ------------------------------------------------------- */
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -359,7 +411,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* RESUME EXTRACTION                                        */
+    /* RESUME EXTRACTION                                       */
     /* ------------------------------------------------------- */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -372,7 +424,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* TRANSCRIBE SYSTEM AUDIO                                  */
+    /* TRANSCRIBE (mic/system audio)                           */
     /* ------------------------------------------------------- */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -381,7 +433,7 @@ export default async function handler(req, res) {
       if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
 
       try {
-        const filename = file.filename || "sys.webm";
+        const filename = file.filename || "audio.webm";
         const mime = (file.mime || "audio/webm").split(";")[0];
         const audioFile = await toFile(file.buffer, filename, { type: mime });
 
@@ -402,7 +454,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — UPDATED HuddleMate QUALITY                   */
+    /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -410,72 +462,32 @@ export default async function handler(req, res) {
       const { prompt, instructions, resumeText, history } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
+      // STREAM-SAFE HEADERS
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("Transfer-Encoding", "chunked");
+      res.flushHeaders?.();
+
+      // Kick chunk so UI receives "first token" immediately
+      res.write(" ");
 
       const messages = [];
 
-      /* ------------------------ SYSTEM MESSAGE ------------------------ */
       const baseSystem = `
 You must ALWAYS answer using STRICT Markdown formatting and EXACT structure.
 
----------------------------------------------------------
-ANSWER STRUCTURE (MANDATORY)
----------------------------------------------------------
-
-Start by rewriting the user query as:
-
 **Q:** <expanded interview question>
-
-(blank line)
 
 **1) Quick Answer (Interview Style)**
 - 4–6 crisp bullet points
-- Direct, domain-specific, challenge/impact focused
-- Avoid fluff, avoid textbook language
-
-(blank line)
 
 **2) Real-Time Project Example**
-- 2–4 bullets
-- Problem → Action → Impact format
-- Must sound like real engineering work
-- Use resume context when available
+- 2–4 bullets (Problem → Action → Impact)
 
----------------------------------------------------------
-AUTO-BOLD RULE (MANDATORY)
----------------------------------------------------------
-Make **important technical terms bold** automatically, including:
-- Key concepts (**POM**, **Singleton**, **triggers**, **fact table**, **SwiftUI view hierarchy**, etc.)
-- Technologies (**Selenium**, **Kafka**, **PostgreSQL**, **XCTest**, **Appium**)
-- Patterns (**Page Object Model**, **Factory**, **Observer**)
-- Challenges (**flaky tests**, **synchronization issues**, **race conditions**)
-- Impact statements (**reduced execution time by 40%**)
-
-Never bold entire sentences. Only bold meaningful technical terms.
-
----------------------------------------------------------
-QUESTION EXPANSION RULE
----------------------------------------------------------
-If the user sends only a keyword/fragment:
-Convert it into a natural interview-style question such as:
-- "What is __ ?"
-- "How does __ work?"
-- "How did you use __ in your project?"
-- "Explain the role of __."
-- "What challenges arise when using __ ?"
-- "Why is __ important, and when should it be used?"
-- "Walk me through the end-to-end workflow of __ with a real example."
-
-Never answer a raw fragment. Convert → then answer.
-
----------------------------------------------------------
-FORMATTING RULES
----------------------------------------------------------
-- Perfect Markdown required.
-- Blank line after each section.
-- Bullet points only, no paragraphs in Quick Answer.
-- No extra commentary outside the 2 sections.
-`;
+AUTO-BOLD RULE:
+Make **important technical terms bold** (only terms, not whole sentences).
+`.trim();
 
       messages.push({ role: "system", content: baseSystem });
 
@@ -493,10 +505,8 @@ FORMATTING RULES
       }
 
       for (const m of safeHistory(history)) messages.push(m);
-
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
-      /* ------------------------ STREAM ------------------------ */
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
@@ -516,12 +526,12 @@ FORMATTING RULES
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT RESET                                               */
+    /* CHAT RESET                                              */
     /* ------------------------------------------------------- */
     if (path === "chat/reset") return res.json({ ok: true });
 
     /* ------------------------------------------------------- */
-    /* ADMIN — USER LIST                                        */
+    /* ADMIN — USER LIST                                       */
     /* ------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
@@ -536,7 +546,7 @@ FORMATTING RULES
     }
 
     /* ------------------------------------------------------- */
-    /* ADMIN — APPROVE USER                                     */
+    /* ADMIN — APPROVE USER                                    */
     /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
@@ -555,7 +565,7 @@ FORMATTING RULES
     }
 
     /* ------------------------------------------------------- */
-    /* ADMIN — UPDATE CREDITS                                   */
+    /* ADMIN — UPDATE CREDITS                                  */
     /* ------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
@@ -584,6 +594,13 @@ FORMATTING RULES
 
     return res.status(404).json({ error: `No route: /api/${path}` });
   } catch (err) {
-    return res.status(500).json({ error: err.message || String(err) });
+    const msg = String(err?.message || err);
+
+    // Convert the classic multipart failure into a cleaner error (helps debugging)
+    if (msg.toLowerCase().includes("unexpected end of form")) {
+      return res.status(400).json({ error: "Unexpected end of form (multipart stream was consumed or interrupted)." });
+    }
+
+    return res.status(500).json({ error: msg });
   }
 }
