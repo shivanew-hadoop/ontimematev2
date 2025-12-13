@@ -8,10 +8,10 @@
 
   <style>
     body { background: #f7f7f7; }
-    .min-h-0 { min-height: 0; }
 
+    /* AI response */
     #responseBox{
-      flex: 1 1 auto;
+      flex: 1 1 0%;
       min-height: 0;
       overflow-y: auto;
       background: #fffef5;
@@ -22,9 +22,10 @@
       white-space: pre-wrap;
     }
 
+    /* CRITICAL: Edge fix — allow this to shrink in flex */
     #liveTranscript{
-      flex: 1 1 auto;
-      min-height: 280px;
+      flex: 1 1 0%;
+      min-height: 0;          /* remove 280px lock */
       overflow-y: auto;
       background: #f3f4f6;
       border: 1px solid #ccc;
@@ -42,11 +43,11 @@
 <body>
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
-  <!-- RESPONSIVE: stack on small screens, split on desktop -->
-  <div class="flex flex-col lg:flex-row h-screen">
+  <!-- overflow-hidden prevents children overflow painting on top in some Edge cases -->
+  <div class="flex flex-col lg:flex-row h-screen overflow-hidden">
 
     <!-- LEFT PANEL -->
-    <div class="lg:w-1/3 w-full bg-white p-6 border-r flex flex-col gap-4 min-h-0">
+    <div class="lg:w-1/3 w-full bg-white p-6 border-r flex flex-col gap-4 min-h-0 overflow-y-auto">
 
       <div class="flex justify-between items-center">
         <h2 class="text-xl font-bold">Voice Agent</h2>
@@ -55,7 +56,7 @@
 
       <div id="userInfo" class="text-sm text-gray-700"></div>
 
-      <!-- TRANSCRIPT AREA (takes remaining height) -->
+      <!-- TRANSCRIPT AREA -->
       <div class="flex flex-col flex-1 min-h-0 gap-3">
         <div class="flex items-center justify-between">
           <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
@@ -71,7 +72,6 @@
                  placeholder="Optional manual refinement…" />
         </div>
 
-        <!-- Send/Clear/Reset: ALWAYS aligned -->
         <div>
           <div class="grid grid-cols-3 gap-2">
             <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-xs rounded opacity-60">Send</button>
@@ -102,7 +102,6 @@
         </select>
       </div>
 
-      <!-- HIDDEN -->
       <div class="hidden">
         <textarea id="instructionsBox"></textarea>
         <div id="instrStatus"></div>
