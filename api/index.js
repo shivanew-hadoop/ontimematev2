@@ -411,6 +411,71 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
+    /* REALTIME — CLIENT SECRET (NEW)                           */
+    /* ------------------------------------------------------- */
+    if (path === "realtime/client_secret") {
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+      const gate = await getUserFromBearer(req);
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      // basic credit gate (don’t start ASR if no credits)
+      const { data: row } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
+      const credits = Number(row?.credits || 0);
+      if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
+
+      const body = await readJson(req).catch(() => ({}));
+      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
+
+      // Create ephemeral client secret for Realtime transcription sessions :contentReference[oaicite:13]{index=13}
+      const payload = {
+        expires_after: { anchor: "created_at", seconds: ttl },
+        session: {
+          type: "transcription",
+          audio: {
+            input: {
+              format: { type: "audio/pcm", rate: 24000 },
+              transcription: {
+                model: "gpt-4o-mini-transcribe",
+                language: "en",
+                prompt:
+                  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit."
+              },
+              noise_reduction: { type: "far_field" },
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 350
+              }
+            }
+          }
+        }
+      };
+
+      const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      const out = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        return res.status(r.status).json({ error: out?.error?.message || out?.error || "Failed to create client secret" });
+      }
+
+      return res.json({ value: out.value, expires_at: out.expires_at || 0 });
+    }
+
+    /* ------------------------------------------------------- */
     /* RESUME EXTRACTION                                       */
     /* ------------------------------------------------------- */
     if (path === "resume/extract") {
@@ -426,44 +491,40 @@ export default async function handler(req, res) {
     /* ------------------------------------------------------- */
     /* TRANSCRIBE (mic/system audio)                           */
     /* ------------------------------------------------------- */
-    /* ------------------------------------------------------- */
-/* TRANSCRIBE (mic/system audio)                           */
-/* ------------------------------------------------------- */
-if (path === "transcribe") {
-  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+    if (path === "transcribe") {
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { fields, file } = await readMultipart(req);
-  if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
+      const { fields, file } = await readMultipart(req);
+      if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
 
-  try {
-    const filename = file.filename || "audio.webm";
-    const mime = (file.mime || "audio/webm").split(";")[0];
-    const audioFile = await toFile(file.buffer, filename, { type: mime });
+      try {
+        const filename = file.filename || "audio.webm";
+        const mime = (file.mime || "audio/webm").split(";")[0];
+        const audioFile = await toFile(file.buffer, filename, { type: mime });
 
-    const basePrompt =
-      "Transcribe EXACTLY what is spoken in English. " +
-      "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
-      "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
+        const basePrompt =
+          "Transcribe EXACTLY what is spoken in English. " +
+          "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
+          "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
-    const userPrompt = String(fields?.prompt || "").slice(0, 500);
-    const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
+        const userPrompt = String(fields?.prompt || "").slice(0, 500);
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
 
-    const out = await openai.audio.transcriptions.create({
-      file: audioFile,
-      model: "gpt-4o-transcribe",
-      language: "en",
-      temperature: 0,
-      response_format: "json",
-      prompt: finalPrompt
-    });
+        const out = await openai.audio.transcriptions.create({
+          file: audioFile,
+          model: "gpt-4o-transcribe",
+          language: "en",
+          temperature: 0,
+          response_format: "json",
+          prompt: finalPrompt
+        });
 
-    return res.json({ text: out.text || "" });
-  } catch (e) {
-    const status = e?.status || e?.response?.status || 500;
-    return res.status(status).json({ error: e?.message || String(e) });
-  }
-}
-
+        return res.json({ text: out.text || "" });
+      } catch (e) {
+        const status = e?.status || e?.response?.status || 500;
+        return res.status(status).json({ error: e?.message || String(e) });
+      }
+    }
 
     /* ------------------------------------------------------- */
     /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
