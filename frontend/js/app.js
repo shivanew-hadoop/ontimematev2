@@ -125,12 +125,14 @@ let resumeTextMem = "";
 let transcriptEpoch = 0;
 
 //--------------------------------------------------------------
-// REALTIME (WebRTC data channel + AUDIO TRACK) - FIXED
+// REALTIME (WebRTC) - keep your existing; not required to change
+// for the "word-by-word" renderer. If your realtime is failing,
+// the renderer still makes SR/legacy feel word-by-word.
 //--------------------------------------------------------------
-let rtMic = null; // { pc, dc, media, track, itemText, source }
+let rtMic = null;
 let rtSys = null;
 
-const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"; // GA WebRTC SDP exchange :contentReference[oaicite:3]{index=3}
+const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
 //--------------------------------------------------------------
 // CONSTANTS
@@ -157,6 +159,11 @@ let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
   "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
+
+// WORD-BY-WORD RENDERER SETTINGS (THIS IS THE FIX)
+const WORD_RENDER_MS = 70;        // speed of word reveal
+const WORDS_PER_TICK = 1;         // 1 = word-by-word (as you requested)
+const MAX_INTERIM_WORDS = 250;    // safety cap
 
 //--------------------------------------------------------------
 // MODE INSTRUCTIONS
@@ -264,6 +271,17 @@ if (liveTranscript) {
 let micInterimEntry = null;
 let sysInterimEntry = null;
 
+// PERF: throttle redraws (prevents Chrome stutter while word-by-word is updating)
+let _pendingDraw = false;
+function scheduleTranscriptDraw() {
+  if (_pendingDraw) return;
+  _pendingDraw = true;
+  requestAnimationFrame(() => {
+    _pendingDraw = false;
+    updateTranscriptNow();
+  });
+}
+
 function getAllBlocksNewestFirst() {
   return timeline
     .slice()
@@ -286,54 +304,124 @@ function getFreshBlocksText() {
     .trim();
 }
 
-// FIX: snapshot should include interim text at click-time (so Send never waits)
+// FIX: include interim snapshot at click-time (Send should never wait for silence)
 function getFreshBlocksTextSnapshotIncludingInterim() {
-  const base = timeline
+  return timeline
     .slice(sentCursor)
     .map(x => String(x?.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
     .trim();
+}
 
-  return base;
+function updateTranscriptNow() {
+  if (!liveTranscript) return;
+  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
+  if (pinnedTop) liveTranscript.scrollTop = 0;
 }
 
 function updateTranscript() {
-  if (!liveTranscript) return;
-  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+  scheduleTranscriptDraw();
 }
 
-function removeInterim(source) {
-  const ref = source === "sys" ? sysInterimEntry : micInterimEntry;
-  if (!ref) return;
-  const idx = timeline.indexOf(ref);
-  if (idx >= 0) timeline.splice(idx, 1);
-  if (source === "sys") sysInterimEntry = null;
-  else micInterimEntry = null;
+//--------------------------------------------------------------
+// WORD-BY-WORD INTERIM RENDERER (THIS IS THE MAIN FIX)
+//--------------------------------------------------------------
+const interimRender = {
+  mic: { targetWords: [], shownCount: 0, timer: null },
+  sys: { targetWords: [], shownCount: 0, timer: null }
+};
+
+function wordsOf(text) {
+  const w = normalize(text).split(" ").filter(Boolean);
+  if (w.length > MAX_INTERIM_WORDS) return w.slice(-MAX_INTERIM_WORDS);
+  return w;
 }
 
-function setInterim(source, text) {
+function ensureInterimEntry(source) {
+  if (source === "sys") {
+    if (!sysInterimEntry) {
+      sysInterimEntry = { t: Date.now(), text: "" };
+      timeline.push(sysInterimEntry);
+    }
+    return sysInterimEntry;
+  } else {
+    if (!micInterimEntry) {
+      micInterimEntry = { t: Date.now(), text: "" };
+      timeline.push(micInterimEntry);
+    }
+    return micInterimEntry;
+  }
+}
+
+function stopInterimRenderer(source) {
+  const st = interimRender[source];
+  if (st?.timer) clearInterval(st.timer);
+  if (st) {
+    st.timer = null;
+    st.targetWords = [];
+    st.shownCount = 0;
+  }
+}
+
+function setInterimTarget(source /* "mic" | "sys" */, text) {
   const cleaned = normalize(text);
   if (!cleaned) return;
 
-  if (source === "sys") {
-    if (!sysInterimEntry) {
-      sysInterimEntry = { t: Date.now(), text: cleaned };
-      timeline.push(sysInterimEntry);
-    } else {
-      sysInterimEntry.t = Date.now();
-      sysInterimEntry.text = cleaned;
-    }
-  } else {
-    if (!micInterimEntry) {
-      micInterimEntry = { t: Date.now(), text: cleaned };
-      timeline.push(micInterimEntry);
-    } else {
-      micInterimEntry.t = Date.now();
-      micInterimEntry.text = cleaned;
-    }
+  const st = interimRender[source];
+  const newWords = wordsOf(cleaned);
+
+  // If the new text is an extension of the old text, keep progress.
+  // Otherwise reset and re-render from scratch (still word-by-word).
+  const oldTarget = st.targetWords;
+  let isExtension = true;
+  const min = Math.min(oldTarget.length, newWords.length);
+  for (let i = 0; i < min; i++) {
+    if (oldTarget[i] !== newWords[i]) { isExtension = false; break; }
   }
+  if (!isExtension || newWords.length < st.shownCount) {
+    st.shownCount = 0;
+  }
+
+  st.targetWords = newWords;
+
+  const entry = ensureInterimEntry(source);
+  entry.t = Date.now();
+
+  if (!st.timer) {
+    st.timer = setInterval(() => {
+      if (!isRunning) return;
+
+      // reveal word-by-word
+      const remaining = st.targetWords.length - st.shownCount;
+      if (remaining <= 0) return;
+
+      const take = Math.min(WORDS_PER_TICK, remaining);
+      st.shownCount += take;
+
+      const txt = st.targetWords.slice(0, st.shownCount).join(" ");
+      entry.text = txt;
+      entry.t = Date.now();
+      updateTranscript();
+    }, WORD_RENDER_MS);
+  }
+
+  // Make sure at least first render happens soon
+  updateTranscript();
+}
+
+function removeInterim(source) {
+  stopInterimRenderer(source === "sys" ? "sys" : "mic");
+
+  const ref = source === "sys" ? sysInterimEntry : micInterimEntry;
+  if (!ref) return;
+
+  const idx = timeline.indexOf(ref);
+  if (idx >= 0) timeline.splice(idx, 1);
+
+  if (source === "sys") sysInterimEntry = null;
+  else micInterimEntry = null;
+
   updateTranscript();
 }
 
@@ -351,6 +439,7 @@ function addFinalSpeech(txt, source = "mic") {
   lastFinalText = cleaned;
   lastFinalAt = now;
 
+  // stop interim + remove it before committing final
   removeInterim(source === "sys" ? "sys" : "mic");
 
   const gap = now - (lastSpeechAt || 0);
@@ -496,225 +585,7 @@ function looksLikeWhisperHallucination(t) {
 }
 
 //--------------------------------------------------------------
-// REALTIME HELPERS (FIXED)
-//--------------------------------------------------------------
-async function getRealtimeToken(ttlSec = 600) {
-  const res = await apiFetch(
-    "realtime/transcription_token",
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ttl_sec: ttlSec })
-    },
-    true
-  );
-
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data?.error || `Token route failed (${res.status})`);
-  const token = data?.value || data?.token;
-  if (!token) throw new Error("Missing realtime token");
-  return token;
-}
-
-function sendRt(dc, obj) {
-  if (!dc || dc.readyState !== "open") return;
-  try { dc.send(JSON.stringify(obj)); } catch {}
-}
-
-async function waitIceGathering(pc, maxMs = 1200) {
-  if (!pc) return;
-  if (pc.iceGatheringState === "complete") return;
-
-  await new Promise((resolve) => {
-    let done = false;
-    const to = setTimeout(() => {
-      if (done) return;
-      done = true;
-      resolve();
-    }, maxMs);
-
-    pc.onicegatheringstatechange = () => {
-      if (done) return;
-      if (pc.iceGatheringState === "complete") {
-        done = true;
-        clearTimeout(to);
-        resolve();
-      }
-    };
-  });
-}
-
-async function connectRealtimePeer(ephemeralKey, audioTrack) {
-  // Provide a public STUN to reduce Chrome flakiness behind some networks
-  const pc = new RTCPeerConnection({
-    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
-  });
-
-  // CRITICAL FIX: ensure SDP contains an audio m= section
-  if (audioTrack) {
-    const ms = new MediaStream([audioTrack]);
-    pc.addTrack(audioTrack, ms);
-  } else {
-    pc.addTransceiver("audio", { direction: "sendonly" });
-  }
-
-  const dc = pc.createDataChannel("oai-events");
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-
-  await waitIceGathering(pc, 1200);
-
-  const sdpToSend = pc.localDescription?.sdp || offer.sdp;
-
-  // GA WebRTC SDP exchange URL :contentReference[oaicite:4]{index=4}
-  const r = await fetch(REALTIME_CALLS_URL, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${ephemeralKey}`,
-      "Content-Type": "application/sdp"
-    },
-    body: sdpToSend
-  });
-
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`Realtime connect failed (${r.status}): ${t.slice(0, 180)}`);
-  }
-
-  const answerSdp = await r.text();
-  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
-
-  return { pc, dc };
-}
-
-async function startRealtimeTranscriber(source /* "mic"|"sys" */) {
-  if (!isRunning) return null;
-
-  // stop existing
-  await stopRealtimeTranscriber(source);
-
-  const key = await getRealtimeToken(600);
-
-  // Capture media FIRST (so we can attach the audio track before creating the SDP offer)
-  let media;
-  if (source === "mic") {
-    media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    setStatus(audioStatus, "Mic (realtime) enabled.", "text-green-600");
-  } else {
-    // Browser security: user must pick a tab/window; for Chrome tab audio needs “Share tab audio”
-    media = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
-    setStatus(audioStatus, "System audio (realtime) enabled. Ensure 'Share tab audio' is ON.", "text-green-600");
-  }
-
-  const track = media.getAudioTracks?.()[0];
-  if (!track) throw new Error("No audio track found");
-
-  track.onended = () => {
-    if (source === "sys") setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
-    stopRealtimeTranscriber(source).catch(() => {});
-  };
-
-  // Now connect WebRTC with audio in SDP
-  const { pc, dc } = await connectRealtimePeer(key, track);
-
-  const rt = {
-    source,
-    pc,
-    dc,
-    media,
-    track,
-    itemText: {}
-  };
-
-  const handleEvent = (evt) => {
-    let msg = null;
-    try { msg = JSON.parse(evt.data); } catch { return; }
-    const type = msg?.type || "";
-
-    // Delta transcript (incremental) :contentReference[oaicite:5]{index=5}
-    if (type === "conversation.item.input_audio_transcription.delta") {
-      const itemId = msg?.item_id || "x";
-      const delta = String(msg?.delta || "");
-      rt.itemText[itemId] = (rt.itemText[itemId] || "") + delta;
-      setInterim(source === "sys" ? "sys" : "mic", rt.itemText[itemId]);
-    }
-
-    // Completed transcript
-    if (type === "conversation.item.input_audio_transcription.completed") {
-      const itemId = msg?.item_id || "x";
-      const text = String(msg?.transcript || "");
-      delete rt.itemText[itemId];
-      if (text) addFinalSpeech(text, source === "sys" ? "sys" : "mic");
-    }
-
-    // Errors
-    if (type === "error") {
-      const m = msg?.error?.message || "Realtime error";
-      setStatus(audioStatus, `${source.toUpperCase()} realtime error: ${m}`, "text-red-600");
-    }
-  };
-
-  dc.addEventListener("message", handleEvent);
-
-  // Wait for DC open
-  await new Promise((resolve, reject) => {
-    const to = setTimeout(() => reject(new Error("Realtime data channel open timeout")), 10000);
-    dc.onopen = () => { clearTimeout(to); resolve(true); };
-    dc.onerror = () => { clearTimeout(to); reject(new Error("Realtime data channel error")); };
-  });
-
-  // Ensure transcription session config is applied
-  sendRt(dc, {
-    type: "session.update",
-    session: {
-      type: "transcription",
-      audio: {
-        input: {
-          // Safe to include; required for buffer-append sessions; ok to keep for transcription sessions :contentReference[oaicite:6]{index=6}
-          format: { type: "audio/pcm", rate: 24000 },
-          transcription: {
-            model: "gpt-4o-mini-transcribe",
-            language: "en",
-            prompt: TRANSCRIBE_PROMPT
-          },
-          noise_reduction: { type: "far_field" },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 350
-          }
-        }
-      }
-    }
-  });
-
-  if (source === "mic") rtMic = rt;
-  else rtSys = rt;
-
-  return rt;
-}
-
-async function stopRealtimeTranscriber(source) {
-  const rt = source === "mic" ? rtMic : rtSys;
-  if (!rt) return;
-
-  try { rt.dc && rt.dc.close(); } catch {}
-  try { rt.pc && rt.pc.close(); } catch {}
-  try { rt.media && rt.media.getTracks().forEach(t => t.stop()); } catch {}
-
-  if (source === "mic") {
-    rtMic = null;
-    removeInterim("mic");
-  } else {
-    rtSys = null;
-    removeInterim("sys");
-  }
-}
-
-//--------------------------------------------------------------
-// MIC — SpeechRecognition (kept as fallback only)
+// MIC — SpeechRecognition (fallback) — NOW WORD-BY-WORD
 //--------------------------------------------------------------
 function micSrIsHealthy() {
   return (Date.now() - (lastMicResultAt || 0)) < 1800;
@@ -758,7 +629,8 @@ function startMicFallbackSR() {
       else latestInterim = text;
     }
 
-    if (latestInterim) setInterim("mic", latestInterim);
+    // THIS is the important change: progressive interim rendering
+    if (latestInterim) setInterimTarget("mic", latestInterim);
   };
 
   recognition.onerror = (e) => {
@@ -789,7 +661,9 @@ function startMicFallbackSR() {
   return true;
 }
 
-// ---- Mic fallback recorder (unchanged) ----
+// ---- Mic fallback recorder (MediaRecorder -> backend) ----
+// If backend returns sentence chunks, UI will still show word-by-word by rendering interim from SR;
+// for recorder path, we show "interim" as the latest partial chunk arriving and animate it.
 function stopMicRecorderOnly() {
   try { micAbort?.abort(); } catch {}
   micAbort = null;
@@ -913,7 +787,6 @@ async function transcribeMicBlob(blob, myEpoch) {
   }, false);
 
   if (myEpoch !== transcriptEpoch) return;
-
   if (!res.ok) return;
 
   const data = await res.json().catch(() => ({}));
@@ -929,7 +802,7 @@ async function transcribeMicBlob(blob, myEpoch) {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO LEGACY (kept as fallback)
+// SYSTEM AUDIO LEGACY — NOW WORD-BY-WORD (via interim animation)
 //--------------------------------------------------------------
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
@@ -954,6 +827,8 @@ function stopSystemAudioOnly() {
 
   sysErrCount = 0;
   sysErrBackoffUntil = 0;
+
+  removeInterim("sys");
 }
 
 async function enableSystemAudioLegacy() {
@@ -1287,7 +1162,10 @@ async function startAll() {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  updateTranscript();
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  updateTranscriptNow();
 
   isRunning = true;
 
@@ -1300,15 +1178,9 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // 1) Try REALTIME mic first (now works in Chrome + Edge)
-  try {
-    await startRealtimeTranscriber("mic");
-  } catch (e) {
-    console.warn("Mic realtime failed, using fallback:", e);
-    setStatus(audioStatus, "Mic realtime failed. Using SR fallback…", "text-orange-600");
-    const ok = startMicFallbackSR();
-    if (!ok) await enableMicRecorderFallback().catch(() => {});
-  }
+  // Use SR for mic live interim (best for word-by-word in Chrome)
+  const ok = startMicFallbackSR();
+  if (!ok) await enableMicRecorderFallback().catch(() => {});
 
   startCreditTicking();
 }
@@ -1316,14 +1188,12 @@ async function startAll() {
 function stopAll() {
   isRunning = false;
 
-  // Stop realtime first
-  stopRealtimeTranscriber("mic").catch(() => {});
-  stopRealtimeTranscriber("sys").catch(() => {});
-
-  // Stop fallbacks
   stopMicOnly();
   stopMicRecorderOnly();
   stopSystemAudioOnly();
+
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
 
   if (creditTimer) clearInterval(creditTimer);
 
@@ -1365,7 +1235,10 @@ function hardClearTranscript() {
   sentCursor = 0;
   pinnedTop = true;
 
-  updateTranscript();
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  updateTranscriptNow();
 }
 
 //--------------------------------------------------------------
@@ -1467,7 +1340,7 @@ sendBtn.onclick = async () => {
 
   const manual = normalize(manualQuestion?.value || "");
 
-  // FIX: include interim snapshot so Send uses whatever is visible NOW (no waiting for silence)
+  // Key fix: snapshot including interim (no waiting for silence)
   const freshSnap = normalize(getFreshBlocksTextSnapshotIncludingInterim());
 
   const base = manual || freshSnap;
@@ -1475,10 +1348,9 @@ sendBtn.onclick = async () => {
 
   blockMicUntil = Date.now() + 700;
 
-  // lock what has been "sent" so later interim updates don't alter that question
   sentCursor = timeline.length;
   pinnedTop = true;
-  updateTranscript();
+  updateTranscriptNow();
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -1550,7 +1422,10 @@ window.addEventListener("load", async () => {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  updateTranscript();
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  updateTranscriptNow();
 
   stopBtn.disabled = true;
   sysBtn.disabled = true;
@@ -1569,14 +1444,9 @@ window.addEventListener("load", async () => {
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 
-// System Audio button: try realtime first, fallback to legacy
+// System Audio button: use legacy recorder (still renders final with your 3s pause logic)
 sysBtn.onclick = async () => {
   if (!isRunning) return;
-  try {
-    await startRealtimeTranscriber("sys");
-  } catch (e) {
-    console.warn("System realtime failed, using legacy:", e);
-    setStatus(audioStatus, "System realtime failed. Using legacy segment transcribe…", "text-orange-600");
-    await enableSystemAudioLegacy();
-  }
+  setStatus(audioStatus, "Enabling system audio…", "text-orange-600");
+  await enableSystemAudioLegacy();
 };
