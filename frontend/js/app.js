@@ -64,9 +64,10 @@ const modeSelect = document.getElementById("modeSelect");
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
+
 let hiddenInstructions = "";
 
-// SpeechRecognition (mic)
+// SpeechRecognition (fastest live words) - kept as fallback
 let recognition = null;
 let blockMicUntil = 0;
 let lastMicResultAt = 0;
@@ -97,25 +98,16 @@ let sysErrBackoffUntil = 0;
 // DEDUPE STATE
 let lastSysTail = "";
 let lastMicTail = "";
+let lastFinalText = "";
+let lastFinalAt = 0;
 
 // Transcript blocks
 let timeline = [];
+let lastSpeechAt = 0;
 let sentCursor = 0;
+
+// “pin to top” behavior
 let pinnedTop = true;
-
-// “speech timing”
-let lastSpeechAtMic = 0;
-let lastSpeechAtSys = 0;
-
-// Active blocks (these must NOT disappear)
-let activeMicBlock = null;
-let activeSysBlock = null;
-
-// Append-only word state (prevents shrink/vanish)
-const appendState = {
-  mic: { words: [] },
-  sys: { words: [] }
-};
 
 // Credits
 let creditTimer = null;
@@ -131,6 +123,16 @@ let resumeTextMem = "";
 
 // HARD CLEAR TOKEN
 let transcriptEpoch = 0;
+
+//--------------------------------------------------------------
+// REALTIME (WebRTC) - keep your existing; not required to change
+// for the "word-by-word" renderer. If your realtime is failing,
+// the renderer still makes SR/legacy feel word-by-word.
+//--------------------------------------------------------------
+let rtMic = null;
+let rtSys = null;
+
+const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls";
 
 //--------------------------------------------------------------
 // CONSTANTS
@@ -158,8 +160,10 @@ let micLangIndex = 0;
 const TRANSCRIBE_PROMPT =
   "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
 
-// For system-audio chunk animation (word-by-word reveal after chunk arrives)
-const SYS_WORD_ANIM_MS = 55;
+// WORD-BY-WORD RENDERER SETTINGS (THIS IS THE FIX)
+const WORD_RENDER_MS = 70;        // speed of word reveal
+const WORDS_PER_TICK = 1;         // 1 = word-by-word
+const MAX_INTERIM_WORDS = 250;    // safety cap
 
 //--------------------------------------------------------------
 // MODE INSTRUCTIONS
@@ -263,6 +267,11 @@ if (liveTranscript) {
   );
 }
 
+// Interim entries (separate)
+let micInterimEntry = null;
+let sysInterimEntry = null;
+
+// PERF: throttle redraws
 let _pendingDraw = false;
 function scheduleTranscriptDraw() {
   if (_pendingDraw) return;
@@ -291,8 +300,8 @@ function updateTranscript() {
   scheduleTranscriptDraw();
 }
 
-// Snapshot including active blocks (this is what user wants on Send)
-function getFreshBlocksTextSnapshotIncludingActive() {
+// FIX: include interim snapshot at click-time (Send should never wait for silence)
+function getFreshBlocksTextSnapshotIncludingInterim() {
   return timeline
     .slice(sentCursor)
     .map(x => String(x?.text || "").trim())
@@ -302,129 +311,145 @@ function getFreshBlocksTextSnapshotIncludingActive() {
 }
 
 //--------------------------------------------------------------
-// APPEND-ONLY TRANSCRIPT CORE (NO DISAPPEAR)
+// WORD-BY-WORD INTERIM RENDERER (MAIN FIX)
+// - Interim is animated word-by-word into a single interim entry.
+// - On FINAL: we DO NOT delete the interim entry.
+//   We "commit" it into a final line (no flicker / no disappear).
 //--------------------------------------------------------------
-function splitWords(text) {
-  return normalize(text).split(" ").filter(Boolean);
-}
-function startsWithWords(longer, prefix) {
-  if (prefix.length > longer.length) return false;
-  for (let i = 0; i < prefix.length; i++) {
-    if (longer[i] !== prefix[i]) return false;
-  }
-  return true;
-}
-function findSuffixPrefixOverlap(a, b, maxK = 10) {
-  // find largest k where suffix(a,k) == prefix(b,k)
-  const kMax = Math.min(maxK, a.length, b.length);
-  for (let k = kMax; k >= 2; k--) {
-    let ok = true;
-    for (let i = 0; i < k; i++) {
-      if (a[a.length - k + i] !== b[i]) { ok = false; break; }
-    }
-    if (ok) return k;
-  }
-  return 0;
+const interimRender = {
+  mic: { targetWords: [], shownCount: 0, timer: null },
+  sys: { targetWords: [], shownCount: 0, timer: null }
+};
+
+function wordsOf(text) {
+  const w = normalize(text).split(" ").filter(Boolean);
+  if (w.length > MAX_INTERIM_WORDS) return w.slice(-MAX_INTERIM_WORDS);
+  return w;
 }
 
-function ensureActiveBlock(source) {
-  if (source === "mic") {
-    if (!activeMicBlock) {
-      activeMicBlock = { t: Date.now(), text: "" };
-      timeline.push(activeMicBlock);
+function ensureInterimEntry(source) {
+  if (source === "sys") {
+    if (!sysInterimEntry) {
+      sysInterimEntry = { t: Date.now(), text: "" };
+      timeline.push(sysInterimEntry);
     }
-    return activeMicBlock;
+    return sysInterimEntry;
   } else {
-    if (!activeSysBlock) {
-      activeSysBlock = { t: Date.now(), text: "" };
-      timeline.push(activeSysBlock);
+    if (!micInterimEntry) {
+      micInterimEntry = { t: Date.now(), text: "" };
+      timeline.push(micInterimEntry);
     }
-    return activeSysBlock;
+    return micInterimEntry;
   }
 }
 
-function sealIfPaused(source) {
-  const now = Date.now();
-  const last = source === "mic" ? lastSpeechAtMic : lastSpeechAtSys;
-  if (last && (now - last) >= PAUSE_NEWLINE_MS) {
-    // close current active line; next update starts a new block
-    if (source === "mic") activeMicBlock = null;
-    else activeSysBlock = null;
-
-    appendState[source].words = [];
+function stopInterimRenderer(source) {
+  const st = interimRender[source];
+  if (st?.timer) clearInterval(st.timer);
+  if (st) {
+    st.timer = null;
+    st.targetWords = [];
+    st.shownCount = 0;
   }
 }
 
-function appendOnlyUpdate(source, incomingText) {
-  const incoming = splitWords(incomingText);
-  if (!incoming.length) return; // IMPORTANT: do not clear line (prevents disappear)
+// Progressive interim rendering
+function setInterimTarget(source /* "mic" | "sys" */, text) {
+  const cleaned = normalize(text);
+  if (!cleaned) return;
 
-  sealIfPaused(source);
+  const st = interimRender[source];
+  const newWords = wordsOf(cleaned);
 
-  const st = appendState[source];
-  const acc = st.words;
-
-  // First words
-  if (!acc.length) {
-    st.words = incoming.slice();
-  } else {
-    // If incoming is longer and starts with acc, accept expansion
-    if (incoming.length >= acc.length && startsWithWords(incoming, acc)) {
-      st.words = incoming.slice();
-    }
-    // If incoming is shorter but is prefix of acc, IGNORE (prevents shrink/vanish)
-    else if (incoming.length < acc.length && startsWithWords(acc, incoming)) {
-      // ignore
-    }
-    // If partial rewrite: try overlap append
-    else {
-      const overlap = findSuffixPrefixOverlap(acc, incoming, 12);
-      if (overlap > 0) {
-        const add = incoming.slice(overlap);
-        if (add.length) st.words = acc.concat(add);
-      } else {
-        // last resort: append only if new start word is not identical to last
-        const lastAcc = acc[acc.length - 1];
-        const firstIn = incoming[0];
-        if (firstIn && firstIn !== lastAcc) {
-          st.words = acc.concat(incoming);
-        }
-      }
-    }
+  const oldTarget = st.targetWords;
+  let isExtension = true;
+  const min = Math.min(oldTarget.length, newWords.length);
+  for (let i = 0; i < min; i++) {
+    if (oldTarget[i] !== newWords[i]) { isExtension = false; break; }
+  }
+  if (!isExtension || newWords.length < st.shownCount) {
+    st.shownCount = 0;
   }
 
-  const block = ensureActiveBlock(source);
-  block.text = st.words.join(" ");
-  block.t = Date.now();
+  st.targetWords = newWords;
 
-  if (source === "mic") lastSpeechAtMic = block.t;
-  else lastSpeechAtSys = block.t;
+  const entry = ensureInterimEntry(source);
+  entry.t = Date.now();
+
+  if (!st.timer) {
+    st.timer = setInterval(() => {
+      if (!isRunning) return;
+
+      const remaining = st.targetWords.length - st.shownCount;
+      if (remaining <= 0) return;
+
+      const take = Math.min(WORDS_PER_TICK, remaining);
+      st.shownCount += take;
+
+      const txt = st.targetWords.slice(0, st.shownCount).join(" ");
+      entry.text = txt;
+      entry.t = Date.now();
+      updateTranscript();
+    }, WORD_RENDER_MS);
+  }
 
   updateTranscript();
 }
 
-// System-audio chunk: animate append word-by-word after chunk arrives (still never disappears)
-let sysAnimTimer = null;
-let sysAnimQueue = [];
-function enqueueSysWords(words) {
-  sysAnimQueue.push(...words);
-  if (sysAnimTimer) return;
-  sysAnimTimer = setInterval(() => {
-    if (!isRunning) return;
-    if (!sysAnimQueue.length) {
-      clearInterval(sysAnimTimer);
-      sysAnimTimer = null;
-      return;
-    }
-    const w = sysAnimQueue.shift();
-    const cur = appendState.sys.words;
-    appendState.sys.words = cur.concat([w]);
-    const block = ensureActiveBlock("sys");
-    block.text = appendState.sys.words.join(" ");
-    block.t = Date.now();
-    lastSpeechAtSys = block.t;
+// Commit interim entry as final (NO deletion)
+function commitInterimAsFinal(source, finalText) {
+  const now = Date.now();
+  const cleaned = normalize(finalText);
+
+  stopInterimRenderer(source);
+
+  const entry = source === "sys" ? sysInterimEntry : micInterimEntry;
+
+  if (entry) {
+    // keep the same line visible; replace text in-place (no flicker)
+    if (cleaned) entry.text = cleaned;
+    entry.t = now;
+
+    if (source === "sys") sysInterimEntry = null;
+    else micInterimEntry = null;
+
+    lastSpeechAt = now;
     updateTranscript();
-  }, SYS_WORD_ANIM_MS);
+    return true;
+  }
+  return false;
+}
+
+// HARD dedupe at final stage
+function addFinalSpeech(txt, source = "mic") {
+  const cleaned = normalize(txt);
+  if (!cleaned) return;
+
+  const now = Date.now();
+  if (
+    cleaned.toLowerCase() === (lastFinalText || "").toLowerCase() &&
+    now - (lastFinalAt || 0) < 1200
+  ) return;
+
+  lastFinalText = cleaned;
+  lastFinalAt = now;
+
+  // FIRST: try committing into interim line (no disappear)
+  const committed = commitInterimAsFinal(source === "sys" ? "sys" : "mic", cleaned);
+  if (committed) return;
+
+  // Otherwise fall back to normal append logic
+  const gap = now - (lastSpeechAt || 0);
+  if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
+    timeline.push({ t: now, text: cleaned });
+  } else {
+    const last = timeline[timeline.length - 1];
+    last.text = normalize((last.text || "") + " " + cleaned);
+    last.t = now;
+  }
+
+  lastSpeechAt = now;
+  updateTranscript();
 }
 
 //--------------------------------------------------------------
@@ -552,11 +577,12 @@ function looksLikeWhisperHallucination(t) {
     "this is the microphone speech"
   ];
 
+  if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) return true;
   return noise.some(p => s.includes(p));
 }
 
 //--------------------------------------------------------------
-// MIC — SpeechRecognition (append-only, never shrink)
+// MIC — SpeechRecognition (fallback) — NOW WORD-BY-WORD
 //--------------------------------------------------------------
 function micSrIsHealthy() {
   return (Date.now() - (lastMicResultAt || 0)) < 1800;
@@ -584,7 +610,7 @@ function startMicFallbackSR() {
   recognition.maxAlternatives = 1;
   recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
 
-  recognition.onstart = () => setStatus(audioStatus, "Mic active (SR).", "text-green-600");
+  recognition.onstart = () => setStatus(audioStatus, "Mic active (SR fallback).", "text-green-600");
 
   recognition.onresult = (ev) => {
     if (!isRunning) return;
@@ -592,22 +618,18 @@ function startMicFallbackSR() {
 
     lastMicResultAt = Date.now();
 
-    // Chrome often emits interim rewrites; we accept only append/expand.
     let latestInterim = "";
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
-      const text = normalize(r[0]?.transcript || "");
+      const text = normalize(r[0].transcript || "");
       if (!text) continue;
 
-      if (r.isFinal) {
-        // Feed final into the same append-only path (still won’t shrink)
-        appendOnlyUpdate("mic", text);
-      } else {
-        latestInterim = text;
-      }
+      if (r.isFinal) addFinalSpeech(text, "mic");
+      else latestInterim = text;
     }
 
-    if (latestInterim) appendOnlyUpdate("mic", latestInterim);
+    // Progressive interim rendering (word-by-word)
+    if (latestInterim) setInterimTarget("mic", latestInterim);
   };
 
   recognition.onerror = (e) => {
@@ -773,11 +795,11 @@ async function transcribeMicBlob(blob, myEpoch) {
     set value(v) { lastMicTail = v; }
   });
 
-  if (cleaned) appendOnlyUpdate("mic", cleaned);
+  if (cleaned) addFinalSpeech(cleaned, "mic");
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO LEGACY — chunk -> animate append words
+// SYSTEM AUDIO LEGACY — word-by-word via the same interim+commit
 //--------------------------------------------------------------
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
@@ -803,8 +825,9 @@ function stopSystemAudioOnly() {
   sysErrCount = 0;
   sysErrBackoffUntil = 0;
 
-  if (sysAnimTimer) { clearInterval(sysAnimTimer); sysAnimTimer = null; }
-  sysAnimQueue = [];
+  // stop sys interim animation (but do NOT delete any committed text)
+  stopInterimRenderer("sys");
+  sysInterimEntry = null;
 }
 
 async function enableSystemAudioLegacy() {
@@ -934,14 +957,8 @@ async function transcribeSysBlob(blob, myEpoch) {
     get value() { return lastSysTail; },
     set value(v) { lastSysTail = v; }
   });
-  if (!cleaned) return;
 
-  // Pause boundary handled before anim append
-  sealIfPaused("sys");
-
-  // Animate chunk word-by-word without ever shrinking
-  const words = splitWords(cleaned);
-  if (words.length) enqueueSysWords(words);
+  if (cleaned) addFinalSpeech(cleaned, "sys");
 }
 
 //--------------------------------------------------------------
@@ -1123,6 +1140,107 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
+// START / STOP
+//--------------------------------------------------------------
+async function startAll() {
+  hideBanner();
+  if (isRunning) return;
+
+  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
+
+  transcriptEpoch++;
+  timeline = [];
+  micInterimEntry = null;
+  sysInterimEntry = null;
+  lastSpeechAt = 0;
+  sentCursor = 0;
+  pinnedTop = true;
+
+  lastSysTail = "";
+  lastMicTail = "";
+  lastFinalText = "";
+  lastFinalAt = 0;
+
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  updateTranscriptNow();
+
+  isRunning = true;
+
+  startBtn.disabled = true;
+  stopBtn.disabled = false;
+  sysBtn.disabled = false;
+  sendBtn.disabled = false;
+
+  stopBtn.classList.remove("opacity-50");
+  sysBtn.classList.remove("opacity-50");
+  sendBtn.classList.remove("opacity-60");
+
+  // Use SR for mic live interim (best for word-by-word)
+  const ok = startMicFallbackSR();
+  if (!ok) await enableMicRecorderFallback().catch(() => {});
+
+  startCreditTicking();
+}
+
+function stopAll() {
+  isRunning = false;
+
+  stopMicOnly();
+  stopMicRecorderOnly();
+  stopSystemAudioOnly();
+
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  if (creditTimer) clearInterval(creditTimer);
+
+  startBtn.disabled = false;
+  stopBtn.disabled = true;
+  sysBtn.disabled = true;
+  sendBtn.disabled = true;
+
+  stopBtn.classList.add("opacity-50");
+  sysBtn.classList.add("opacity-50");
+  sendBtn.classList.add("opacity-60");
+
+  setStatus(audioStatus, "Stopped", "text-orange-600");
+}
+
+//--------------------------------------------------------------
+// HARD CLEAR
+//--------------------------------------------------------------
+function hardClearTranscript() {
+  transcriptEpoch++;
+
+  try { micAbort?.abort(); } catch {}
+  try { sysAbort?.abort(); } catch {}
+
+  micQueue = [];
+  sysQueue = [];
+  micSegmentChunks = [];
+  sysSegmentChunks = [];
+
+  lastSysTail = "";
+  lastMicTail = "";
+  lastFinalText = "";
+  lastFinalAt = 0;
+
+  timeline = [];
+  micInterimEntry = null;
+  sysInterimEntry = null;
+  lastSpeechAt = 0;
+  sentCursor = 0;
+  pinnedTop = true;
+
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
+
+  updateTranscriptNow();
+}
+
+//--------------------------------------------------------------
 // QUESTION HELPERS
 //--------------------------------------------------------------
 function extractPriorQuestions() {
@@ -1212,104 +1330,6 @@ Output requirements:
 }
 
 //--------------------------------------------------------------
-// START / STOP
-//--------------------------------------------------------------
-async function startAll() {
-  hideBanner();
-  if (isRunning) return;
-
-  await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-
-  transcriptEpoch++;
-  timeline = [];
-  sentCursor = 0;
-  pinnedTop = true;
-
-  activeMicBlock = null;
-  activeSysBlock = null;
-  appendState.mic.words = [];
-  appendState.sys.words = [];
-
-  lastSpeechAtMic = 0;
-  lastSpeechAtSys = 0;
-
-  updateTranscriptNow();
-
-  isRunning = true;
-
-  startBtn.disabled = true;
-  stopBtn.disabled = false;
-  sysBtn.disabled = false;
-  sendBtn.disabled = false;
-
-  stopBtn.classList.remove("opacity-50");
-  sysBtn.classList.remove("opacity-50");
-  sendBtn.classList.remove("opacity-60");
-
-  const ok = startMicFallbackSR();
-  if (!ok) await enableMicRecorderFallback().catch(() => {});
-
-  startCreditTicking();
-  setStatus(audioStatus, "Listening…", "text-green-600");
-}
-
-function stopAll() {
-  isRunning = false;
-
-  stopMicOnly();
-  stopMicRecorderOnly();
-  stopSystemAudioOnly();
-
-  if (creditTimer) clearInterval(creditTimer);
-
-  startBtn.disabled = false;
-  stopBtn.disabled = true;
-  sysBtn.disabled = true;
-  sendBtn.disabled = true;
-
-  stopBtn.classList.add("opacity-50");
-  sysBtn.classList.add("opacity-50");
-  sendBtn.classList.add("opacity-60");
-
-  setStatus(audioStatus, "Stopped", "text-orange-600");
-}
-
-//--------------------------------------------------------------
-// HARD CLEAR
-//--------------------------------------------------------------
-function hardClearTranscript() {
-  transcriptEpoch++;
-
-  try { micAbort?.abort(); } catch {}
-  try { sysAbort?.abort(); } catch {}
-
-  micQueue = [];
-  sysQueue = [];
-  micSegmentChunks = [];
-  sysSegmentChunks = [];
-
-  lastSysTail = "";
-  lastMicTail = "";
-
-  timeline = [];
-  sentCursor = 0;
-  pinnedTop = true;
-
-  activeMicBlock = null;
-  activeSysBlock = null;
-  appendState.mic.words = [];
-  appendState.sys.words = [];
-
-  lastSpeechAtMic = 0;
-  lastSpeechAtSys = 0;
-
-  if (sysAnimTimer) { clearInterval(sysAnimTimer); sysAnimTimer = null; }
-  sysAnimQueue = [];
-
-  updateTranscriptNow();
-}
-
-//--------------------------------------------------------------
 // SEND / CLEAR / RESET
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
@@ -1318,7 +1338,9 @@ sendBtn.onclick = async () => {
   abortChatStreamOnly();
 
   const manual = normalize(manualQuestion?.value || "");
-  const freshSnap = normalize(getFreshBlocksTextSnapshotIncludingActive());
+
+  // Key fix: snapshot including interim (no waiting for silence)
+  const freshSnap = normalize(getFreshBlocksTextSnapshotIncludingInterim());
 
   const base = manual || freshSnap;
   if (!base) return;
@@ -1388,16 +1410,19 @@ window.addEventListener("load", async () => {
 
   transcriptEpoch++;
   timeline = [];
+  micInterimEntry = null;
+  sysInterimEntry = null;
+  lastSpeechAt = 0;
   sentCursor = 0;
   pinnedTop = true;
 
-  activeMicBlock = null;
-  activeSysBlock = null;
-  appendState.mic.words = [];
-  appendState.sys.words = [];
+  lastSysTail = "";
+  lastMicTail = "";
+  lastFinalText = "";
+  lastFinalAt = 0;
 
-  lastSpeechAtMic = 0;
-  lastSpeechAtSys = 0;
+  stopInterimRenderer("mic");
+  stopInterimRenderer("sys");
 
   updateTranscriptNow();
 
@@ -1418,6 +1443,7 @@ window.addEventListener("load", async () => {
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 
+// System Audio button: use legacy recorder (still prints progressively via commit)
 sysBtn.onclick = async () => {
   if (!isRunning) return;
   setStatus(audioStatus, "Enabling system audio…", "text-orange-600");
