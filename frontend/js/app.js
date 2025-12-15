@@ -162,7 +162,7 @@ const TRANSCRIBE_PROMPT =
 
 // WORD-BY-WORD RENDERER SETTINGS (THIS IS THE FIX)
 const WORD_RENDER_MS = 70;        // speed of word reveal
-const WORDS_PER_TICK = 1;         // 1 = word-by-word (as you requested)
+const WORDS_PER_TICK = 1;         // 1 = word-by-word
 const MAX_INTERIM_WORDS = 250;    // safety cap
 
 //--------------------------------------------------------------
@@ -267,11 +267,11 @@ if (liveTranscript) {
   );
 }
 
-// Realtime interim entries (separate)
+// Interim entries (separate)
 let micInterimEntry = null;
 let sysInterimEntry = null;
 
-// PERF: throttle redraws (prevents Chrome stutter while word-by-word is updating)
+// PERF: throttle redraws
 let _pendingDraw = false;
 function scheduleTranscriptDraw() {
   if (_pendingDraw) return;
@@ -290,18 +290,14 @@ function getAllBlocksNewestFirst() {
     .filter(Boolean);
 }
 
-function isInterimEntry(x) {
-  return x === micInterimEntry || x === sysInterimEntry;
+function updateTranscriptNow() {
+  if (!liveTranscript) return;
+  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
+  if (pinnedTop) liveTranscript.scrollTop = 0;
 }
 
-function getFreshBlocksText() {
-  return timeline
-    .slice(sentCursor)
-    .filter(x => x && !isInterimEntry(x))
-    .map(x => String(x.text || "").trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
+function updateTranscript() {
+  scheduleTranscriptDraw();
 }
 
 // FIX: include interim snapshot at click-time (Send should never wait for silence)
@@ -314,18 +310,11 @@ function getFreshBlocksTextSnapshotIncludingInterim() {
     .trim();
 }
 
-function updateTranscriptNow() {
-  if (!liveTranscript) return;
-  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  if (pinnedTop) liveTranscript.scrollTop = 0;
-}
-
-function updateTranscript() {
-  scheduleTranscriptDraw();
-}
-
 //--------------------------------------------------------------
-// WORD-BY-WORD INTERIM RENDERER (THIS IS THE MAIN FIX)
+// WORD-BY-WORD INTERIM RENDERER (MAIN FIX)
+// - Interim is animated word-by-word into a single interim entry.
+// - On FINAL: we DO NOT delete the interim entry.
+//   We "commit" it into a final line (no flicker / no disappear).
 //--------------------------------------------------------------
 const interimRender = {
   mic: { targetWords: [], shownCount: 0, timer: null },
@@ -364,6 +353,7 @@ function stopInterimRenderer(source) {
   }
 }
 
+// Progressive interim rendering
 function setInterimTarget(source /* "mic" | "sys" */, text) {
   const cleaned = normalize(text);
   if (!cleaned) return;
@@ -371,8 +361,6 @@ function setInterimTarget(source /* "mic" | "sys" */, text) {
   const st = interimRender[source];
   const newWords = wordsOf(cleaned);
 
-  // If the new text is an extension of the old text, keep progress.
-  // Otherwise reset and re-render from scratch (still word-by-word).
   const oldTarget = st.targetWords;
   let isExtension = true;
   const min = Math.min(oldTarget.length, newWords.length);
@@ -392,7 +380,6 @@ function setInterimTarget(source /* "mic" | "sys" */, text) {
     st.timer = setInterval(() => {
       if (!isRunning) return;
 
-      // reveal word-by-word
       const remaining = st.targetWords.length - st.shownCount;
       if (remaining <= 0) return;
 
@@ -406,23 +393,31 @@ function setInterimTarget(source /* "mic" | "sys" */, text) {
     }, WORD_RENDER_MS);
   }
 
-  // Make sure at least first render happens soon
   updateTranscript();
 }
 
-function removeInterim(source) {
-  stopInterimRenderer(source === "sys" ? "sys" : "mic");
+// Commit interim entry as final (NO deletion)
+function commitInterimAsFinal(source, finalText) {
+  const now = Date.now();
+  const cleaned = normalize(finalText);
 
-  const ref = source === "sys" ? sysInterimEntry : micInterimEntry;
-  if (!ref) return;
+  stopInterimRenderer(source);
 
-  const idx = timeline.indexOf(ref);
-  if (idx >= 0) timeline.splice(idx, 1);
+  const entry = source === "sys" ? sysInterimEntry : micInterimEntry;
 
-  if (source === "sys") sysInterimEntry = null;
-  else micInterimEntry = null;
+  if (entry) {
+    // keep the same line visible; replace text in-place (no flicker)
+    if (cleaned) entry.text = cleaned;
+    entry.t = now;
 
-  updateTranscript();
+    if (source === "sys") sysInterimEntry = null;
+    else micInterimEntry = null;
+
+    lastSpeechAt = now;
+    updateTranscript();
+    return true;
+  }
+  return false;
 }
 
 // HARD dedupe at final stage
@@ -439,9 +434,11 @@ function addFinalSpeech(txt, source = "mic") {
   lastFinalText = cleaned;
   lastFinalAt = now;
 
-  // stop interim + remove it before committing final
-  removeInterim(source === "sys" ? "sys" : "mic");
+  // FIRST: try committing into interim line (no disappear)
+  const committed = commitInterimAsFinal(source === "sys" ? "sys" : "mic", cleaned);
+  if (committed) return;
 
+  // Otherwise fall back to normal append logic
   const gap = now - (lastSpeechAt || 0);
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
     timeline.push({ t: now, text: cleaned });
@@ -625,11 +622,13 @@ function startMicFallbackSR() {
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
+      if (!text) continue;
+
       if (r.isFinal) addFinalSpeech(text, "mic");
       else latestInterim = text;
     }
 
-    // THIS is the important change: progressive interim rendering
+    // Progressive interim rendering (word-by-word)
     if (latestInterim) setInterimTarget("mic", latestInterim);
   };
 
@@ -662,8 +661,6 @@ function startMicFallbackSR() {
 }
 
 // ---- Mic fallback recorder (MediaRecorder -> backend) ----
-// If backend returns sentence chunks, UI will still show word-by-word by rendering interim from SR;
-// for recorder path, we show "interim" as the latest partial chunk arriving and animate it.
 function stopMicRecorderOnly() {
   try { micAbort?.abort(); } catch {}
   micAbort = null;
@@ -802,7 +799,7 @@ async function transcribeMicBlob(blob, myEpoch) {
 }
 
 //--------------------------------------------------------------
-// SYSTEM AUDIO LEGACY — NOW WORD-BY-WORD (via interim animation)
+// SYSTEM AUDIO LEGACY — word-by-word via the same interim+commit
 //--------------------------------------------------------------
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
@@ -828,7 +825,9 @@ function stopSystemAudioOnly() {
   sysErrCount = 0;
   sysErrBackoffUntil = 0;
 
-  removeInterim("sys");
+  // stop sys interim animation (but do NOT delete any committed text)
+  stopInterimRenderer("sys");
+  sysInterimEntry = null;
 }
 
 async function enableSystemAudioLegacy() {
@@ -1178,7 +1177,7 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // Use SR for mic live interim (best for word-by-word in Chrome)
+  // Use SR for mic live interim (best for word-by-word)
   const ok = startMicFallbackSR();
   if (!ok) await enableMicRecorderFallback().catch(() => {});
 
@@ -1444,7 +1443,7 @@ window.addEventListener("load", async () => {
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 
-// System Audio button: use legacy recorder (still renders final with your 3s pause logic)
+// System Audio button: use legacy recorder (still prints progressively via commit)
 sysBtn.onclick = async () => {
   if (!isRunning) return;
   setStatus(audioStatus, "Enabling system audio…", "text-orange-600");
