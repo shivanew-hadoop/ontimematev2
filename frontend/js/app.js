@@ -535,6 +535,7 @@ async function getRealtimeToken(ttlSec = 600) {
     },
     true
   );
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Token route failed (${res.status})`);
   const token = data?.value || data?.token;
@@ -543,25 +544,26 @@ async function getRealtimeToken(ttlSec = 600) {
 }
 
 
-
 async function connectRealtimePeer(ephemeralKey) {
   const pc = new RTCPeerConnection();
-  // Add an audio transceiver so the offer includes an audio m= line
-  pc.addTransceiver('audio', { direction: 'sendonly' });
   const dc = pc.createDataChannel("oai-events");
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
+  // Client connects directly to OpenAI with ephemeral key (browser-safe)
   const r = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${ephemeralKey}`, "Content-Type": "application/sdp" },
+    headers: {
+      Authorization: `Bearer ${ephemeralKey}`,
+      "Content-Type": "application/sdp"
+    },
     body: offer.sdp
   });
 
   if (!r.ok) {
     const t = await r.text().catch(() => "");
-    throw new Error(`Realtime connect failed (${r.status}): ${t.slice(0, 200)}`);
+    throw new Error(`Realtime connect failed (${r.status}): ${t.slice(0, 180)}`);
   }
 
   const answerSdp = await r.text();
@@ -569,7 +571,6 @@ async function connectRealtimePeer(ephemeralKey) {
 
   return { pc, dc };
 }
-
 
 function sendRt(dc, obj) {
   if (!dc || dc.readyState !== "open") return;
@@ -833,30 +834,30 @@ function pickBestMimeType() {
   return "";
 }
 
-// async function enableMicRecorderFallback() {
-//   if (!isRunning) return;
-//   if (micStream) return;
-//   if (micSrIsHealthy()) return;
+async function enableMicRecorderFallback() {
+  if (!isRunning) return;
+  if (micStream) return;
+  if (micSrIsHealthy()) return;
 
-//   try {
-//     micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-//   } catch {
-//     setStatus(audioStatus, "Mic permission denied for fallback recorder.", "text-red-600");
-//     return;
-//   }
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+  } catch {
+    setStatus(audioStatus, "Mic permission denied for fallback recorder.", "text-red-600");
+    return;
+  }
 
-//   micTrack = micStream.getAudioTracks()[0];
-//   if (!micTrack) {
-//     setStatus(audioStatus, "No mic track detected for fallback recorder.", "text-red-600");
-//     stopMicRecorderOnly();
-//     return;
-//   }
+  micTrack = micStream.getAudioTracks()[0];
+  if (!micTrack) {
+    setStatus(audioStatus, "No mic track detected for fallback recorder.", "text-red-600");
+    stopMicRecorderOnly();
+    return;
+  }
 
-//   micAbort = new AbortController();
-//   setStatus(audioStatus, "Mic active (fallback recorder).", "text-green-600");
+  micAbort = new AbortController();
+  setStatus(audioStatus, "Mic active (fallback recorder).", "text-green-600");
 
-//   startMicSegmentRecorder();
-// }
+  startMicSegmentRecorder();
+}
 
 function startMicSegmentRecorder() {
   if (!micTrack) return;
@@ -972,34 +973,34 @@ function stopSystemAudioOnly() {
   sysErrBackoffUntil = 0;
 }
 
-// async function enableSystemAudioLegacy() {
-//   if (!isRunning) return;
+async function enableSystemAudioLegacy() {
+  if (!isRunning) return;
 
-//   stopSystemAudioOnly();
+  stopSystemAudioOnly();
 
-//   try {
-//     sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
-//   } catch {
-//     setStatus(audioStatus, "Share audio denied.", "text-red-600");
-//     return;
-//   }
+  try {
+    sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+  } catch {
+    setStatus(audioStatus, "Share audio denied.", "text-red-600");
+    return;
+  }
 
-//   sysTrack = sysStream.getAudioTracks()[0];
-//   if (!sysTrack) {
-//     setStatus(audioStatus, "No system audio detected.", "text-red-600");
-//     stopSystemAudioOnly();
-//     return;
-//   }
+  sysTrack = sysStream.getAudioTracks()[0];
+  if (!sysTrack) {
+    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    stopSystemAudioOnly();
+    return;
+  }
 
-//   sysTrack.onended = () => {
-//     stopSystemAudioOnly();
-//     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
-//   };
+  sysTrack.onended = () => {
+    stopSystemAudioOnly();
+    setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
+  };
 
-//   sysAbort = new AbortController();
-//   startSystemSegmentRecorder();
-//   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
-// }
+  sysAbort = new AbortController();
+  startSystemSegmentRecorder();
+  setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
+}
 
 function startSystemSegmentRecorder() {
   if (!sysTrack) return;
@@ -1364,17 +1365,19 @@ function stopAll() {
 function hardClearTranscript() {
   transcriptEpoch++;
 
-  // cancel old recorder queues
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
 
-  // clear dedupe tails and final text memory
+  micQueue = [];
+  sysQueue = [];
+  micSegmentChunks = [];
+  sysSegmentChunks = [];
+
   lastSysTail = "";
   lastMicTail = "";
   lastFinalText = "";
   lastFinalAt = 0;
 
-  // clear all timeline blocks and interim entries
   timeline = [];
   micInterimEntry = null;
   sysInterimEntry = null;
@@ -1382,13 +1385,8 @@ function hardClearTranscript() {
   sentCursor = 0;
   pinnedTop = true;
 
-  // also reset itemText for ongoing realtime sessions
-  if (rtMic) rtMic.itemText = {};
-  if (rtSys) rtSys.itemText = {};
-
   updateTranscript();
 }
-
 
 //--------------------------------------------------------------
 // QUESTION HELPERS (unchanged from your file)
