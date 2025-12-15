@@ -125,13 +125,12 @@ let resumeTextMem = "";
 let transcriptEpoch = 0;
 
 //--------------------------------------------------------------
-// REALTIME (WebRTC data channel + PCM append) - NEW
+// REALTIME (WebRTC data channel + AUDIO TRACK) - FIXED
 //--------------------------------------------------------------
-let rtMic = null; // { pc, dc, ctx, src, proc, buf, itemText, source }
+let rtMic = null; // { pc, dc, media, track, itemText, source }
 let rtSys = null;
 
-const REALTIME_PCM_RATE = 24000;
-const REALTIME_MODEL = "gpt-realtime"; // connect target for WebRTC
+const REALTIME_CALLS_URL = "https://api.openai.com/v1/realtime/calls"; // GA WebRTC SDP exchange :contentReference[oaicite:3]{index=3}
 
 //--------------------------------------------------------------
 // CONSTANTS
@@ -285,6 +284,18 @@ function getFreshBlocksText() {
     .filter(Boolean)
     .join("\n\n")
     .trim();
+}
+
+// FIX: snapshot should include interim text at click-time (so Send never waits)
+function getFreshBlocksTextSnapshotIncludingInterim() {
+  const base = timeline
+    .slice(sentCursor)
+    .map(x => String(x?.text || "").trim())
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+
+  return base;
 }
 
 function updateTranscript() {
@@ -485,46 +496,8 @@ function looksLikeWhisperHallucination(t) {
 }
 
 //--------------------------------------------------------------
-// REALTIME HELPERS (NEW)
+// REALTIME HELPERS (FIXED)
 //--------------------------------------------------------------
-function b64FromBytes(bytes) {
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
-}
-
-function floatTo16BitPCM(float32Array) {
-  const out = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i++) {
-    let s = Math.max(-1, Math.min(1, float32Array[i]));
-    out[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
-  }
-  return out;
-}
-
-function downsampleBuffer(input, inRate, outRate) {
-  if (outRate === inRate) return input;
-  const ratio = inRate / outRate;
-  const newLen = Math.floor(input.length / ratio);
-  const result = new Float32Array(newLen);
-  let offset = 0;
-  for (let i = 0; i < newLen; i++) {
-    const nextOffset = Math.floor((i + 1) * ratio);
-    let sum = 0;
-    let count = 0;
-    for (let j = offset; j < nextOffset && j < input.length; j++) {
-      sum += input[j];
-      count++;
-    }
-    result[i] = count ? sum / count : 0;
-    offset = nextOffset;
-  }
-  return result;
-}
-
 async function getRealtimeToken(ttlSec = 600) {
   const res = await apiFetch(
     "realtime/transcription_token",
@@ -543,22 +516,65 @@ async function getRealtimeToken(ttlSec = 600) {
   return token;
 }
 
+function sendRt(dc, obj) {
+  if (!dc || dc.readyState !== "open") return;
+  try { dc.send(JSON.stringify(obj)); } catch {}
+}
 
-async function connectRealtimePeer(ephemeralKey) {
-  const pc = new RTCPeerConnection();
+async function waitIceGathering(pc, maxMs = 1200) {
+  if (!pc) return;
+  if (pc.iceGatheringState === "complete") return;
+
+  await new Promise((resolve) => {
+    let done = false;
+    const to = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve();
+    }, maxMs);
+
+    pc.onicegatheringstatechange = () => {
+      if (done) return;
+      if (pc.iceGatheringState === "complete") {
+        done = true;
+        clearTimeout(to);
+        resolve();
+      }
+    };
+  });
+}
+
+async function connectRealtimePeer(ephemeralKey, audioTrack) {
+  // Provide a public STUN to reduce Chrome flakiness behind some networks
+  const pc = new RTCPeerConnection({
+    iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+  });
+
+  // CRITICAL FIX: ensure SDP contains an audio m= section
+  if (audioTrack) {
+    const ms = new MediaStream([audioTrack]);
+    pc.addTrack(audioTrack, ms);
+  } else {
+    pc.addTransceiver("audio", { direction: "sendonly" });
+  }
+
   const dc = pc.createDataChannel("oai-events");
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
 
-  // Client connects directly to OpenAI with ephemeral key (browser-safe)
-  const r = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`, {
+  await waitIceGathering(pc, 1200);
+
+  const sdpToSend = pc.localDescription?.sdp || offer.sdp;
+
+  // GA WebRTC SDP exchange URL :contentReference[oaicite:4]{index=4}
+  const r = await fetch(REALTIME_CALLS_URL, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${ephemeralKey}`,
       "Content-Type": "application/sdp"
     },
-    body: offer.sdp
+    body: sdpToSend
   });
 
   if (!r.ok) {
@@ -572,11 +588,6 @@ async function connectRealtimePeer(ephemeralKey) {
   return { pc, dc };
 }
 
-function sendRt(dc, obj) {
-  if (!dc || dc.readyState !== "open") return;
-  try { dc.send(JSON.stringify(obj)); } catch {}
-}
-
 async function startRealtimeTranscriber(source /* "mic"|"sys" */) {
   if (!isRunning) return null;
 
@@ -585,15 +596,34 @@ async function startRealtimeTranscriber(source /* "mic"|"sys" */) {
 
   const key = await getRealtimeToken(600);
 
-  const { pc, dc } = await connectRealtimePeer(key);
+  // Capture media FIRST (so we can attach the audio track before creating the SDP offer)
+  let media;
+  if (source === "mic") {
+    media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    setStatus(audioStatus, "Mic (realtime) enabled.", "text-green-600");
+  } else {
+    // Browser security: user must pick a tab/window; for Chrome tab audio needs “Share tab audio”
+    media = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
+    setStatus(audioStatus, "System audio (realtime) enabled. Ensure 'Share tab audio' is ON.", "text-green-600");
+  }
+
+  const track = media.getAudioTracks?.()[0];
+  if (!track) throw new Error("No audio track found");
+
+  track.onended = () => {
+    if (source === "sys") setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
+    stopRealtimeTranscriber(source).catch(() => {});
+  };
+
+  // Now connect WebRTC with audio in SDP
+  const { pc, dc } = await connectRealtimePeer(key, track);
 
   const rt = {
     source,
     pc,
     dc,
-    ctx: null,
-    src: null,
-    proc: null,
+    media,
+    track,
     itemText: {}
   };
 
@@ -602,13 +632,11 @@ async function startRealtimeTranscriber(source /* "mic"|"sys" */) {
     try { msg = JSON.parse(evt.data); } catch { return; }
     const type = msg?.type || "";
 
-    // Delta transcript
+    // Delta transcript (incremental) :contentReference[oaicite:5]{index=5}
     if (type === "conversation.item.input_audio_transcription.delta") {
       const itemId = msg?.item_id || "x";
       const delta = String(msg?.delta || "");
       rt.itemText[itemId] = (rt.itemText[itemId] || "") + delta;
-
-      // Show partial immediately (no “disappear” flicker)
       setInterim(source === "sys" ? "sys" : "mic", rt.itemText[itemId]);
     }
 
@@ -629,78 +657,38 @@ async function startRealtimeTranscriber(source /* "mic"|"sys" */) {
 
   dc.addEventListener("message", handleEvent);
 
-  // When channel opens, configure session (already mostly set on token mint)
-  const opened = await new Promise((resolve, reject) => {
-    const to = setTimeout(() => reject(new Error("Realtime data channel open timeout")), 8000);
+  // Wait for DC open
+  await new Promise((resolve, reject) => {
+    const to = setTimeout(() => reject(new Error("Realtime data channel open timeout")), 10000);
     dc.onopen = () => { clearTimeout(to); resolve(true); };
     dc.onerror = () => { clearTimeout(to); reject(new Error("Realtime data channel error")); };
   });
 
-  if (!opened) throw new Error("Realtime channel not open");
-
-  // Small session update (safe)
+  // Ensure transcription session config is applied
   sendRt(dc, {
     type: "session.update",
     session: {
       type: "transcription",
       audio: {
         input: {
+          // Safe to include; required for buffer-append sessions; ok to keep for transcription sessions :contentReference[oaicite:6]{index=6}
           format: { type: "audio/pcm", rate: 24000 },
           transcription: {
             model: "gpt-4o-mini-transcribe",
             language: "en",
             prompt: TRANSCRIBE_PROMPT
+          },
+          noise_reduction: { type: "far_field" },
+          turn_detection: {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 350
           }
         }
       }
     }
   });
-
-  // Start audio capture for source
-  let media;
-  if (source === "mic") {
-    media = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
-    setStatus(audioStatus, "Mic (realtime) enabled.", "text-green-600");
-  } else {
-    // Still requires user selection (browser security)
-    media = await navigator.mediaDevices.getDisplayMedia({ audio: true, video: true });
-    setStatus(audioStatus, "System audio (realtime) enabled. Ensure 'Share tab audio' is ON.", "text-green-600");
-  }
-
-  const track = media.getAudioTracks()[0];
-  if (!track) throw new Error("No audio track found");
-
-  track.onended = () => {
-    if (source === "sys") setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
-    stopRealtimeTranscriber(source).catch(() => {});
-  };
-
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = ctx.createMediaStreamSource(new MediaStream([track]));
-
-  // ScriptProcessor for broad browser support (works in Chrome/Edge)
-  const proc = ctx.createScriptProcessor(2048, 1, 1);
-  proc.onaudioprocess = (e) => {
-    if (!isRunning) return;
-    if (!dc || dc.readyState !== "open") return;
-
-    const input = e.inputBuffer.getChannelData(0);
-    const down = downsampleBuffer(input, ctx.sampleRate, REALTIME_PCM_RATE);
-    const pcm16 = floatTo16BitPCM(down);
-
-    const bytes = new Uint8Array(pcm16.buffer);
-    const audioB64 = b64FromBytes(bytes);
-
-    sendRt(dc, { type: "input_audio_buffer.append", audio: audioB64 });
-  };
-
-  src.connect(proc);
-  proc.connect(ctx.destination); // keep processor alive
-
-  rt.ctx = ctx;
-  rt.src = src;
-  rt.proc = proc;
-  rt.media = media;
 
   if (source === "mic") rtMic = rt;
   else rtSys = rt;
@@ -712,11 +700,6 @@ async function stopRealtimeTranscriber(source) {
   const rt = source === "mic" ? rtMic : rtSys;
   if (!rt) return;
 
-  try { sendRt(rt.dc, { type: "input_audio_buffer.commit" }); } catch {}
-
-  try { rt.proc && rt.proc.disconnect(); } catch {}
-  try { rt.src && rt.src.disconnect(); } catch {}
-  try { rt.ctx && rt.ctx.close(); } catch {}
   try { rt.dc && rt.dc.close(); } catch {}
   try { rt.pc && rt.pc.close(); } catch {}
   try { rt.media && rt.media.getTracks().forEach(t => t.stop()); } catch {}
@@ -1147,7 +1130,7 @@ function startCreditTicking() {
 }
 
 //--------------------------------------------------------------
-// CHAT STREAMING (FIXED: abort no longer shows "Failed")
+// CHAT STREAMING
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
@@ -1193,7 +1176,6 @@ async function startChatStreaming(prompt, userTextForHistory) {
   let sawFirstChunk = false;
 
   const render = () => {
-    // Only render if this request is still the active one
     if (!chatStreamActive || mySeq !== chatStreamSeq) return;
     responseBox.innerHTML = renderMarkdown(raw);
   };
@@ -1240,7 +1222,6 @@ async function startChatStreaming(prompt, userTextForHistory) {
       pushHistory("assistant", raw);
     }
   } catch (e) {
-    // Abort is expected when user clicks Send again — do NOT show failure
     const msg = String(e?.message || e || "");
     const isAbort = e?.name === "AbortError" || msg.toLowerCase().includes("aborted");
     if (isAbort || mySeq !== chatStreamSeq) return;
@@ -1254,7 +1235,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
 }
 
 //--------------------------------------------------------------
-// RESUME UPLOAD (unchanged)
+// RESUME UPLOAD
 //--------------------------------------------------------------
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
@@ -1319,11 +1300,10 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // 1) Try REALTIME mic first
+  // 1) Try REALTIME mic first (now works in Chrome + Edge)
   try {
     await startRealtimeTranscriber("mic");
   } catch (e) {
-    // 2) Fallback to SR (your existing behavior)
     console.warn("Mic realtime failed, using fallback:", e);
     setStatus(audioStatus, "Mic realtime failed. Using SR fallback…", "text-orange-600");
     const ok = startMicFallbackSR();
@@ -1389,7 +1369,7 @@ function hardClearTranscript() {
 }
 
 //--------------------------------------------------------------
-// QUESTION HELPERS (unchanged from your file)
+// QUESTION HELPERS
 //--------------------------------------------------------------
 function extractPriorQuestions() {
   const qs = [];
@@ -1483,16 +1463,19 @@ Output requirements:
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // Abort current stream, but old aborted request can’t overwrite UI anymore
   abortChatStreamOnly();
 
   const manual = normalize(manualQuestion?.value || "");
-  const fresh = normalize(getFreshBlocksText());
-  const base = manual || fresh;
+
+  // FIX: include interim snapshot so Send uses whatever is visible NOW (no waiting for silence)
+  const freshSnap = normalize(getFreshBlocksTextSnapshotIncludingInterim());
+
+  const base = manual || freshSnap;
   if (!base) return;
 
   blockMicUntil = Date.now() + 700;
 
+  // lock what has been "sent" so later interim updates don't alter that question
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
