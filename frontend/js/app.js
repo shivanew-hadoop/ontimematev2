@@ -1007,9 +1007,29 @@ function startCreditTicking() {
 // CHAT STREAMING
 //--------------------------------------------------------------
 function abortChatStreamOnly() {
+  // IMPORTANT: invalidate ALL in-flight render loops immediately
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
+
   chatStreamActive = false;
+  chatStreamSeq++; // invalidates any old flush timers / loops using prior seq
+}
+
+// NEW: cancel + wipe UI (used by Send to ensure old answer never "wins")
+function cancelAnswerStreamAndWipeUI() {
+  abortChatStreamOnly();
+  if (responseBox) responseBox.innerHTML = "";
+  setStatus(sendStatus, "", "");
+}
+
+// NEW: freeze interim transcript before Send so transcript doesn't "stop/shift"
+function freezeInterimsBeforeSend() {
+  if (micInterimEntry && normalize(micInterimEntry.text)) {
+    commitInterimAsFinal("mic", micInterimEntry.text);
+  }
+  if (sysInterimEntry && normalize(sysInterimEntry.text)) {
+    commitInterimAsFinal("sys", sysInterimEntry.text);
+  }
 }
 
 function pushHistory(role, content) {
@@ -1027,8 +1047,7 @@ function compactHistoryForRequest() {
 }
 
 async function startChatStreaming(prompt, userTextForHistory) {
-  abortChatStreamOnly();
-
+  // DO NOT abort here. Send handler owns cancellation/wipe.
   chatAbort = new AbortController();
   chatStreamActive = true;
   const mySeq = ++chatStreamSeq;
@@ -1335,27 +1354,32 @@ Output requirements:
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  abortChatStreamOnly();
+  // 1) Freeze interim transcript line(s) so transcript doesn't "stop/mutate"
+  freezeInterimsBeforeSend();
 
+  // 2) Snapshot transcript NOW (includes whatever is visible at this moment)
   const manual = normalize(manualQuestion?.value || "");
-
-  // Key fix: snapshot including interim (no waiting for silence)
   const freshSnap = normalize(getFreshBlocksTextSnapshotIncludingInterim());
-
   const base = manual || freshSnap;
   if (!base) return;
 
-  blockMicUntil = Date.now() + 700;
+  // 3) Cancel any in-flight answer + wipe response immediately
+  cancelAnswerStreamAndWipeUI();
 
+  // 4) Keep transcription printing; do NOT block mic for long
+  blockMicUntil = Date.now() + 80; // reduced (was 700)
+
+  // 5) Mark sent cursor AFTER freezing (so future speech becomes "new")
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscriptNow();
 
   if (manualQuestion) manualQuestion.value = "";
 
+  // 6) Immediately show the new question draft (old answer already wiped)
   const draftQ = buildDraftQuestion(base);
   responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
-  setStatus(sendStatus, "Queued…", "text-orange-600");
+  setStatus(sendStatus, "Connecting…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
   const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
