@@ -63,9 +63,9 @@ function readJson(req) {
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
     const headers = req.headers || {};
-    const ct = String(headers["content-type"] || "");
+    const ct = String(headers["content-type"] || "").toLowerCase();
 
-    if (!ct.toLowerCase().includes("multipart/form-data")) {
+    if (!ct.includes("multipart/form-data")) {
       return reject(new Error("Expected multipart/form-data"));
     }
 
@@ -137,7 +137,8 @@ async function getUserFromBearer(req) {
   const auth = req.headers.authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
-  if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
+  if (token.startsWith("ADMIN::"))
+    return { ok: false, error: "Admin token not valid for user" };
 
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
@@ -153,7 +154,10 @@ function safeHistory(history) {
   for (const m of history.slice(-12)) {
     const role = m?.role;
     const content = typeof m?.content === "string" ? m.content : "";
-    if ((role === "user" || role === "assistant") && content.trim()) {
+    if (
+      (role === "user" || role === "assistant") &&
+      content.trim()
+    ) {
       out.push({ role, content: content.slice(0, 2000) });
     }
   }
@@ -174,7 +178,8 @@ function guessExtAndMime(file) {
   if (name.endsWith(".docx") || mime.includes("wordprocessingml"))
     return {
       ext: "docx",
-      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      mime:
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     };
 
   if (name.endsWith(".txt") || mime.includes("text/plain"))
@@ -230,14 +235,14 @@ async function getCreditsForUser(userId) {
 async function createRealtimeClientSecret({ ttlSec = 600 } = {}) {
   const ttl = Math.max(60, Math.min(900, Number(ttlSec || 600))); // 1–15 min
 
-  // GA endpoint: POST /v1/realtime/client_secrets :contentReference[oaicite:4]{index=4}
+  // GA endpoint: POST /v1/realtime/client_secrets
   const payload = {
     expires_after: { anchor: "created_at", seconds: ttl },
     session: {
       type: "transcription",
       audio: {
         input: {
-          // format is used when appending audio buffers; safe to include for transcription sessions :contentReference[oaicite:5]{index=5}
+          // format is used when appending audio buffers; safe to include for transcription sessions
           format: { type: "audio/pcm", rate: 24000 },
           transcription: {
             model: "gpt-4o-mini-transcribe",
@@ -267,7 +272,11 @@ async function createRealtimeClientSecret({ ttlSec = 600 } = {}) {
 
   const out = await r.json().catch(() => ({}));
   if (!r.ok) {
-    throw new Error(out?.error?.message || out?.error || "Failed to create realtime client secret");
+    throw new Error(
+      out?.error?.message ||
+        out?.error ||
+        "Failed to create realtime client secret"
+    );
   }
   return { value: out.value, expires_at: out.expires_at || 0 };
 }
@@ -288,7 +297,9 @@ export default async function handler(req, res) {
     /* HEALTH                                                  */
     /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
-      return res.status(200).json({ ok: true, time: new Date().toISOString() });
+      return res
+        .status(200)
+        .json({ ok: true, time: new Date().toISOString() });
     }
 
     /* ------------------------------------------------------- */
@@ -298,7 +309,8 @@ export default async function handler(req, res) {
       return res.status(200).json({
         hasSUPABASE_URL: !!process.env.SUPABASE_URL,
         hasSUPABASE_ANON_KEY: !!process.env.SUPABASE_ANON_KEY,
-        hasSUPABASE_SERVICE_ROLE_KEY: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+        hasSUPABASE_SERVICE_ROLE_KEY:
+          !!process.env.SUPABASE_SERVICE_ROLE_KEY,
         hasOPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
         hasADMIN_EMAIL: !!process.env.ADMIN_EMAIL,
         hasADMIN_PASSWORD: !!process.env.ADMIN_PASSWORD
@@ -309,10 +321,12 @@ export default async function handler(req, res) {
     /* AUTH — SIGNUP                                           */
     /* ------------------------------------------------------- */
     if (path === "auth/signup") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { name, phone, email, password } = await readJson(req);
-      if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
+      if (!name || !email || !password)
+        return res.status(400).json({ error: "Missing fields" });
 
       const sb = supabaseAnon();
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -334,33 +348,52 @@ export default async function handler(req, res) {
         created_at: new Date().toISOString()
       });
 
-      return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
+      return res.json({
+        ok: true,
+        message: "Account created. Verify email + wait for approval."
+      });
     }
 
     /* ------------------------------------------------------- */
     /* AUTH — LOGIN                                            */
     /* ------------------------------------------------------- */
     if (path === "auth/login") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { email, password } = await readJson(req);
 
-      const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
+      const adminEmail = (process.env.ADMIN_EMAIL || "")
+        .toLowerCase()
+        .trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
-      if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
-        const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
+      if (
+        email.toLowerCase().trim() === adminEmail &&
+        password === adminPass
+      ) {
+        const token = `ADMIN::${adminEmail}::${Math.random()
+          .toString(36)
+          .slice(2)}`;
         return res.json({
           ok: true,
-          session: { is_admin: true, token, user: { id: "admin", email: adminEmail } }
+          session: {
+            is_admin: true,
+            token,
+            user: { id: "admin", email: adminEmail }
+          }
         });
       }
 
       const sb = supabaseAnon();
-      const { data, error } = await sb.auth.signInWithPassword({ email, password });
+      const { data, error } = await sb.auth.signInWithPassword({
+        email,
+        password
+      });
       if (error) return res.status(401).json({ error: error.message });
 
       const user = data.user;
-      if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
+      if (!user.email_confirmed_at)
+        return res.status(403).json({ error: "Email not verified yet" });
 
       const profile = await supabaseAdmin()
         .from("user_profiles")
@@ -369,7 +402,9 @@ export default async function handler(req, res) {
         .single();
 
       if (!profile.data?.approved)
-        return res.status(403).json({ error: "Admin has not approved your account yet" });
+        return res
+          .status(403)
+          .json({ error: "Admin has not approved your account yet" });
 
       return res.json({
         ok: true,
@@ -387,14 +422,21 @@ export default async function handler(req, res) {
     /* AUTH — REFRESH TOKEN                                    */
     /* ------------------------------------------------------- */
     if (path === "auth/refresh") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { refresh_token } = await readJson(req);
-      if (!refresh_token) return res.status(400).json({ error: "Missing refresh_token" });
+      if (!refresh_token)
+        return res
+          .status(400)
+          .json({ error: "Missing refresh_token" });
 
       const sb = supabaseAnon();
-      const { data, error } = await sb.auth.refreshSession({ refresh_token });
-      if (error) return res.status(401).json({ error: error.message });
+      const { data, error } = await sb.auth.refreshSession({
+        refresh_token
+      });
+      if (error)
+        return res.status(401).json({ error: error.message });
 
       return res.json({
         ok: true,
@@ -412,7 +454,9 @@ export default async function handler(req, res) {
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
-      await supabaseAnon().auth.resetPasswordForEmail(email, { redirectTo });
+      await supabaseAnon().auth.resetPasswordForEmail(email, {
+        redirectTo
+      });
       return res.json({ ok: true });
     }
 
@@ -421,7 +465,8 @@ export default async function handler(req, res) {
     /* ------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const profile = await supabaseAdmin()
         .from("user_profiles")
@@ -429,11 +474,15 @@ export default async function handler(req, res) {
         .eq("id", gate.user.id)
         .single();
 
-      if (!profile.data) return res.status(404).json({ error: "Profile not found" });
+      if (!profile.data)
+        return res.status(404).json({ error: "Profile not found" });
 
       return res.json({
         ok: true,
-        user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
+        user: {
+          ...profile.data,
+          created_ymd: ymd(profile.data.created_at)
+        }
       });
     }
 
@@ -441,10 +490,12 @@ export default async function handler(req, res) {
     /* USER — CREDIT DEDUCTION                                 */
     /* ------------------------------------------------------- */
     if (path === "user/deduct") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const gate = await getUserFromBearer(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { delta } = await readJson(req);
       const d = Math.max(0, Math.floor(Number(delta || 0)));
@@ -472,29 +523,45 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* REALTIME — EPHEMERAL CLIENT SECRET (FIXED)               */
+    /* REALTIME — EPHEMERAL CLIENT SECRET / TOKEN (ALIAS)      */
     /* ------------------------------------------------------- */
-    if (path === "realtime/client_secret" || path === "realtime/transcription_token") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+    if (
+      path === "realtime/client_secret" ||
+      path === "realtime/transcription_token"
+    ) {
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const gate = await getUserFromBearer(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const credits = await getCreditsForUser(gate.user.id);
-      if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
+      if (credits <= 0)
+        return res
+          .status(403)
+          .json({ error: "No credits remaining" });
 
       const body = await readJson(req).catch(() => ({}));
       const ttl_sec = Number(body?.ttl_sec || 600);
 
-      const token = await createRealtimeClientSecret({ ttlSec: ttl_sec });
-      return res.json(token); // { value, expires_at }
+      const token = await createRealtimeClientSecret({
+        ttlSec: ttl_sec
+      });
+      // return both value and token for compatibility
+      return res.json({
+        value: token.value,
+        token: token.value,
+        expires_at: token.expires_at || 0
+      });
     }
 
     /* ------------------------------------------------------- */
     /* RESUME EXTRACTION                                       */
     /* ------------------------------------------------------- */
     if (path === "resume/extract") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { file } = await readMultipart(req);
       if (!file?.buffer) return res.json({ text: "" });
@@ -507,15 +574,19 @@ export default async function handler(req, res) {
     /* TRANSCRIBE (mic/system audio)                           */
     /* ------------------------------------------------------- */
     if (path === "transcribe") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
       const { fields, file } = await readMultipart(req);
-      if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
+      if (!file?.buffer || file.buffer.length < 2500)
+        return res.json({ text: "" });
 
       try {
         const filename = file.filename || "audio.webm";
         const mime = (file.mime || "audio/webm").split(";")[0];
-        const audioFile = await toFile(file.buffer, filename, { type: mime });
+        const audioFile = await toFile(file.buffer, filename, {
+          type: mime
+        });
 
         const basePrompt =
           "Transcribe EXACTLY what is spoken in English. " +
@@ -523,7 +594,10 @@ export default async function handler(req, res) {
           "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
+        const finalPrompt = (
+          basePrompt +
+          (userPrompt ? "\n\nContext:\n" + userPrompt : "")
+        ).slice(0, 800);
 
         const out = await openai.audio.transcriptions.create({
           file: audioFile,
@@ -537,7 +611,9 @@ export default async function handler(req, res) {
         return res.json({ text: out.text || "" });
       } catch (e) {
         const status = e?.status || e?.response?.status || 500;
-        return res.status(status).json({ error: e?.message || String(e) });
+        return res
+          .status(status)
+          .json({ error: e?.message || String(e) });
       }
     }
 
@@ -545,10 +621,13 @@ export default async function handler(req, res) {
     /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST")
+        return res.status(405).json({ error: "Method not allowed" });
 
-      const { prompt, instructions, resumeText, history } = await readJson(req);
-      if (!prompt) return res.status(400).json({ error: "Missing prompt" });
+      const { prompt, instructions, resumeText, history } =
+        await readJson(req);
+      if (!prompt)
+        return res.status(400).json({ error: "Missing prompt" });
 
       res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -556,6 +635,7 @@ export default async function handler(req, res) {
       res.setHeader("Transfer-Encoding", "chunked");
       res.flushHeaders?.();
 
+      // Kick chunk so UI receives "first token" immediately
       res.write(" ");
 
       const messages = [];
@@ -578,7 +658,10 @@ Make **important technical terms bold** (only terms, not whole sentences).
       messages.push({ role: "system", content: baseSystem });
 
       if (instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
+        messages.push({
+          role: "system",
+          content: instructions.trim().slice(0, 4000)
+        });
       }
 
       if (resumeText?.trim()) {
@@ -591,7 +674,10 @@ Make **important technical terms bold** (only terms, not whole sentences).
       }
 
       for (const m of safeHistory(history)) messages.push(m);
-      messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
+      messages.push({
+        role: "user",
+        content: String(prompt).slice(0, 8000)
+      });
 
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
@@ -603,7 +689,8 @@ Make **important technical terms bold** (only terms, not whole sentences).
 
       try {
         for await (const chunk of stream) {
-          const t = chunk?.choices?.[0]?.delta?.content || "";
+          const t =
+            chunk?.choices?.[0]?.delta?.content || "";
           if (t) res.write(t);
         }
       } catch {}
@@ -621,7 +708,8 @@ Make **important technical terms bold** (only terms, not whole sentences).
     /* ------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { data } = await supabaseAdmin()
         .from("user_profiles")
@@ -636,7 +724,8 @@ Make **important technical terms bold** (only terms, not whole sentences).
     /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { user_id, approved } = await readJson(req);
 
@@ -655,7 +744,8 @@ Make **important technical terms bold** (only terms, not whole sentences).
     /* ------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
+      if (!gate.ok)
+        return res.status(401).json({ error: gate.error });
 
       const { user_id, delta } = await readJson(req);
 
@@ -666,7 +756,10 @@ Make **important technical terms bold** (only terms, not whole sentences).
         .eq("id", user_id)
         .single();
 
-      const newCredits = Math.max(0, Number(row.credits) + Number(delta));
+      const newCredits = Math.max(
+        0,
+        Number(row.credits) + Number(delta)
+      );
 
       const { data } = await sb
         .from("user_profiles")
@@ -682,8 +775,12 @@ Make **important technical terms bold** (only terms, not whole sentences).
   } catch (err) {
     const msg = String(err?.message || err);
 
+    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
-      return res.status(400).json({ error: "Unexpected end of form (multipart stream was consumed or interrupted)." });
+      return res.status(400).json({
+        error:
+          "Unexpected end of form (multipart stream was consumed or interrupted)."
+      });
     }
 
     return res.status(500).json({ error: msg });

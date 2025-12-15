@@ -526,7 +526,6 @@ function downsampleBuffer(input, inRate, outRate) {
 }
 
 async function getRealtimeToken(ttlSec = 600) {
-  // NOTE: using the alias route name you were calling already
   const res = await apiFetch(
     "realtime/transcription_token",
     {
@@ -539,9 +538,11 @@ async function getRealtimeToken(ttlSec = 600) {
 
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Token route failed (${res.status})`);
-  if (!data?.value) throw new Error("Missing realtime token");
-  return data.value;
+  const token = data?.value || data?.token;
+  if (!token) throw new Error("Missing realtime token");
+  return token;
 }
+
 
 async function connectRealtimePeer(ephemeralKey) {
   const pc = new RTCPeerConnection();
