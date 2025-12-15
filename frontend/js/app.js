@@ -1115,6 +1115,36 @@ async function startChatStreaming(prompt, userTextForHistory) {
 }
 
 //--------------------------------------------------------------
+// RESUME UPLOAD
+//--------------------------------------------------------------
+resumeInput?.addEventListener("change", async () => {
+  const file = resumeInput.files?.[0];
+  if (!file) return;
+
+  if (resumeStatus) resumeStatus.textContent = "Processing…";
+
+  const fd = new FormData();
+  fd.append("file", file);
+
+  const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    resumeTextMem = "";
+    if (resumeStatus) resumeStatus.textContent = `Resume extract failed (${res.status}): ${errText.slice(0, 160)}`;
+    return;
+  }
+
+  const data = await res.json().catch(() => ({}));
+  resumeTextMem = String(data.text || "").trim();
+
+  if (resumeStatus) {
+    resumeStatus.textContent = resumeTextMem
+      ? `Resume extracted (${resumeTextMem.length} chars)`
+      : "Resume extracted: empty";
+  }
+});
+//--------------------------------------------------------------
 // QUESTION HELPERS (unchanged)
 //--------------------------------------------------------------
 function extractPriorQuestions() {
