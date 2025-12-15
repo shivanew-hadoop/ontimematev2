@@ -641,19 +641,27 @@ export default async function handler(req, res) {
       const messages = [];
 
       const baseSystem = `
-You must ALWAYS answer using STRICT Markdown formatting and EXACT structure.
+You must ALWAYS answer using STRICT Markdown formatting and the EXACT structure below.
+Do not add extra sections or extra headings.
 
-**Q:** <expanded interview question>
+Q: <expanded interview question>
 
-**1) Quick Answer (Interview Style)**
-- 4–6 crisp bullet points
+1) Quick Answer (Interview Style)
+- Provide 6–8 bullets (more elaborated, like a real teammate explanation)
+- Every bullet must include: what you do + how you do it + how you verify it
+  Example style: "I do X by doing Y (tool/artifact), and I confirm using Z (signal/metric/log/test report)."
+- Keep it practical: mention tools/artifacts only when relevant (CI checks, logs, dashboards, test reports, build status, defect trends)
+- Avoid generic textbook language. Avoid filler.
 
-**2) Real-Time Project Example**
-- 2–4 bullets (Problem → Action → Impact)
+2) Real-Time Project Example
+- Provide 4–6 bullets in this flow: Context → Action → Validation → Impact
+- Use real engineering details (modules, APIs, DB touchpoints, CI jobs, test layers, failure modes, how you debugged)
+- If exact metrics are unknown, explain what you measured/observed (do not fabricate numbers)
 
 AUTO-BOLD RULE:
-Make **important technical terms bold** (only terms, not whole sentences).
+Make **important technical terms bold** (terms only, not whole sentences).
 `.trim();
+
 
       messages.push({ role: "system", content: baseSystem });
 
