@@ -64,6 +64,8 @@ const modeSelect = document.getElementById("modeSelect");
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
+let micInterimEl = null;
+let micRenderedWords = 0;
 
 let hiddenInstructions = "";
 
@@ -353,67 +355,42 @@ function stopInterimRenderer(source) {
 }
 
 function setInterimTarget(source, text) {
+  if (source !== "mic") return;
+
   const cleaned = normalize(text);
   if (!cleaned) return;
 
-  const st = interimRender[source];
-  const newWords = wordsOf(cleaned);
+  const words = cleaned.split(" ");
 
-  const oldTarget = st.targetWords;
-  let isExtension = true;
-  const min = Math.min(oldTarget.length, newWords.length);
-  for (let i = 0; i < min; i++) {
-    if (oldTarget[i] !== newWords[i]) { isExtension = false; break; }
-  }
-  if (!isExtension || newWords.length < st.shownCount) {
-    st.shownCount = 0;
-  }
+  // Chrome emits shorter hypotheses — NEVER rewind
+  if (words.length <= micRenderedWords) return;
 
-  st.targetWords = newWords;
-
-  const entry = ensureInterimEntry(source);
-  entry.t = Date.now();
-
-  if (!st.timer) {
-    st.timer = setInterval(() => {
-      if (!isRunning) return;
-
-      const remaining = st.targetWords.length - st.shownCount;
-      if (remaining <= 0) return;
-
-      const take = Math.min(WORDS_PER_TICK, remaining);
-      st.shownCount += take;
-
-      const txt = st.targetWords.slice(0, st.shownCount).join(" ");
-      entry.text = txt;
-      entry.t = Date.now();
-      updateTranscript();
-    }, WORD_RENDER_MS);
+  if (!micInterimEl) {
+    micInterimEl = document.createElement("div");
+    micInterimEl.className = "mb-2";
+    liveTranscript.prepend(micInterimEl);
+    micRenderedWords = 0;
   }
 
-  updateTranscript();
+  for (let i = micRenderedWords; i < words.length; i++) {
+    micInterimEl.textContent +=
+      (micInterimEl.textContent ? " " : "") + words[i];
+  }
+
+  micRenderedWords = words.length;
 }
 
 function commitInterimAsFinal(source, finalText) {
-  const now = Date.now();
+  if (source !== "mic") return false;
+
   const cleaned = normalize(finalText);
+  if (!cleaned || !micInterimEl) return false;
 
-  stopInterimRenderer(source);
+  micInterimEl.textContent = cleaned;
+  micInterimEl = null;
+  micRenderedWords = 0;
 
-  const entry = source === "sys" ? sysInterimEntry : micInterimEntry;
-
-  if (entry) {
-    if (cleaned) entry.text = cleaned;
-    entry.t = now;
-
-    if (source === "sys") sysInterimEntry = null;
-    else micInterimEntry = null;
-
-    lastSpeechAt = now;
-    updateTranscript();
-    return true;
-  }
-  return false;
+  return true;
 }
 
 function addFinalSpeech(txt, source = "mic") {
