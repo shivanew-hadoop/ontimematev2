@@ -355,41 +355,96 @@ function stopInterimRenderer(source) {
 }
 
 function setInterimTarget(source, text) {
-  if (source !== "mic") return;
-
   const cleaned = normalize(text);
   if (!cleaned) return;
 
-  const words = cleaned.split(" ");
+  const st = interimRender[source];
+  if (!st) return;
 
-  // Chrome emits shorter hypotheses — NEVER rewind
-  if (words.length <= micRenderedWords) return;
+  const newWords = wordsOf(cleaned);
 
-  if (!micInterimEl) {
-    micInterimEl = document.createElement("div");
-    micInterimEl.className = "mb-2";
-    liveTranscript.prepend(micInterimEl);
-    micRenderedWords = 0;
+  // Always create/update the interim timeline entry so render is consistent across browsers.
+  const entry = ensureInterimEntry(source);
+  entry.t = Date.now();
+
+  // What the user already saw on screen (do not rewind).
+  const shownWords = wordsOf(entry.text || "");
+
+  // Build a monotonic target:
+  // - If Chrome/Edge sends a shorter/mutated interim, we KEEP what was already shown,
+  //   and only append truly new words.
+  let combined = newWords;
+
+  if (shownWords.length) {
+    // If newWords starts with shownWords, use it as-is.
+    let prefixOk = true;
+    const min = Math.min(shownWords.length, newWords.length);
+    for (let i = 0; i < min; i++) {
+      if (shownWords[i] !== newWords[i]) { prefixOk = false; break; }
+    }
+
+    if (prefixOk && newWords.length >= shownWords.length) {
+      combined = newWords;
+    } else {
+      // Try to stitch by overlap: last K words of shown == first K words of new
+      let best = 0;
+      const maxCheck = Math.min(10, shownWords.length, newWords.length);
+      for (let k = maxCheck; k >= 3; k--) {
+        let ok = true;
+        for (let i = 0; i < k; i++) {
+          if (shownWords[shownWords.length - k + i] !== newWords[i]) { ok = false; break; }
+        }
+        if (ok) { best = k; break; }
+      }
+      const append = best ? newWords.slice(best) : newWords;
+      combined = shownWords.concat(append);
+    }
   }
 
-  for (let i = micRenderedWords; i < words.length; i++) {
-    micInterimEl.textContent +=
-      (micInterimEl.textContent ? " " : "") + words[i];
+  st.targetWords = combined;
+
+  // Never reset shownCount back to 0 (this was causing the “disappear + reprint” behavior).
+  st.shownCount = Math.min(
+    Math.max(st.shownCount || 0, shownWords.length),
+    st.targetWords.length
+  );
+
+  if (!st.timer) {
+    st.timer = setInterval(() => {
+      if (!isRunning) return;
+
+      const remaining = st.targetWords.length - st.shownCount;
+      if (remaining <= 0) return;
+
+      const take = Math.min(WORDS_PER_TICK, remaining);
+      st.shownCount += take;
+
+      entry.text = st.targetWords.slice(0, st.shownCount).join(" ");
+      entry.t = Date.now();
+      updateTranscript();
+    }, WORD_RENDER_MS);
   }
 
-  micRenderedWords = words.length;
+  updateTranscript();
 }
 
 function commitInterimAsFinal(source, finalText) {
-  if (source !== "mic") return false;
-
+  const now = Date.now();
   const cleaned = normalize(finalText);
-  if (!cleaned || !micInterimEl) return false;
 
-  micInterimEl.textContent = cleaned;
-  micInterimEl = null;
-  micRenderedWords = 0;
+  stopInterimRenderer(source);
 
+  const entry = source === "sys" ? sysInterimEntry : micInterimEntry;
+  if (!entry) return false;
+
+  if (cleaned) entry.text = cleaned;
+  entry.t = now;
+
+  if (source === "sys") sysInterimEntry = null;
+  else micInterimEntry = null;
+
+  lastSpeechAt = now;
+  updateTranscript();
   return true;
 }
 
