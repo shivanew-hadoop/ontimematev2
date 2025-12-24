@@ -370,38 +370,33 @@ function setInterimTarget(source, text) {
   // What the user already saw on screen (do not rewind).
   const shownWords = wordsOf(entry.text || "");
 
-  // Build a monotonic target:
-  // - If Chrome/Edge sends a shorter/mutated interim, we KEEP what was already shown,
-  //   and only append truly new words.
-  let combined = newWords;
+  // Append-only / monotonic strategy:
+  // - If the hypothesis SHRINKS, ignore (no rewind).
+  // - If the hypothesis MUTATES earlier than the last few words, ignore (prevents duplicate spam).
+  // - Otherwise, append only truly new words beyond what is already shown.
+  const ALLOW_TAIL_MISMATCH = 3;
 
-  if (shownWords.length) {
-    // If newWords starts with shownWords, use it as-is.
-    let prefixOk = true;
+  if (!shownWords.length) {
+    st.targetWords = newWords;
+  } else {
+    // common prefix length between what we showed and the new hypothesis
+    let prefix = 0;
     const min = Math.min(shownWords.length, newWords.length);
-    for (let i = 0; i < min; i++) {
-      if (shownWords[i] !== newWords[i]) { prefixOk = false; break; }
-    }
+    while (prefix < min && shownWords[prefix] === newWords[prefix]) prefix++;
 
-    if (prefixOk && newWords.length >= shownWords.length) {
-      combined = newWords;
+    const mismatchTooEarly = prefix < Math.max(0, shownWords.length - ALLOW_TAIL_MISMATCH);
+
+    if (mismatchTooEarly) {
+      // Do not stitch a mutated hypothesis; keep what user already saw.
+      st.targetWords = shownWords;
+    } else if (newWords.length <= shownWords.length) {
+      // No rewind.
+      st.targetWords = shownWords;
     } else {
-      // Try to stitch by overlap: last K words of shown == first K words of new
-      let best = 0;
-      const maxCheck = Math.min(10, shownWords.length, newWords.length);
-      for (let k = maxCheck; k >= 3; k--) {
-        let ok = true;
-        for (let i = 0; i < k; i++) {
-          if (shownWords[shownWords.length - k + i] !== newWords[i]) { ok = false; break; }
-        }
-        if (ok) { best = k; break; }
-      }
-      const append = best ? newWords.slice(best) : newWords;
-      combined = shownWords.concat(append);
+      // Extension: append only beyond already shown words.
+      st.targetWords = shownWords.concat(newWords.slice(shownWords.length));
     }
   }
-
-  st.targetWords = combined;
 
   // Never reset shownCount back to 0 (this was causing the “disappear + reprint” behavior).
   st.shownCount = Math.min(
@@ -657,8 +652,18 @@ function startMicFallbackSR() {
   };
 
   recognition.onerror = (e) => {
+    const err = String(e?.error || "unknown").toLowerCase();
+
+    // rotate language (keeps your original behavior)
     micLangIndex = (micLangIndex + 1) % MIC_LANGS.length;
-    setStatus(audioStatus, `Mic SR error: ${e?.error || "unknown"}. Retrying…`, "text-orange-600");
+    setStatus(audioStatus, `Mic SR error: ${err}. Retrying…`, "text-orange-600");
+
+    // Edge/Chrome sometimes throw persistent "network" errors; fall back to recorder in that case
+    if (err === "network" || err === "service-not-allowed" || err === "not-allowed") {
+      stopMicOnly();
+      enableMicRecorderFallback().catch(() => {});
+      return;
+    }
   };
 
   recognition.onend = () => {
@@ -674,9 +679,16 @@ function startMicFallbackSR() {
   if (micWatchdog) clearInterval(micWatchdog);
   micWatchdog = setInterval(() => {
     if (!isRunning) return;
+
+    // If SR is producing results, prefer it and stop recorder (your original behavior)
     if (micSrIsHealthy()) {
       if (micRecorder || micStream) stopMicRecorderOnly();
       return;
+    }
+
+    // If SR is not healthy (common in Edge: "network"), automatically fall back to recorder
+    if (!micRecorder && !micStream) {
+      enableMicRecorderFallback().catch(() => {});
     }
   }, 800);
 
