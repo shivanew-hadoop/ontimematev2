@@ -24,13 +24,16 @@ function fixSpacingOutsideCodeBlocks(text) {
 
 function renderMarkdown(md) {
   if (!md) return "";
-  const safe = escapeHtml(md);
-  return safe
-    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/\n{2,}/g, "<br><br>")
+  let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
+  safe = fixSpacingOutsideCodeBlocks(safe);
+  safe = escapeHtml(safe);
+  safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  safe = safe
+    .replace(/\r\n/g, "\n")
+    .replace(/\n\s*\n/g, "<br><br>")
     .replace(/\n/g, "<br>");
+  return safe.trim();
 }
-
 
 //--------------------------------------------------------------
 // DOM
@@ -180,11 +183,29 @@ const TRANSCRIBE_PROMPT =
 const MODE_INSTRUCTIONS = {
   general: "",
   interview: `
-Answer in TWO sections only:
-1) Quick Answer (Interview Style)
-2) Real-Time Project Example
-`.trim()
+OUTPUT FORMAT RULE:
+- Do NOT use HTML tags.
+- Use clean Markdown: headings + bullet lists only.
+- Answer in EXACTLY TWO SECTIONS in this order, with these exact headings:
 
+Quick Answer (Interview Style)
+- 4–6 crisp bullets
+- Direct, domain-specific, no fluff
+- No questions back to the user
+
+Real-Time Project Example
+- 2–4 crisp bullets
+- Each bullet must combine context + what you did + measurable outcome
+- Do NOT prefix bullets with labels like "Problem:", "Action:", "Result:", "Impact:" or "Q:"
+
+QUESTION HANDLING RULE:
+- If input is a keyword/fragment, internally expand it into a full interview question,
+  but do NOT print the rewritten question. Only print the answer in the two sections.
+`.trim(),
+  sales: `
+Respond in persuasive, value-driven style.
+Highlight benefits/outcomes.
+`.trim()
 };
 
 //--------------------------------------------------------------
@@ -206,6 +227,25 @@ function setStatus(el, text, cls = "") {
   el.textContent = text;
   el.className = cls;
 }
+
+function pickPrimaryQuestion(text) {
+  const t = String(text || "").trim();
+  if (!t) return "";
+  const lines = t.split(/\n+/).map(s => s.trim()).filter(Boolean);
+
+  // Prefer a line that looks like a question; otherwise first meaningful line.
+  let line = lines.find(l => l.includes("?")) || lines[0] || "";
+
+  // If it contains multiple sentences, keep the first sentence.
+  const m = line.match(/^(.+?[?.!])\s+/);
+  if (m) line = m[1];
+
+  // Hard cap to avoid sending noisy transcripts
+  if (line.length > 260) line = line.slice(0, 260);
+
+  return normalize(line);
+}
+
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
@@ -396,15 +436,15 @@ function isGenericProjectAsk(text) {
 
 // instant local “draft question”
 function buildDraftQuestion(base) {
-  if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
+  if (!base) return "Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
   if (isGenericProjectAsk(base)) {
-    return "Q: Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
+    return "Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
   }
   const kws = extractAnchorKeywords(base);
   if (kws.length) {
-    return `Q: Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
+    return `Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
   }
-  return `Q: Can you explain what you meant by "${base}" and how it maps to your real project work?`;
+  return `Can you explain what you meant by "${base}" and how it maps to your real project work?`;
 }
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
@@ -415,45 +455,32 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const priorQs = extractPriorQuestions();
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
+  // IMPORTANT:
+  // - We may internally "expand" fragments, but we must NOT print the rewritten question.
+  // - We want the output to be ONLY the two required sections (no "Q:", no Problem/Action/Result labels).
+
   return `
-You are generating ONE interview question from CURRENT_TRANSCRIPT and then answering it.
-
-STRICT GROUNDING RULES:
-- The question MUST be derived from CURRENT_TRANSCRIPT only.
-- Do NOT switch to unrelated topics unless CURRENT_TRANSCRIPT explicitly mentions them.
-- Ensure at least 2–4 ANCHOR_KEYWORDS appear in the question (if provided).
-
-If CURRENT_TRANSCRIPT is a generic "current project" ask:
-- Ask a deep project question using RESUME_TEXT (architecture, modules, APIs, data flow, challenges, impact).
-- Do NOT ask general methodology questions.
-
-ANCHOR_KEYWORDS: ${anchor.length ? anchor.join(", ") : "(none)"}
-Domain bias (hint): ${domainBias || "software engineering"}
-
-Previously asked questions/topics:
-${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
-
-RESUME_TEXT (optional):
-${resumeTextMem ? resumeTextMem.slice(0, 4500) : "(none)"}
-
 CURRENT_TRANSCRIPT:
 ${base}
 
-Output requirements:
-- Do NOT output the question.
-- Output EXACTLY two sections, in this order:
+ANCHOR_KEYWORDS (use if relevant): ${anchor.length ? anchor.join(", ") : "none"}
+PRIOR_QUESTIONS (avoid repeating): ${priorQs.length ? priorQs.join(" | ") : "none"}
+DOMAIN_BIAS: ${domainBias || "none"}
 
-Quick Answer (Interview Style)
-- 4–6 bullets
+TASK:
+- Identify the core technical intent in CURRENT_TRANSCRIPT and answer it.
+- Ignore filler/unrelated words.
+- If CURRENT_TRANSCRIPT is a fragment, internally expand it into a full interview question, but DO NOT print that question.
 
-Real-Time Project Example
-- 2–4 bullets
-- No labels like Problem/Action/Result.
-
-
+OUTPUT RULES (HARD):
+- Output EXACTLY TWO sections with these headings, in this order:
+  1) Quick Answer (Interview Style)
+  2) Real-Time Project Example
+- Bullet points only under each heading.
+- Do NOT output any extra heading, intro line, or "Q:" line.
+- Do NOT use labels like "Problem:", "Action:", "Result:" or similar prefixes inside bullets.
 `.trim();
 }
-
 //--------------------------------------------------------------
 // PROFILE
 //--------------------------------------------------------------
@@ -1687,9 +1714,11 @@ sendBtn.onclick = async () => {
   // If a response is streaming, STOP it and accept the new prompt immediately
   abortChatStreamOnly();
 
-  const manual = normalize(manualQuestion?.value || "");
-  const fresh = normalize(getFreshBlocksText());
-  const base = manual || fresh;
+  const manualRaw = String(manualQuestion?.value || "");
+  const freshRaw = getFreshBlocksText();
+  const baseRaw = manualRaw.trim() ? manualRaw : freshRaw;
+  const mode = modeSelect?.value || "interview";
+  const base = (mode === "interview") ? pickPrimaryQuestion(baseRaw) : normalize(baseRaw);
   if (!base) return;
 
   blockMicUntil = Date.now() + 700;
@@ -1704,11 +1733,10 @@ sendBtn.onclick = async () => {
 
   // Instant feedback
   const draftQ = buildDraftQuestion(base);
-  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
+  responseBox.innerHTML = renderMarkdown(`**Generating answer…**\n\n_${draftQ}_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
-  const mode = modeSelect?.value || "interview";
-  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
+  const promptToSend = base;
 
   await startChatStreaming(promptToSend, base);
 };

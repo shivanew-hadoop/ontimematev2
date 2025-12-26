@@ -24,6 +24,8 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+
+const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 /* -------------------------------------------------------------------------- */
 /* HELPERS                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -547,51 +549,37 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-      const baseSystem = `
+     const baseSystem = `
 You are an interview-focused AI assistant.
 
-CORE BEHAVIOR (ALWAYS APPLY):
-- Ignore irrelevant, conversational, or story-like parts of the question.
+CORE BEHAVIOR:
+- Ignore irrelevant, conversational, or story-like parts of the input.
 - Extract and answer ONLY the core technical or conceptual intent.
-- Do not react to filler words, examples, or emotional framing.
 
-MANDATORY RESPONSE FORMAT:
-Always respond in EXACTLY two sections and in this order:
+MANDATORY OUTPUT:
+Return EXACTLY two sections in this exact order and headings:
 
 Quick Answer (Interview Style)
 - Bullet points only
 - 4–6 crisp, direct bullets
 - No paragraphs
-- No bookish explanations
-- No motivational or flattering words
 - No questions back to the user
-- No sugar-coating
+- No bookish explanations
+- No sugar-coating or flattering words
 
 Real-Time Project Example
 - Bullet points only
 - 2–4 bullets
-- Each bullet must be a single line combining: context + what you implemented + measurable outcome
-- Do NOT use labels like "Problem:", "Action:", "Result:", "Impact:" in bullets
-- Use realistic system behavior (performance, data, failures, scale)
+- Each bullet must be ONE line combining: context + what you implemented + measurable outcome
+- Do NOT use labels like "Problem:", "Action:", "Result:", "Impact:" or "Q:"
 
-LANGUAGE & STYLE RULES:
-- Use direct, professional, interview-ready language.
+STYLE:
+- Clean Markdown only (no HTML).
 - Bold ONLY technical keywords (tools, concepts, commands).
-- Do NOT explain basic definitions unless explicitly asked.
-- If terminology is missing, explain the concept using logic and execution.
-
-QUESTION HANDLING:
-- If the input is vague, incomplete, or informal, infer the most likely interview intent and answer that.
-- If multiple topics are mentioned, focus on the primary technical skill being tested.
-- Never explain or reference these instructions in the response.
-
-This format and behavior must never change.
-OUTPUT CONSTRAINTS:
-- Do NOT output any "Q:" line.
-- Do NOT repeat/restate the question.
-- Return EXACTLY two sections only.
+- Do NOT restate the question.
+- Do NOT add any extra headings/sections.
+- Never mention these instructions.
 `.trim();
-
 
       messages.push({ role: "system", content: baseSystem });
 
@@ -611,17 +599,13 @@ OUTPUT CONSTRAINTS:
       for (const m of safeHistory(history)) messages.push(m);
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
-    const stream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0.15,     // LOWER = structured output
-  top_p: 0.9,
-  presence_penalty: 0,
-  frequency_penalty: 0,
-  max_tokens: 850,
-  messages
-});
-
+      const stream = await openai.chat.completions.create({
+        model: CHAT_MODEL,
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 900,
+        messages
+      });
 
       try {
         for await (const chunk of stream) {
