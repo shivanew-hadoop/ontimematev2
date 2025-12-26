@@ -440,10 +440,17 @@ CURRENT_TRANSCRIPT:
 ${base}
 
 Output requirements:
-- First line must be: "Q: ..."
-- Then answer in two sections only:
-1) Quick Answer (Interview Style)
-2) Real-Time Project Example
+- Do NOT output the question.
+- Output EXACTLY two sections, and start immediately with:
+
+Quick Answer (Interview Style)
+- 4–6 bullets
+
+Real-Time Project Example
+- 2–4 bullets (Problem → Action → Result)
+
+- No extra headings, no "Q:", no preface text.
+
 `.trim();
 }
 
