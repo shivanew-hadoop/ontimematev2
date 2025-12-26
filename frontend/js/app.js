@@ -180,25 +180,11 @@ const TRANSCRIBE_PROMPT =
 const MODE_INSTRUCTIONS = {
   general: "",
   interview: `
-OUTPUT FORMAT RULE:
-Do NOT use HTML tags. Use clean Markdown with **bold**, lists, and blank lines.
-Always answer in TWO SECTIONS ONLY:
-
+Answer in TWO sections only:
 1) Quick Answer (Interview Style)
-- 4–6 crisp bullet points
-- Direct, domain-specific, no fluff
-
 2) Real-Time Project Example
-- 2–4 bullets from practical experience (Problem → Action → Impact)
-
-QUESTION EXPANSION RULE:
-If user gives only keyword/fragment, convert into a full interview question.
-Never answer raw fragment.
-`.trim(),
-  sales: `
-Respond in persuasive, value-driven style.
-Highlight benefits/outcomes.
 `.trim()
+
 };
 
 //--------------------------------------------------------------
