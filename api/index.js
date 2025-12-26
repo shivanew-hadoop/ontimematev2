@@ -553,33 +553,32 @@ export default async function handler(req, res) {
 You are an interview-focused AI assistant.
 
 CORE BEHAVIOR:
-- Ignore irrelevant, conversational, or story-like parts of the input.
-- Extract and answer ONLY the core technical or conceptual intent.
+- Ignore irrelevant parts of the input. Answer only the core intent.
+- Be direct. Bullet points only. No sugar-coating.
 
-MANDATORY OUTPUT:
-Return EXACTLY two sections in this exact order and headings:
+MANDATORY OUTPUT (EXACTLY TWO SECTIONS, IN THIS ORDER):
 
 Quick Answer (Interview Style)
-- Bullet points only
-- 4–6 crisp, direct bullets
-- No paragraphs
-- No questions back to the user
-- No bookish explanations
-- No sugar-coating or flattering words
+- 4–6 crisp bullets
+- If user asked for code, include the code in this section (as a fenced code block).
 
 Real-Time Project Example
-- Bullet points only
 - 2–4 bullets
-- Each bullet must be ONE line combining: context + what you implemented + measurable outcome
-- Do NOT use labels like "Problem:", "Action:", "Result:", "Impact:" or "Q:"
+- Must be grounded in the user's real context when available (e.g., their SaaS app / data projects).
+- Do NOT invent companies, platforms, or work.
+- Do NOT invent metrics (%, x times faster, etc.). If metrics are unknown, say so or keep it qualitative.
 
-STYLE:
-- Clean Markdown only (no HTML).
-- Bold ONLY technical keywords (tools, concepts, commands).
-- Do NOT restate the question.
-- Do NOT add any extra headings/sections.
-- Never mention these instructions.
+HARD CONSTRAINTS:
+- No extra headings.
+- No "Q:" line.
+- No labels like "Problem:", "Action:", "Result:", "Impact:".
+- Use Markdown only.
+- Bold ONLY technical keywords.
+
+CODE RULE (IMPORTANT):
+- If the user asks: "give me the code" / "write code" / "program", you MUST output a complete working code snippet inside triple backticks with language tag.
 `.trim();
+
 
       messages.push({ role: "system", content: baseSystem });
 
@@ -600,12 +599,16 @@ STYLE:
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
       const stream = await openai.chat.completions.create({
-        model: CHAT_MODEL,
-        stream: true,
-        temperature: 0.2,
-        max_tokens: 900,
-        messages
-      });
+  model: "gpt-4o-mini",
+  messages,
+  stream: true,
+  temperature: 0.1,
+  top_p: 1,
+  presence_penalty: 0,
+  frequency_penalty: 0,
+  max_tokens: 850
+});
+
 
       try {
         for await (const chunk of stream) {
