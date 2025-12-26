@@ -570,8 +570,8 @@ Quick Answer (Interview Style)
 Real-Time Project Example
 - Bullet points only
 - 2–4 bullets
-- Practical, implementation-level examples
-- Follow: Problem → Action → Result
+- Each bullet must be a single line combining: context + what you implemented + measurable outcome
+- Do NOT use labels like "Problem:", "Action:", "Result:", "Impact:" in bullets
 - Use realistic system behavior (performance, data, failures, scale)
 
 LANGUAGE & STYLE RULES:
@@ -586,6 +586,10 @@ QUESTION HANDLING:
 - Never explain or reference these instructions in the response.
 
 This format and behavior must never change.
+OUTPUT CONSTRAINTS:
+- Do NOT output any "Q:" line.
+- Do NOT repeat/restate the question.
+- Return EXACTLY two sections only.
 `.trim();
 
 

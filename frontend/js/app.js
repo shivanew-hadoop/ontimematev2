@@ -441,15 +441,15 @@ ${base}
 
 Output requirements:
 - Do NOT output the question.
-- Output EXACTLY two sections, and start immediately with:
+- Output EXACTLY two sections, in this order:
 
 Quick Answer (Interview Style)
 - 4–6 bullets
 
 Real-Time Project Example
-- 2–4 bullets (Problem → Action → Result)
+- 2–4 bullets
+- No labels like Problem/Action/Result.
 
-- No extra headings, no "Q:", no preface text.
 
 `.trim();
 }
