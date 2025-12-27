@@ -204,9 +204,11 @@ let sessionStartedAt = null;
 //------------------------
 let micMuted = true; // default muted
 
-// MIC DISABLE SWITCH (force system-audio-only)
-// Set to true to fully disable mic capture + mic transcription pipelines.
+// MIC DISABLE SWITCH (system-audio-only mode)
 const DISABLE_MIC_AUDIO = true;
+// When mic is disabled, auto-prompt for system audio sharing on Start (keeps UX simple)
+const AUTO_START_SYSTEM_AUDIO_WHEN_MIC_DISABLED = true;
+
 let resumeTextMem = "";
 
 // HARD CLEAR TOKEN (ignore late transcribe responses)
@@ -1017,7 +1019,6 @@ function stopMicOnly() {
 }
 
 function startMic() {
-  if (DISABLE_MIC_AUDIO) return false;
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     setStatus(audioStatus, "SpeechRecognition not supported in this browser.", "text-red-600");
@@ -1101,7 +1102,6 @@ function startMic() {
 }
 
 async function enableMicStreamingFallback() {
-  if (DISABLE_MIC_AUDIO) return;
   if (!isRunning) return;
   if (micAsr) return;
   if (micSrIsHealthy()) return;
@@ -1152,7 +1152,6 @@ function pickBestMimeType() {
 }
 
 async function enableMicRecorderFallback() {
-  if (DISABLE_MIC_AUDIO) return;
   if (!isRunning) return;
   if (micStream) return;
   if (micSrIsHealthy()) return; // CRITICAL: do not run fallback if SR is alive
@@ -1299,17 +1298,21 @@ function stopSystemAudioOnly() {
 }
 
 // Legacy (your existing) system audio recorder pipeline
-async function enableSystemAudioLegacy() {
+async function enableSystemAudioLegacy(existingStream) {
   if (!isRunning) return;
 
   stopSystemAudioOnly();
 
+  if (existingStream) {
+  sysStream = existingStream;
+} else {
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
   } catch {
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
+}
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
@@ -1329,17 +1332,21 @@ async function enableSystemAudioLegacy() {
 }
 
 // NEW: streaming ASR system audio.
-async function enableSystemAudioStreaming() {
+async function enableSystemAudioStreaming(existingStream) {
   if (!isRunning) return;
 
   stopSystemAudioOnly();
 
+  if (existingStream) {
+  sysStream = existingStream;
+} else {
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
   } catch {
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
+}
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
@@ -1367,12 +1374,12 @@ async function enableSystemAudioStreaming() {
 
 function showingFixHint() {
   // minimal hint without changing your UI layout
-  showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
+  showBanner("System audio: pick a Chrome Tab (recommended) and enable “Share audio” in the picker. Edge/Window share may not provide an audio track.");
 }
 
-async function enableSystemAudio() {
-  if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming();
-  return enableSystemAudioLegacy();
+async function enableSystemAudio(existingStream) {
+  if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming(existingStream);
+  return enableSystemAudioLegacy(existingStream);
 }
 
 function startSystemSegmentRecorder() {
@@ -1657,6 +1664,20 @@ resumeInput?.addEventListener("change", async () => {
 async function startAll() {
   hideBanner();
   if (isRunning) return;
+// If mic is disabled, request system audio share immediately while we still have a user gesture.
+// (Browsers often block getDisplayMedia if called after an await.)
+let preSysPromise = null;
+if (typeof DISABLE_MIC_AUDIO !== "undefined" && DISABLE_MIC_AUDIO &&
+    typeof AUTO_START_SYSTEM_AUDIO_WHEN_MIC_DISABLED !== "undefined" &&
+    AUTO_START_SYSTEM_AUDIO_WHEN_MIC_DISABLED) {
+  try {
+    if (navigator.mediaDevices?.getDisplayMedia) {
+      preSysPromise = navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    }
+  } catch {}
+}
+
+
 
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
@@ -1698,7 +1719,17 @@ async function startAll() {
   // Start mic pipeline only when unmuted
   await startMicPipelineIfAllowed();
 
-  startCreditTicking();
+  // If we already prompted for system audio at Start, attach it now.
+if (preSysPromise) {
+  try {
+    const preSysStream = await preSysPromise;
+    await enableSystemAudio(preSysStream);
+  } catch {
+    setStatus(audioStatus, "Share audio denied.", "text-red-600");
+  }
+}
+
+startCreditTicking();
 }
 
 function stopAll() {
@@ -1884,11 +1915,6 @@ clearQuestionsBtn && (clearQuestionsBtn.onclick = () => {
 
 // Mic mute toggle (mic only)
 micMuteBtn && (micMuteBtn.onclick = async () => {
-  if (DISABLE_MIC_AUDIO) {
-    setMicMuted(true);
-    setStatus(audioStatus, "Mic disabled. System audio only.", "text-gray-600");
-    return;
-  }
   const next = !micMuted;
   setMicMuted(next);
   if (micMuted) {
@@ -1918,9 +1944,6 @@ document.getElementById("logoutBtn").onclick = () => {
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
-
-  // Apply mic-disable UI state early
-  setMicMuted(true);
 
   if (!session.refresh_token) {
     localStorage.removeItem("session");
@@ -1967,26 +1990,22 @@ window.addEventListener("load", async () => {
 // MIC MUTE (MIC ONLY) — does not affect System Audio capture
 //--------------------------------------------------------------
 function setMicMuted(next) {
-  // Force mic off when DISABLE_MIC_AUDIO is enabled
-  if (DISABLE_MIC_AUDIO) {
-    micMuted = true;
-    if (micMuteBtn) {
-      micMuteBtn.textContent = "Mic: Disabled";
-      micMuteBtn.disabled = true;
-      micMuteBtn.classList.add("opacity-50");
-      micMuteBtn.classList.add("cursor-not-allowed");
-      micMuteBtn.classList.remove("bg-green-600");
-      micMuteBtn.classList.add("bg-gray-700");
-    }
-    return;
+  // If mic is disabled, force muted + lock UI.
+if (typeof DISABLE_MIC_AUDIO !== "undefined" && DISABLE_MIC_AUDIO) {
+  micMuted = true;
+  if (micMuteBtn) {
+    micMuteBtn.textContent = "Mic: Disabled";
+    micMuteBtn.disabled = true;
+    micMuteBtn.classList.add("opacity-50", "cursor-not-allowed");
+    micMuteBtn.classList.add("bg-gray-700");
+    micMuteBtn.classList.remove("bg-green-600");
   }
+  return;
+}
 
-  micMuted = !!next;
+micMuted = !!next;
   if (micMuteBtn) {
     micMuteBtn.textContent = micMuted ? "Mic: Muted" : "Mic: On";
-    micMuteBtn.disabled = false;
-    micMuteBtn.classList.remove("opacity-50");
-    micMuteBtn.classList.remove("cursor-not-allowed");
     micMuteBtn.classList.toggle("bg-gray-700", micMuted);
     micMuteBtn.classList.toggle("bg-green-600", !micMuted);
   }
@@ -1999,7 +2018,8 @@ function stopMicPipelineOnly() {
 }
 
 async function startMicPipelineIfAllowed() {
-  if (DISABLE_MIC_AUDIO) return;
+  if (typeof DISABLE_MIC_AUDIO !== "undefined" && DISABLE_MIC_AUDIO) return;
+
   if (!isRunning) return;
   if (micMuted) {
     setStatus(audioStatus, "Mic muted. System audio can continue.", "text-gray-600");
