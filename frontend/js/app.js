@@ -24,164 +24,83 @@ function fixSpacingOutsideCodeBlocks(text) {
 
 function renderMarkdown(md) {
   if (!md) return "";
-  let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
-  safe = fixSpacingOutsideCodeBlocks(safe);
-  safe = escapeHtml(safe);
-  safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  safe = safe
-    .replace(/\r\n/g, "\n")
-    .replace(/\n\s*\n/g, "<br><br>")
-    .replace(/\n/g, "<br>");
-  return safe.trim();
-}
+  const src = fixSpacingOutsideCodeBlocks(String(md).replace(/<br\s*\/?>(?!>)/gi, "\n"));
+  const lines = src.replace(/\r\n/g, "\n").split("\n");
 
-//--------------------------------------------------------------
-// STRICT ANSWER RENDERER (stable headings + bullets)
-// - Makes output readable even if the model streams bullets in one line
-//--------------------------------------------------------------
-function normalizeBulletNewlines(text) {
-  if (!text) return "";
-  let t = String(text);
+  let html = "";
+  let inCode = false;
+  let inList = false;
 
-  // If the model streams bullets on a single line (" ... - item - item"),
-  // force newlines before "- " patterns (outside code blocks).
-  const parts = t.split("```");
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 1) continue; // code block
-    parts[i] = parts[i].replace(/(\S)\s-\s(?=[A-Za-z0-9\*])/g, "$1\n- ");
-  }
-  return parts.join("```");
-}
-
-function inlineMdToHtml(s) {
-  let out = escapeHtml(s);
-  out = out.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  out = out.replace(/`([^`]+)`/g, "<code class=\"px-1 py-0.5 bg-gray-100 border rounded text-[12px]\">$1</code>");
-  return out;
-}
-
-function parseStrictAnswer(text) {
-  const t0 = normalizeBulletNewlines(String(text || "")).replace(/\r\n/g, "\n");
-
-  // Find Q line (optional)
-  let qLine = "";
-  const qMatch = t0.match(/^\s*(?:\*\*Q:\*\*|Q:)\s*(.+)\s*$/mi);
-  if (qMatch) qLine = qMatch[1].trim();
-
-  // Identify section anchors
-  const quickRe = /(Quick Answer\s*\(Interview Style\)|\*\*1\)\s*Quick Answer.*?\*\*)/i;
-  const projRe  = /(Real[- ]Time Project Example|\*\*2\)\s*Real[- ]Time Project Example.*?\*\*)/i;
-
-  const qIdx = t0.search(quickRe);
-  const pIdx = t0.search(projRe);
-
-  // If we can't find sections yet (streaming partial), fallback
-  if (qIdx < 0 && pIdx < 0) return { qLine, quick: [], proj: [], raw: t0, structured: false };
-
-  const beforeQuick = (qIdx >= 0) ? t0.slice(0, qIdx) : t0.slice(0, pIdx);
-  const afterQuick = (qIdx >= 0) ? t0.slice(qIdx) : "";
-  const afterProj = (pIdx >= 0) ? t0.slice(pIdx) : "";
-
-  // Extract quick section block
-  let quickBlock = "";
-  let projBlock = "";
-
-  if (qIdx >= 0 && pIdx >= 0) {
-    quickBlock = t0.slice(qIdx, pIdx);
-    projBlock = t0.slice(pIdx);
-  } else if (qIdx >= 0) {
-    quickBlock = t0.slice(qIdx);
-  } else if (pIdx >= 0) {
-    projBlock = t0.slice(pIdx);
-  }
-
-  const extractBullets = (block) => {
-    if (!block) return [];
-    const lines = block.split("\n").map(x => x.trim()).filter(Boolean);
-
-    // Drop the heading line itself
-    const filtered = lines.filter((ln, i) => {
-      const isHeading =
-        i === 0 &&
-        (/quick answer/i.test(ln) || /real[- ]time project example/i.test(ln) || /^\*\*\d\)/.test(ln));
-      return !isHeading;
-    });
-
-    // Keep bullet-looking lines
-    let bullets = filtered.filter(ln => /^[-•]\s+/.test(ln)).map(ln => ln.replace(/^[-•]\s+/, "").trim());
-
-    // If no leading "-", split by " - " pattern (single-line bullets)
-    if (bullets.length === 0 && filtered.length) {
-      const joined = filtered.join(" ");
-      bullets = joined
-        .split(/\s-\s+/)
-        .map(x => x.trim())
-        .filter(Boolean);
-    }
-
-    // Clean noisy prefixes but do NOT force "Problem/Action/Result" labels
-    bullets = bullets.map(b => b.replace(/^(Problem|Action|Result|Impact)\s*:\s*/i, "").trim());
-
-    return bullets.slice(0, 12);
+  const flushList = () => {
+    if (inList) { html += "</ul>"; inList = false; }
   };
 
-  const quick = extractBullets(quickBlock).slice(0, 6);
-  const proj = extractBullets(projBlock).slice(0, 4);
+  for (let rawLine of lines) {
+    const line = rawLine ?? "";
+    const trimmed = line.trim();
 
-  return { qLine, quick, proj, raw: t0, structured: true };
-}
-
-function renderStrictAnswerHtml(rawText) {
-  if (!rawText) return "";
-
-  // Handle fenced code blocks first (preserve formatting)
-  const parts = String(rawText).split("```");
-  let html = "";
-
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 1) {
-      html += `<pre class="bg-gray-100 border rounded p-2 overflow-x-auto text-xs whitespace-pre-wrap"><code>${escapeHtml(parts[i])}</code></pre>`;
+    // Code fences
+    if (trimmed.startsWith("```")) {
+      flushList();
+      inCode = !inCode;
+      html += inCode ? "<pre><code>" : "</code></pre>";
       continue;
     }
 
-    const parsed = parseStrictAnswer(parts[i]);
-    if (!parsed.structured) {
-      html += renderMarkdown(parts[i]);
+    if (inCode) {
+      html += escapeHtml(line) + "\n";
       continue;
     }
 
-    const qHtml = parsed.qLine
-      ? `<div class="mb-3 text-sm"><span class="font-semibold">Q:</span> ${inlineMdToHtml(parsed.qLine)}</div>`
-      : "";
+    if (!trimmed) {
+      flushList();
+      html += "<div class=\"tm-gap\"></div>";
+      continue;
+    }
 
-    const listHtml = (items) =>
-      items && items.length
-        ? `<ul class="list-disc pl-5 space-y-1">${items.map(it => `<li>${inlineMdToHtml(it)}</li>`).join("")}</ul>`
-        : `<div class="text-sm text-gray-500">…</div>`;
+    // Headings: # / ## / ###
+    if (/^#{1,3}\s+/.test(trimmed)) {
+      flushList();
+      const level = trimmed.startsWith("###") ? 3 : trimmed.startsWith("##") ? 2 : 1;
+      const text = escapeHtml(trimmed.replace(/^#{1,3}\s+/, "")).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+      html += `<h${level} class="tm-h${level}">${text}</h${level}>`;
+      continue;
+    }
 
-    html += `
-      <div class="space-y-4">
-        ${qHtml}
-        <div>
-          <div class="text-base font-semibold mb-1">1) Quick Answer (Interview Style)</div>
-          ${listHtml(parsed.quick)}
-        </div>
-        <div>
-          <div class="text-base font-semibold mb-1">2) Real-Time Project Example</div>
-          ${listHtml(parsed.proj)}
-        </div>
-      </div>
-    `;
+    // Q line: **Q:** ...
+    if (/^\*\*Q:\*\*/i.test(trimmed)) {
+      flushList();
+      const rest = trimmed.replace(/^\*\*Q:\*\*\s*/i, "");
+      const safe = escapeHtml(rest).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+      html += `<div class="tm-q"><b>Q:</b> ${safe}</div>`;
+      continue;
+    }
+
+    // Bullets
+    if (/^-\s+/.test(trimmed)) {
+      if (!inList) { flushList(); html += "<ul class=\"tm-ul\">"; inList = true; }
+      const item = trimmed.replace(/^-+\s+/, "");
+      const safe = escapeHtml(item).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+      html += `<li class="tm-li">${safe}</li>`;
+      continue;
+    }
+
+    // Section lines like "1) Quick Answer ..."
+    if (/^\d+\)\s+/.test(trimmed)) {
+      flushList();
+      const safe = escapeHtml(trimmed).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+      html += `<div class="tm-section">${safe}</div>`;
+      continue;
+    }
+
+    flushList();
+    const safe = escapeHtml(trimmed).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+    html += `<p class="tm-p">${safe}</p>`;
   }
 
-  return html.trim();
+  flushList();
+  return html;
 }
-
-// Use this everywhere for the AI panel
-function renderAnswerHtml(rawText) {
-  return renderStrictAnswerHtml(rawText);
-}
-
 //--------------------------------------------------------------
 // DOM
 //--------------------------------------------------------------
@@ -200,9 +119,9 @@ const stopBtn = document.getElementById("stopBtn");
 const sysBtn = document.getElementById("sysBtn");
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
-
 const micMuteBtn = document.getElementById("micMuteBtn");
-const questionHistoryBox = document.getElementById("questionHistory");
+const questionHistoryEl = document.getElementById("questionHistory");
+const clearQuestionsBtn = document.getElementById("clearQuestionsBtn");
 const audioStatus = document.getElementById("audioStatus");
 const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
@@ -214,12 +133,6 @@ const modeSelect = document.getElementById("modeSelect");
 //--------------------------------------------------------------
 let session = null;
 let isRunning = false;
-
-let micMuted = true;
-
-// Question history (right panel)
-let questionHistory = [];
-const QUESTION_HISTORY_KEY = "question_history_v1";
 
 let hiddenInstructions = "";
 
@@ -279,6 +192,17 @@ let chatStreamActive = false;
 let chatStreamSeq = 0;
 
 let chatHistory = [];
+//------------------------
+// Questions history (UI)
+//------------------------
+const MAX_QUESTION_LOG = 40;
+let questionLog = []; // { type: "header"|"q", text }
+let sessionStartedAt = null;
+
+//------------------------
+// Mic mute (mic only; system audio unaffected)
+//------------------------
+let micMuted = true; // default muted
 let resumeTextMem = "";
 
 // HARD CLEAR TOKEN (ignore late transcribe responses)
@@ -447,10 +371,10 @@ function getAllBlocksNewestFirst() {
     .filter(Boolean);
 }
 
-function getFreshBlocksText() {
+function getFreshBlocksText(includeInterim = false) {
   return timeline
     .slice(sentCursor)
-    .filter(x => x && x !== micInterimEntry)
+    .filter(x => x && (includeInterim || x !== micInterimEntry))
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -573,39 +497,21 @@ function isGenericProjectAsk(text) {
 
 // instant local “draft question”
 function buildDraftQuestion(base) {
-  const s = normalize(base || "");
-  if (!s) return "Project overview?";
+  const b = String(base || "").trim();
+  if (!b) return "Explain the topic and how you used it in a real project.";
 
-  // If already a question, keep it short
-  const qm = s.indexOf("?");
-  if (qm >= 0) return s.slice(0, qm + 1).trim();
-
-  // Common command-style prompts -> convert to short interview question
-  const lower = s.toLowerCase();
-
-  // reverse string examples
-  if (lower.includes("reverse") && lower.includes("string") && lower.includes("javascript")) {
-    return "How do you reverse a string in JavaScript?";
-  }
-  if (lower.includes("reverse") && lower.includes("string") && lower.includes("java")) {
-    return "How do you reverse a string in Java?";
+  if (isGenericProjectAsk(b)) {
+    return "Walk me through your current project: architecture, data flow, and impact.";
   }
 
-  // if-then statements
-  if (lower.startsWith("if ")) {
-    return (s.replace(/\.$/, "") + " — what does it imply?").trim();
+  const kws = extractAnchorKeywords(b);
+  if (kws.length) {
+    return `Explain ${kws[0]}: what it is, why it matters, and how you used it in a project.`;
   }
 
-  // Use anchor keywords to build a small question
-  const kws = extractAnchorKeywords(s);
-  if (kws.length >= 2) return `Explain ${kws[0]} vs ${kws[1]}?`;
-  if (kws.length === 1) return `What is ${kws[0]}?`;
-
-  // Fallback: shorten to 80 chars, add ?
-  const short = s.length > 80 ? (s.slice(0, 80).trim() + "…") : s;
-  return short.endsWith("?") ? short : (short.replace(/\.$/, "") + "?");
+  const oneLine = b.replace(/\s+/g, " ").slice(0, 140);
+  return oneLine.endsWith("?") ? oneLine : (oneLine + "?");
 }
-
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
@@ -1383,7 +1289,6 @@ function stopSystemAudioOnly() {
 
   sysErrCount = 0;
   sysErrBackoffUntil = 0;
-  updateCreditTicking();
 }
 
 // Legacy (your existing) system audio recorder pipeline
@@ -1414,7 +1319,6 @@ async function enableSystemAudioLegacy() {
   sysAbort = new AbortController();
   startSystemSegmentRecorder();
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
-  updateCreditTicking();
 }
 
 // NEW: streaming ASR system audio.
@@ -1452,7 +1356,6 @@ async function enableSystemAudioStreaming() {
     // fallback to your old chunking
     await enableSystemAudioLegacy();
   }
-  updateCreditTicking();
 }
 
 function showingFixHint() {
@@ -1586,7 +1489,7 @@ async function deductCredits(delta) {
 }
 
 function startCreditTicking() {
-  stopCreditTicking();
+  if (creditTimer) clearInterval(creditTimer);
   lastCreditAt = Date.now();
 
   creditTimer = setInterval(async () => {
@@ -1658,7 +1561,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
   let flushTimer = null;
   let sawFirstChunk = false;
 
-  const render = () => { responseBox.innerHTML = renderAnswerHtml(raw); };
+  const render = () => { responseBox.innerHTML = renderMarkdown(raw); };
 
   try {
     const res = await apiFetch("chat/send", {
@@ -1741,132 +1644,6 @@ resumeInput?.addEventListener("change", async () => {
   }
 });
 
-
-//--------------------------------------------------------------
-// MIC MUTE (mic only) + QUESTION HISTORY
-//--------------------------------------------------------------
-function loadQuestionHistory() {
-  try {
-    questionHistory = JSON.parse(localStorage.getItem(QUESTION_HISTORY_KEY) || "[]") || [];
-  } catch {
-    questionHistory = [];
-  }
-  renderQuestionHistory();
-}
-
-function saveQuestionHistory() {
-  try { localStorage.setItem(QUESTION_HISTORY_KEY, JSON.stringify(questionHistory.slice(0, 50))); } catch {}
-}
-
-function renderQuestionHistory() {
-  if (!questionHistoryBox) return;
-  if (!questionHistory.length) {
-    questionHistoryBox.innerHTML = `<div class="text-sm text-gray-500">No questions yet.</div>`;
-    return;
-  }
-
-  questionHistoryBox.innerHTML = `
-    <ol class="list-decimal pl-5 space-y-2 text-sm">
-      ${questionHistory.slice(0, 30).map(q => `<li>${inlineMdToHtml(q)}</li>`).join("")}
-    </ol>
-  `;
-}
-
-function addQuestionToHistory(q) {
-  const qq = normalize(q);
-  if (!qq) return;
-  questionHistory.unshift(qq);
-  // Dedup adjacent
-  questionHistory = questionHistory.filter((x, i, arr) => i === 0 || x !== arr[i - 1]);
-  saveQuestionHistory();
-  renderQuestionHistory();
-}
-
-function updateMicMuteUI() {
-  if (!micMuteBtn) return;
-  if (micMuted) {
-    micMuteBtn.textContent = "Mic: Muted";
-    micMuteBtn.classList.remove("bg-green-600");
-    micMuteBtn.classList.add("bg-gray-700");
-  } else {
-    micMuteBtn.textContent = "Mic: On";
-    micMuteBtn.classList.remove("bg-gray-700");
-    micMuteBtn.classList.add("bg-green-600");
-  }
-}
-
-function isMicCapturing() {
-  return !!recognition || !!micAsr || !!micRecorder || !!micTrack || !!micStream;
-}
-
-function isSysCapturing() {
-  return !!sysAsr || !!sysRecorder || !!sysTrack || !!sysStream;
-}
-
-function stopCreditTicking() {
-  if (creditTimer) {
-    clearInterval(creditTimer);
-    creditTimer = null;
-  }
-}
-
-
-function updateCreditTicking() {
-  // Only bill while actually capturing audio (mic on OR system on)
-  if (isRunning && (isMicCapturing() || isSysCapturing())) {
-    if (!creditTimer) startCreditTicking();
-  } else {
-    stopCreditTicking();
-  }
-}
-
-async function ensureMicPipelineActive() {
-  // SR mic preferred
-  const micOk = startMic();
-  if (!micOk) {
-    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-    if (USE_STREAMING_ASR_MIC_FALLBACK) {
-      await enableMicStreamingFallback().catch(() => {});
-    }
-    if (!micAsr && !micStream) {
-      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
-      await enableMicRecorderFallback().catch(() => {});
-    }
-  }
-
-  // If SR gives nothing in ~2s, try streaming ASR fallback, then recorder fallback
-  setTimeout(() => {
-    if (!isRunning || micMuted) return;
-    if (micSrIsHealthy()) return;
-
-    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
-      enableMicStreamingFallback().catch(() => {});
-      return;
-    }
-    if (!micStream) enableMicRecorderFallback().catch(() => {});
-  }, 2000);
-}
-
-function setMicMuted(nextMuted) {
-  micMuted = !!nextMuted;
-  updateMicMuteUI();
-
-  if (micMuted) {
-    // Stop ONLY mic pipelines (do not touch system audio)
-    stopMicOnly();
-    stopMicRecorderOnly();
-    stopAsrSession("mic");
-    setStatus(audioStatus, isRunning ? "Mic muted (system audio can still run)." : "Stopped", "text-orange-600");
-  } else {
-    if (isRunning) {
-      setStatus(audioStatus, "Listening…", "text-green-600");
-      ensureMicPipelineActive().catch(() => {});
-    }
-  }
-
-  updateCreditTicking();
-}
-
 //--------------------------------------------------------------
 // START / STOP
 //--------------------------------------------------------------
@@ -1895,6 +1672,8 @@ async function startAll() {
 
   updateTranscript();
 
+  startNewQuestionSession();
+
   isRunning = true;
 
   startBtn.disabled = true;
@@ -1906,17 +1685,13 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  
-// Mic capture is controlled by micMuteBtn (default muted)
-updateMicMuteUI();
+  // Initialize mic mute state (mic only; system audio unaffected)
+  setMicMuted(true);
 
-if (!micMuted) {
-  await ensureMicPipelineActive().catch(() => {});
-} else {
-  setStatus(audioStatus, "Mic muted. Click Mic: Muted to unmute.", "text-orange-600");
-}
+  // Start mic pipeline only when unmuted
+  await startMicPipelineIfAllowed();
 
-updateCreditTicking();
+  startCreditTicking();
 }
 
 function stopAll() {
@@ -1930,7 +1705,7 @@ function stopAll() {
   stopAsrSession("mic");
   stopAsrSession("sys");
 
-  stopCreditTicking();
+  if (creditTimer) clearInterval(creditTimer);
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
@@ -1979,6 +1754,73 @@ function hardClearTranscript() {
 }
 
 //--------------------------------------------------------------
+// QUESTIONS PANEL HELPERS (IST dd-mm-yyyy hh:mm)
+//--------------------------------------------------------------
+function formatIstDateTime(d = new Date()) {
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Asia/Kolkata",
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(d);
+
+  const get = (t) => (parts.find(p => p.type === t)?.value || "");
+  return `${get("day")}-${get("month")}-${get("year")} ${get("hour")}:${get("minute")}`;
+}
+
+function startNewQuestionSession() {
+  sessionStartedAt = new Date();
+  questionLog = [{ type: "header", text: `Session started: ${formatIstDateTime(sessionStartedAt)}` }];
+  renderQuestionHistory();
+}
+
+function shortenQuestionForList(q) {
+  const s = String(q || "").replace(/^\*\*Q:\*\*\s*/i, "").replace(/^Q:\s*/i, "").trim();
+  const cleaned = s.replace(/\s+/g, " ");
+  return cleaned.length > 90 ? (cleaned.slice(0, 87) + "…") : cleaned;
+}
+
+function addQuestionToHistory(q) {
+  if (!questionHistoryEl) return;
+  questionLog.push({ type: "q", text: shortenQuestionForList(q) });
+
+  const header = questionLog.find(x => x.type === "header");
+  const qs = questionLog.filter(x => x.type === "q").slice(-MAX_QUESTION_LOG);
+  questionLog = header ? [header, ...qs] : qs;
+
+  renderQuestionHistory();
+}
+
+function clearQuestionHistory() {
+  if (!questionHistoryEl) return;
+  questionLog = sessionStartedAt
+    ? [{ type: "header", text: `Session started: ${formatIstDateTime(sessionStartedAt)}` }]
+    : [];
+  renderQuestionHistory();
+}
+
+function renderQuestionHistory() {
+  if (!questionHistoryEl) return;
+
+  if (!questionLog.length) {
+    questionHistoryEl.innerHTML = `<div class="text-xs text-gray-500">No questions yet.</div>`;
+    return;
+  }
+
+  let html = "";
+  for (const row of questionLog) {
+    if (row.type === "header") {
+      html += `<div class="text-[11px] text-gray-600 mb-2">${escapeHtml(row.text)}</div>`;
+    } else {
+      html += `<div class="text-sm mb-2">• ${escapeHtml(row.text)}</div>`;
+    }
+  }
+  questionHistoryEl.innerHTML = html;
+}
+//--------------------------------------------------------------
 // SEND / CLEAR / RESET
 //--------------------------------------------------------------
 sendBtn.onclick = async () => {
@@ -2005,7 +1847,7 @@ sendBtn.onclick = async () => {
   // Instant feedback
   const draftQ = buildDraftQuestion(base);
   addQuestionToHistory(draftQ);
-  responseBox.innerHTML = renderAnswerHtml(`**Generating answer…**\n\n_${draftQ}_`);
+  responseBox.innerHTML = renderMarkdown(`**Generating answer…**\n\n_${draftQ}_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -2027,7 +1869,24 @@ resetBtn.onclick = async () => {
   responseBox.innerHTML = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-};
+};// Questions: clear
+clearQuestionsBtn && (clearQuestionsBtn.onclick = () => {
+  clearQuestionHistory();
+  setStatus(sendStatus, "Questions cleared", "text-green-600");
+});
+
+// Mic mute toggle (mic only)
+micMuteBtn && (micMuteBtn.onclick = async () => {
+  const next = !micMuted;
+  setMicMuted(next);
+  if (micMuted) {
+    stopMicPipelineOnly();
+    setStatus(audioStatus, "Mic muted. System audio can continue.", "text-gray-600");
+  } else {
+    await startMicPipelineIfAllowed();
+  }
+});
+
 
 //--------------------------------------------------------------
 // LOGOUT
@@ -2078,9 +1937,6 @@ window.addEventListener("load", async () => {
 
   updateTranscript();
 
-  loadQuestionHistory();
-  setMicMuted(true);
-
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
@@ -2093,23 +1949,47 @@ window.addEventListener("load", async () => {
 });
 
 //--------------------------------------------------------------
+// MIC MUTE (MIC ONLY) — does not affect System Audio capture
+//--------------------------------------------------------------
+function setMicMuted(next) {
+  micMuted = !!next;
+  if (micMuteBtn) {
+    micMuteBtn.textContent = micMuted ? "Mic: Muted" : "Mic: On";
+    micMuteBtn.classList.toggle("bg-gray-700", micMuted);
+    micMuteBtn.classList.toggle("bg-green-600", !micMuted);
+  }
+}
+
+function stopMicPipelineOnly() {
+  stopMicOnly();
+  stopMicRecorderOnly();
+  if (micAsr) stopAsrSession("mic");
+}
+
+async function startMicPipelineIfAllowed() {
+  if (!isRunning) return;
+  if (micMuted) {
+    setStatus(audioStatus, "Mic muted. System audio can continue.", "text-gray-600");
+    return;
+  }
+
+  const micOk = startMic();
+  if (!micOk) {
+    if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
+    if (!micAsr && !micStream) await enableMicRecorderFallback().catch(() => {});
+  }
+
+  setTimeout(() => {
+    if (!isRunning || micMuted) return;
+    if (micSrIsHealthy()) return;
+    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
+      enableMicStreamingFallback().catch(() => {});
+    }
+  }, 2200);
+}
+//--------------------------------------------------------------
 // BUTTONS
 //--------------------------------------------------------------
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 sysBtn.onclick = enableSystemAudio;
-
-if (micMuteBtn) micMuteBtn.onclick = async () => {
-  // Toggle mic only. If stopped and user unmutes, auto-start the session.
-  if (micMuted) {
-    micMuted = false;
-    updateMicMuteUI();
-    if (!isRunning) {
-      await startAll();
-    } else {
-      setMicMuted(false);
-    }
-  } else {
-    setMicMuted(true);
-  }
-};
