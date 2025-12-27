@@ -9,7 +9,7 @@
   <style>
     body { background: #f7f7f7; }
 
-    /* AI response */
+    /* AI response (IMPORTANT: allow HTML flow, not preformatted) */
     #responseBox{
       flex: 1 1 0%;
       min-height: 0;
@@ -19,7 +19,29 @@
       padding: 14px;
       font-size: 14px;
       line-height: 1.55;
+      white-space: normal;          /* key fix */
+    }
+    /* Tight, ChatGPT-like spacing */
+    #responseBox .tm-h{
+      font-weight: 700;
+      font-size: 16px;
+      margin: 0 0 6px 0;
+    }
+    #responseBox .tm-sub{
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      color: #374151;
+    }
+    #responseBox ul{
+      margin: 0 0 12px 0;
+      padding-left: 18px;
+    }
+    #responseBox li{
+      margin: 2px 0;
+    }
+    #responseBox pre{
       white-space: pre-wrap;
+      overflow-x: auto;
     }
 
     /* Transcript */
@@ -49,7 +71,7 @@
       padding: 12px;
       font-size: 14px;
       line-height: 1.45;
-      white-space: pre-wrap;
+      white-space: normal;
     }
   </style>
 </head>
@@ -58,7 +80,6 @@
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
   <!-- App shell -->
-  <!-- Mobile: scrollable page. Desktop: fixed height with inner panel scrolling -->
   <div class="flex flex-col min-h-screen lg:h-screen overflow-x-hidden lg:overflow-hidden">
 
     <!-- TOP BAR -->
@@ -72,24 +93,20 @@
     </div>
 
     <!-- CONTENT -->
-    <!-- Mobile: scroll the whole content. Desktop: fixed grid height -->
     <div class="flex-1 overflow-y-auto lg:overflow-hidden p-4">
       <!-- 30/40/30 = 3/4/3 out of 10 columns -->
       <div class="grid grid-cols-1 lg:grid-cols-10 gap-4 h-auto lg:h-full min-h-0">
 
-        <!-- LEFT PANEL (30%) -->
+        <!-- LEFT (30%) -->
         <section class="bg-white border rounded p-4 flex flex-col min-h-[520px] lg:min-h-0 lg:col-span-3 min-h-0">
-          <!-- Transcript header -->
           <div class="flex items-center justify-between">
             <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
             <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
           </div>
 
-          <!-- Transcript box -->
           <div class="mt-3 flex flex-col flex-1 min-h-0 gap-3">
             <div id="liveTranscript" class="flex-1 min-h-[220px] lg:min-h-0 overflow-y-auto"></div>
 
-            <!-- Refine question -->
             <div>
               <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
               <input id="manualQuestion"
@@ -144,16 +161,15 @@
           </div>
         </section>
 
-        <!-- MIDDLE PANEL (40%) -->
+        <!-- MIDDLE (40%) -->
         <section class="bg-white border rounded p-4 flex flex-col min-h-[520px] lg:min-h-0 lg:col-span-4 min-h-0">
           <div class="flex items-center justify-between mb-2">
             <h3 class="text-lg font-semibold">AI Response</h3>
           </div>
-
           <div id="responseBox" class="rounded flex-1 min-h-[240px] lg:min-h-0 overflow-y-auto"></div>
         </section>
 
-        <!-- RIGHT PANEL (30%) -->
+        <!-- RIGHT (30%) -->
         <section class="bg-white border rounded p-4 flex flex-col min-h-[420px] lg:min-h-0 lg:col-span-3 min-h-0">
           <div class="flex items-center justify-between mb-2">
             <h3 class="text-lg font-semibold">Questions Asked</h3>
@@ -162,7 +178,7 @@
           <div id="questionHistory" class="flex-1 min-h-[200px] lg:min-h-0 overflow-y-auto"></div>
 
           <div class="text-[11px] text-gray-500 mt-2">
-            Tip: Each click on Send adds the expanded question here.
+            Tip: Each click on Send adds a short question here.
           </div>
 
           <button id="clearQuestionsBtn" class="mt-3 px-3 py-2 bg-gray-700 text-white text-sm rounded">

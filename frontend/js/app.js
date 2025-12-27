@@ -573,16 +573,39 @@ function isGenericProjectAsk(text) {
 
 // instant local “draft question”
 function buildDraftQuestion(base) {
-  if (!base) return "Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
-  if (isGenericProjectAsk(base)) {
-    return "Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
+  const s = normalize(base || "");
+  if (!s) return "Project overview?";
+
+  // If already a question, keep it short
+  const qm = s.indexOf("?");
+  if (qm >= 0) return s.slice(0, qm + 1).trim();
+
+  // Common command-style prompts -> convert to short interview question
+  const lower = s.toLowerCase();
+
+  // reverse string examples
+  if (lower.includes("reverse") && lower.includes("string") && lower.includes("javascript")) {
+    return "How do you reverse a string in JavaScript?";
   }
-  const kws = extractAnchorKeywords(base);
-  if (kws.length) {
-    return `Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
+  if (lower.includes("reverse") && lower.includes("string") && lower.includes("java")) {
+    return "How do you reverse a string in Java?";
   }
-  return `Can you explain what you meant by "${base}" and how it maps to your real project work?`;
+
+  // if-then statements
+  if (lower.startsWith("if ")) {
+    return (s.replace(/\.$/, "") + " — what does it imply?").trim();
+  }
+
+  // Use anchor keywords to build a small question
+  const kws = extractAnchorKeywords(s);
+  if (kws.length >= 2) return `Explain ${kws[0]} vs ${kws[1]}?`;
+  if (kws.length === 1) return `What is ${kws[0]}?`;
+
+  // Fallback: shorten to 80 chars, add ?
+  const short = s.length > 80 ? (s.slice(0, 80).trim() + "…") : s;
+  return short.endsWith("?") ? short : (short.replace(/\.$/, "") + "?");
 }
+
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
@@ -1781,9 +1804,12 @@ function isSysCapturing() {
 }
 
 function stopCreditTicking() {
-  stopCreditTicking();
-  creditTimer = null;
+  if (creditTimer) {
+    clearInterval(creditTimer);
+    creditTimer = null;
+  }
 }
+
 
 function updateCreditTicking() {
   // Only bill while actually capturing audio (mic on OR system on)
