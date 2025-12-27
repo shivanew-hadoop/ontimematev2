@@ -172,6 +172,7 @@ let lastMicTail = "";
 
 // final-level dedupe across pipelines
 let lastFinalText = "";
+let pendingFinalOrder = 0;
 let lastFinalAt = 0;
 
 // Transcript blocks
@@ -245,10 +246,18 @@ const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
 const MIC_MAX_CONCURRENT = 2;
 
-const SYS_SEGMENT_MS = 2800;
+const SYS_SEGMENT_MS = 1200;  // faster legacy fallback cadence
 const SYS_MIN_BYTES = 6000;
 const SYS_MAX_CONCURRENT = 2;
 const SYS_TYPE_MS_PER_WORD = 18;
+
+// System streaming ASR tuning:
+// - Disable server VAD and commit audio manually for faster, incremental (word-by-word) deltas.
+//   (VAD often batches deltas until end-of-turn, which feels "3-4 seconds delayed".)
+const SYS_ASR_MANUAL_COMMIT = true;
+const SYS_ASR_COMMIT_EVERY_MS = 450;     // ~2-4 words update cadence
+const SYS_ASR_MIN_COMMIT_BYTES = 7000;   // don't commit tiny buffers (pcm16 @24k => ~48KB/sec)
+
 
 const SYS_ERR_MAX = 3;
 const SYS_ERR_BACKOFF_MS = 10000;
@@ -370,17 +379,35 @@ if (liveTranscript) {
 }
 
 function getAllBlocksNewestFirst() {
+  const sortNewest = (a, b) => {
+    const ao = Number(a?.order || 0);
+    const bo = Number(b?.order || 0);
+    if (bo !== ao) return bo - ao;
+    return (b.t || 0) - (a.t || 0);
+  };
+
   return timeline
     .slice()
-    .sort((a, b) => (b.t || 0) - (a.t || 0))
+    .sort(sortNewest)
     .map(x => String(x.text || "").trim())
     .filter(Boolean);
 }
 
-function getFreshBlocksText(includeInterim = false) {
-  return timeline
+function getFreshBlocksText(includeInterim = false, newestFirst = false) {
+  const sortNewest = (a, b) => {
+    const ao = Number(a?.order || 0);
+    const bo = Number(b?.order || 0);
+    if (bo !== ao) return bo - ao;
+    return (b.t || 0) - (a.t || 0);
+  };
+
+  const items = timeline
     .slice(sentCursor)
-    .filter(x => x && (includeInterim || x !== micInterimEntry))
+    .filter(x => x && (includeInterim || x !== micInterimEntry));
+
+  const ordered = newestFirst ? items.slice().sort(sortNewest) : items;
+
+  return ordered
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -421,11 +448,12 @@ function addFinalSpeech(txt) {
   const gap = now - (lastSpeechAt || 0);
 
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    timeline.push({ t: now, text: cleaned });
+    timeline.push({ t: now, text: cleaned, order: Number(pendingFinalOrder || 0) });
   } else {
     const last = timeline[timeline.length - 1];
     last.text = normalize((last.text || "") + " " + cleaned);
     last.t = now;
+    last.order = Math.max(Number(last.order || 0), Number(pendingFinalOrder || 0));
   }
 
   lastSpeechAt = now;
@@ -756,6 +784,7 @@ function stopAsrSession(which) {
 
   try { s.ws?.close?.(); } catch {}
   try { s.sendTimer && clearInterval(s.sendTimer); } catch {}
+  try { s.commitTimer && clearInterval(s.commitTimer); } catch {}
   try { s.proc && (s.proc.onaudioprocess = null); } catch {}
 
   try { s.src && s.src.disconnect(); } catch {}
@@ -780,12 +809,13 @@ function asrUpsertDelta(which, itemId, deltaText) {
   if (!cur) return;
 
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur };
+    const entry = { t: now, text: cur, order: Number(s.itemOrder?.[itemId] || 0) };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
     s.itemEntry[itemId].text = cur;
     s.itemEntry[itemId].t = now;
+    s.itemEntry[itemId].order = Number(s.itemOrder?.[itemId] || s.itemEntry[itemId].order || 0);
   }
 
   // keep UI consistent with your pin-to-top behavior
@@ -810,10 +840,12 @@ function asrFinalizeItem(which, itemId, transcript) {
   if (!final) return;
 
   // use your final pipeline to keep PAUSE_NEWLINE_MS + dedupe consistent
+  pendingFinalOrder = Number(s.itemOrder?.[itemId] || 0);
   addFinalSpeech(final);
+  pendingFinalOrder = 0;
 }
 
-function sendAsrConfig(ws) {
+function sendAsrConfig(ws, opts = {}) {
   // Try the "transcription_session.update" shape (speech-to-text guide) :contentReference[oaicite:7]{index=7}
   const cfgA = {
     type: "transcription_session.update",
@@ -823,7 +855,7 @@ function sendAsrConfig(ws) {
       prompt: TRANSCRIBE_PROMPT,
       language: "en"
     },
-    turn_detection: {
+    turn_detection: (opts && opts.manualCommit) ? null : {
       type: "server_vad",
       threshold: 0.5,
       prefix_padding_ms: 300,
@@ -835,7 +867,7 @@ function sendAsrConfig(ws) {
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
 
-function sendAsrConfigFallbackSessionUpdate(ws) {
+function sendAsrConfigFallbackSessionUpdate(ws, opts = {}) {
   // Fallback to "session.update" shape (realtime client events) :contentReference[oaicite:8]{index=8}
   const cfgB = {
     type: "session.update",
@@ -850,12 +882,12 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
             prompt: TRANSCRIBE_PROMPT
           },
           noise_reduction: { type: "far_field" },
-          turn_detection: {
-            type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 350
-          }
+          turn_detection: (opts && opts.manualCommit) ? null : {
+              type: "server_vad",
+              threshold: 0.5,
+              prefix_padding_ms: 300,
+              silence_duration_ms: 350
+            }
         }
       }
     }
@@ -864,7 +896,7 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
 
-async function startStreamingAsr(which, mediaStream) {
+async function startStreamingAsr(which, mediaStream, opts = {}) {
   if (!isRunning) return false;
 
   // stop any existing session
@@ -897,6 +929,11 @@ async function startStreamingAsr(which, mediaStream) {
     gain,
     queue,
     sendTimer: null,
+    commitTimer: null,
+    pendingBytes: 0,
+    lastCommitAt: 0,
+    commitSeq: 0,
+    itemOrder: {},
     itemText: {},
     itemEntry: {},
     lastItemId: null,
@@ -925,7 +962,7 @@ async function startStreamingAsr(which, mediaStream) {
 
   ws.onopen = () => {
     // Configure transcription session
-    sendAsrConfig(ws);
+    sendAsrConfig(ws, opts);
 
     // send loop
     state.sendTimer = setInterval(() => {
@@ -955,6 +992,8 @@ async function startStreamingAsr(which, mediaStream) {
         audio: base64FromBytes(merged)
       };
       try { ws.send(JSON.stringify(evt)); } catch {}
+      // Track buffered audio for manual commit pacing
+      state.pendingBytes = Number(state.pendingBytes || 0) + merged.length;
     }, ASR_SEND_EVERY_MS);
 
     setStatus(
@@ -962,6 +1001,31 @@ async function startStreamingAsr(which, mediaStream) {
       which === "sys" ? "System audio (streaming ASR) enabled." : "Mic (streaming ASR) enabled.",
       "text-green-600"
     );
+
+    // Manual commit mode: disable VAD and commit the buffer frequently so deltas stream out during speech.
+    // This avoids the common "everything prints only after I stop talking" behavior.
+    const manual = !!(opts && opts.manualCommit);
+    const commitEvery = Number(opts?.commitEveryMs || SYS_ASR_COMMIT_EVERY_MS);
+    const minBytes = Number(opts?.minCommitBytes || SYS_ASR_MIN_COMMIT_BYTES);
+
+    if (manual) {
+      state.lastCommitAt = Date.now();
+      state.commitTimer = setInterval(() => {
+        if (!isRunning) return;
+        if (ws.readyState !== 1) return;
+
+        // Commit only if we have enough audio since the last commit
+        if ((state.pendingBytes || 0) < minBytes) return;
+
+        const now = Date.now();
+        // Basic throttle
+        if (now - (state.lastCommitAt || 0) < Math.max(120, commitEvery - 40)) return;
+
+        try { ws.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
+        state.pendingBytes = 0;
+        state.lastCommitAt = now;
+      }, Math.max(180, commitEvery));
+    }
   };
 
   ws.onmessage = (msg) => {
@@ -969,12 +1033,21 @@ async function startStreamingAsr(which, mediaStream) {
     try { ev = JSON.parse(msg.data); } catch { return; }
     if (!ev?.type) return;
 
+    // Commit acknowledgements (ordering): track the item_id sequence, since completion events can arrive out of order.
+    if (ev.type === "input_audio_buffer.committed") {
+      const itemId = ev.item_id || ev?.item?.id || ev?.id;
+      if (itemId) {
+        state.commitSeq = (state.commitSeq || 0) + 1;
+        state.itemOrder[itemId] = state.commitSeq;
+      }
+      return;
+    }
     // If server says unknown config event, fallback to session.update
     if (ev.type === "error") {
       const m = String(ev?.error?.message || ev?.message || "");
       if (!state.sawConfigError && m.toLowerCase().includes("transcription_session.update")) {
         state.sawConfigError = true;
-        sendAsrConfigFallbackSessionUpdate(ws);
+        sendAsrConfigFallbackSessionUpdate(ws, opts);
       }
       return;
     }
@@ -1362,7 +1435,7 @@ async function enableSystemAudioStreaming(existingStream) {
   };
 
   try {
-    const ok = await startStreamingAsr("sys", sysStream);
+    const ok = await startStreamingAsr("sys", sysStream, { manualCommit: SYS_ASR_MANUAL_COMMIT, commitEveryMs: SYS_ASR_COMMIT_EVERY_MS, minCommitBytes: SYS_ASR_MIN_COMMIT_BYTES });
     if (!ok) throw new Error("ASR start failed");
   } catch (e) {
     console.error(e);
@@ -1868,7 +1941,7 @@ sendBtn.onclick = async () => {
   abortChatStreamOnly();
 
   const manual = normalize(manualQuestion?.value || "");
-  const fresh = normalize(getFreshBlocksText());
+  const fresh = normalize(getFreshBlocksText(false, true));
   const base = manual || fresh;
   if (!base) return;
 
