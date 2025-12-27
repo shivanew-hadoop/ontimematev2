@@ -16,13 +16,13 @@
       overflow-y: auto;
       background: #fffef5;
       border: 1px solid #ddd;
-      padding: 12px;
+      padding: 14px;
       font-size: 14px;
-      line-height: 1.45;
+      line-height: 1.55;
       white-space: pre-wrap;
     }
 
-    /* Edge-safe transcript sizing in flex */
+    /* Transcript */
     #liveTranscript{
       flex: 1 1 0%;
       min-height: 0;
@@ -37,6 +37,20 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
     }
+
+    /* Questions panel */
+    #questionHistory{
+      flex: 1 1 0%;
+      min-height: 0;
+      overflow-y: auto;
+      background: #ffffff;
+      border: 1px solid #ddd;
+      border-radius: 6px;
+      padding: 12px;
+      font-size: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
+    }
   </style>
 </head>
 
@@ -44,9 +58,10 @@
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
   <!-- App shell -->
-  <div class="flex flex-col h-screen overflow-hidden">
+  <!-- Mobile: scrollable page. Desktop: fixed height with inner panel scrolling -->
+  <div class="flex flex-col min-h-screen lg:h-screen overflow-x-hidden lg:overflow-hidden">
 
-    <!-- TOP BAR (User + Credits + Logout) -->
+    <!-- TOP BAR -->
     <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3 min-w-0">
         <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
@@ -56,83 +71,106 @@
       </div>
     </div>
 
-    <!-- CONTENT: stack on mobile, split on desktop -->
-    <div class="flex flex-col lg:flex-row flex-1 min-h-0 overflow-hidden">
+    <!-- CONTENT -->
+    <!-- Mobile: scroll the whole content. Desktop: fixed grid height -->
+    <div class="flex-1 overflow-y-auto lg:overflow-hidden p-4">
+      <!-- 30/40/30 = 3/4/3 out of 10 columns -->
+      <div class="grid grid-cols-1 lg:grid-cols-10 gap-4 h-auto lg:h-full min-h-0">
 
-      <!-- LEFT PANEL -->
-      <div class="lg:w-5/12 w-full bg-white border-r p-4 flex flex-col gap-4 min-h-0 overflow-y-auto">
-
-        <!-- Transcript area (bigger) -->
-        <div class="flex flex-col flex-1 min-h-0 gap-3">
+        <!-- LEFT PANEL (30%) -->
+        <section class="bg-white border rounded p-4 flex flex-col min-h-[520px] lg:min-h-0 lg:col-span-3 min-h-0">
+          <!-- Transcript header -->
           <div class="flex items-center justify-between">
             <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
             <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
           </div>
 
-          <div id="liveTranscript"></div>
+          <!-- Transcript box -->
+          <div class="mt-3 flex flex-col flex-1 min-h-0 gap-3">
+            <div id="liveTranscript" class="flex-1 min-h-[220px] lg:min-h-0 overflow-y-auto"></div>
 
-          <div>
-            <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
-            <input id="manualQuestion"
-                   class="w-full border p-2 text-sm bg-white rounded"
-                   placeholder="Optional manual refinement…" />
-          </div>
-
-          <!-- Send/Clear/Reset -->
-          <div>
-            <div class="grid grid-cols-3 gap-2">
-              <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Send</button>
-              <button id="clearBtn" class="px-3 py-2 bg-gray-600 text-white text-sm rounded">Clear</button>
-              <button id="resetBtn" class="px-3 py-2 bg-gray-900 text-white text-sm rounded">Reset</button>
+            <!-- Refine question -->
+            <div>
+              <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
+              <input id="manualQuestion"
+                     class="w-full border p-2 text-sm bg-white rounded"
+                     placeholder="Optional manual refinement…" />
             </div>
-            <div id="sendStatus" class="text-xs mt-1 text-gray-600"></div>
+
+            <!-- Send/Clear/Reset + Mic mute -->
+            <div>
+              <div class="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Send</button>
+                <button id="clearBtn" class="px-3 py-2 bg-gray-600 text-white text-sm rounded">Clear</button>
+                <button id="resetBtn" class="px-3 py-2 bg-gray-900 text-white text-sm rounded">Reset</button>
+                <button id="micMuteBtn" class="px-3 py-2 bg-gray-700 text-white text-sm rounded">Mic: Muted</button>
+              </div>
+              <div id="sendStatus" class="text-xs mt-1 text-gray-600"></div>
+            </div>
           </div>
-        </div>
 
-        <!-- Controls -->
-        <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Controls</h3>
-          <div class="grid grid-cols-3 gap-2">
-            <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
-            <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
-            <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
+          <!-- Controls -->
+          <div class="mt-4 shrink-0">
+            <h3 class="font-semibold mb-2">Controls</h3>
+            <div class="grid grid-cols-3 gap-2">
+              <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
+              <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
+              <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
+            </div>
+            <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
           </div>
-          <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
-        </div>
 
-        <!-- Mode -->
-        <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Mode</h3>
-          <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
-            <option value="interview" selected>Interview Mode</option>
-            <option value="sales">Sales Mode</option>
-            <option value="general">General</option>
-          </select>
-        </div>
+          <!-- Mode -->
+          <div class="mt-4 shrink-0">
+            <h3 class="font-semibold mb-2">Mode</h3>
+            <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
+              <option value="interview" selected>Interview Mode</option>
+              <option value="sales">Sales Mode</option>
+              <option value="general">General</option>
+            </select>
+          </div>
 
-        <!-- Hidden custom instructions -->
-        <div class="hidden">
-          <textarea id="instructionsBox"></textarea>
-          <div id="instrStatus"></div>
-        </div>
+          <!-- Hidden custom instructions -->
+          <div class="hidden">
+            <textarea id="instructionsBox"></textarea>
+            <div id="instrStatus"></div>
+          </div>
 
-        <!-- Resume -->
-        <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Resume Upload</h3>
-          <input type="file" id="resumeInput" class="text-sm">
-          <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
-        </div>
+          <!-- Resume -->
+          <div class="mt-4 shrink-0">
+            <h3 class="font-semibold mb-2">Resume Upload</h3>
+            <input type="file" id="resumeInput" class="text-sm">
+            <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
+          </div>
+        </section>
+
+        <!-- MIDDLE PANEL (40%) -->
+        <section class="bg-white border rounded p-4 flex flex-col min-h-[520px] lg:min-h-0 lg:col-span-4 min-h-0">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-lg font-semibold">AI Response</h3>
+          </div>
+
+          <div id="responseBox" class="rounded flex-1 min-h-[240px] lg:min-h-0 overflow-y-auto"></div>
+        </section>
+
+        <!-- RIGHT PANEL (30%) -->
+        <section class="bg-white border rounded p-4 flex flex-col min-h-[420px] lg:min-h-0 lg:col-span-3 min-h-0">
+          <div class="flex items-center justify-between mb-2">
+            <h3 class="text-lg font-semibold">Questions Asked</h3>
+          </div>
+
+          <div id="questionHistory" class="flex-1 min-h-[200px] lg:min-h-0 overflow-y-auto"></div>
+
+          <div class="text-[11px] text-gray-500 mt-2">
+            Tip: Each click on Send adds the expanded question here.
+          </div>
+
+          <button id="clearQuestionsBtn" class="mt-3 px-3 py-2 bg-gray-700 text-white text-sm rounded">
+            Clear Questions
+          </button>
+        </section>
 
       </div>
-
-      <!-- RIGHT PANEL -->
-      <div class="lg:w-7/12 w-full p-4 flex flex-col min-h-0">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="text-lg font-semibold">AI Response</h3>
-        </div>
-        <div id="responseBox"></div>
-      </div>
-
     </div>
   </div>
 
