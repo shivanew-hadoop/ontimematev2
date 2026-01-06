@@ -43,10 +43,8 @@
 <body>
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
-  <!-- App shell -->
   <div class="flex flex-col h-screen overflow-hidden">
 
-    <!-- TOP BAR (User + Credits + Logout) -->
     <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3 min-w-0">
         <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
@@ -56,13 +54,10 @@
       </div>
     </div>
 
-    <!-- CONTENT: stack on mobile, split on desktop -->
     <div class="flex flex-col lg:flex-row flex-1 min-h-0 overflow-hidden">
 
-      <!-- LEFT PANEL -->
       <div class="lg:w-5/12 w-full bg-white border-r p-4 flex flex-col gap-4 min-h-0 overflow-y-auto">
 
-        <!-- Transcript area (bigger) -->
         <div class="flex flex-col flex-1 min-h-0 gap-3">
           <div class="flex items-center justify-between">
             <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
@@ -78,7 +73,6 @@
                    placeholder="Optional manual refinement…" />
           </div>
 
-          <!-- Send/Clear/Reset -->
           <div>
             <div class="grid grid-cols-3 gap-2">
               <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Send</button>
@@ -89,26 +83,21 @@
           </div>
         </div>
 
-        <!-- Controls -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Controls</h3>
+
           <div class="grid grid-cols-3 gap-2">
             <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
 
-          <!-- NEW: Mic mute toggle -->
-          <div class="mt-2">
-            <button id="micMuteBtn" class="w-full px-3 py-2 bg-gray-700 text-white text-sm rounded">
-              Mic: ON
-            </button>
-          </div>
+          <!-- Mic mute (full-width, does not change existing grid behavior) -->
+          <button id="micMuteBtn" class="w-full mt-2 px-3 py-2 bg-gray-700 text-white text-sm rounded">Mic: ON</button>
 
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
 
-        <!-- Mode -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Mode</h3>
           <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
@@ -118,13 +107,11 @@
           </select>
         </div>
 
-        <!-- Hidden custom instructions -->
         <div class="hidden">
           <textarea id="instructionsBox"></textarea>
           <div id="instrStatus"></div>
         </div>
 
-        <!-- Resume -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Resume Upload</h3>
           <input type="file" id="resumeInput" class="text-sm">
@@ -133,7 +120,6 @@
 
       </div>
 
-      <!-- RIGHT PANEL -->
       <div class="lg:w-7/12 w-full p-4 flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-lg font-semibold">AI Response</h3>
