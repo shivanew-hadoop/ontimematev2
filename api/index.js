@@ -24,8 +24,6 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-
-const CHAT_MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 /* -------------------------------------------------------------------------- */
 /* HELPERS                                                                    */
 /* -------------------------------------------------------------------------- */
@@ -549,36 +547,20 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-     const baseSystem = `
-You are an interview-focused AI assistant.
+      const baseSystem = `
+You must ALWAYS answer using STRICT Markdown formatting and EXACT structure.
 
-CORE BEHAVIOR:
-- Ignore irrelevant parts of the input. Answer only the core intent.
-- Be direct. Bullet points only. No sugar-coating.
+**Q:** <expanded interview question>
 
-MANDATORY OUTPUT (EXACTLY TWO SECTIONS, IN THIS ORDER):
+**1) Quick Answer (Interview Style)**
+- 4–6 crisp bullet points
 
-Quick Answer (Interview Style)
-- 4–6 crisp bullets
-- If user asked for code, include the code in this section (as a fenced code block).
+**2) Real-Time Project Example**
+- 2–4 bullets (Problem → Action → Impact)
 
-Real-Time Project Example
-- 2–4 bullets
-- Must be grounded in the user's real context when available (e.g., their SaaS app / data projects).
-- Do NOT invent companies, platforms, or work.
-- Do NOT invent metrics (%, x times faster, etc.). If metrics are unknown, say so or keep it qualitative.
-
-HARD CONSTRAINTS:
-- No extra headings.
-- No "Q:" line.
-- No labels like "Problem:", "Action:", "Result:", "Impact:".
-- Use Markdown only.
-- Bold ONLY technical keywords.
-
-CODE RULE (IMPORTANT):
-- If the user asks: "give me the code" / "write code" / "program", you MUST output a complete working code snippet inside triple backticks with language tag.
+AUTO-BOLD RULE:
+Make **important technical terms bold** (only terms, not whole sentences).
 `.trim();
-
 
       messages.push({ role: "system", content: baseSystem });
 
@@ -599,16 +581,12 @@ CODE RULE (IMPORTANT):
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
       const stream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  messages,
-  stream: true,
-  temperature: 0.1,
-  top_p: 1,
-  presence_penalty: 0,
-  frequency_penalty: 0,
-  max_tokens: 850
-});
-
+        model: "gpt-4o-mini",
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 900,
+        messages
+      });
 
       try {
         for await (const chunk of stream) {
