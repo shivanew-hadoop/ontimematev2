@@ -65,8 +65,8 @@
         <!-- Transcript area (bigger) -->
         <div class="flex flex-col flex-1 min-h-0 gap-3">
           <div class="flex items-center justify-between">
-            <h3 class="font-semibold">Live Transcript (System Audio Only)</h3>
-            <span class="text-[11px] text-gray-500">Auto new line on 3s pause • Mic disabled</span>
+            <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
+            <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
           </div>
 
           <div id="liveTranscript"></div>
@@ -75,7 +75,7 @@
             <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
             <input id="manualQuestion"
                    class="w-full border p-2 text-sm bg-white rounded"
-                   placeholder="Optional refinement before sending to OpenAI…" />
+                   placeholder="Optional manual refinement…" />
           </div>
 
           <!-- Send/Clear/Reset -->
@@ -93,15 +93,10 @@
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Controls</h3>
           <div class="grid grid-cols-3 gap-2">
-            <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start (System Only)</button>
+            <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
-            <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">Pick Tab/Window Audio</button>
+            <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
-
-          <div class="text-[11px] text-gray-500 mt-2">
-            Uses only system/tab audio. In the share picker, select a tab/window and enable <b>“Share audio”</b>.
-          </div>
-
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
 
