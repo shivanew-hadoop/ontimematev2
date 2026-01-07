@@ -9,7 +9,6 @@
   <style>
     body { background: #f7f7f7; }
 
-    /* AI response */
     #responseBox{
       flex: 1 1 0%;
       min-height: 0;
@@ -22,7 +21,6 @@
       white-space: pre-wrap;
     }
 
-    /* Edge-safe transcript sizing in flex */
     #liveTranscript{
       flex: 1 1 0%;
       min-height: 0;
@@ -85,15 +83,14 @@
 
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Controls</h3>
-
           <div class="grid grid-cols-3 gap-2">
             <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
 
-          <!-- Mic mute (full-width, does not change existing grid behavior) -->
-          <button id="micMuteBtn" class="w-full mt-2 px-3 py-2 bg-gray-700 text-white text-sm rounded">Mic: ON</button>
+          <!-- Mic mute (ONLY mic; does not affect system) -->
+          <button id="micMuteBtn" class="mt-2 px-3 py-2 bg-gray-700 text-white text-sm rounded w-full">Mic: ON</button>
 
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
