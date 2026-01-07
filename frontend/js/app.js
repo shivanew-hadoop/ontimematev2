@@ -534,41 +534,50 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
-  const anchor = extractAnchorKeywords(base);
   const priorQs = extractPriorQuestions();
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-You are generating ONE interview question from CURRENT_TRANSCRIPT and then answering it.
+You are answering a real interview question spoken by an interviewer.
 
-STRICT GROUNDING RULES:
-- The question MUST be derived from CURRENT_TRANSCRIPT only.
-- Do NOT switch to unrelated topics unless CURRENT_TRANSCRIPT explicitly mentions them.
-- Ensure at least 2–4 ANCHOR_KEYWORDS appear in the question (if provided).
+First, restate the interviewer’s question clearly in the format:
+Q: <question>
 
-If CURRENT_TRANSCRIPT is a generic "current project" ask:
-- Ask a deep project question using RESUME_TEXT (architecture, modules, APIs, data flow, challenges, impact).
-- Do NOT ask general methodology questions.
+Then answer it naturally, as a senior professional would explain verbally.
 
-ANCHOR_KEYWORDS: ${anchor.length ? anchor.join(", ") : "(none)"}
-Domain bias (hint): ${domainBias || "software engineering"}
+ANSWERING STYLE (MANDATORY):
+- Sound confident, calm, and experienced.
+- Start with a direct explanation before going deeper.
+- Explain how and why, not textbook definitions.
+- Speak like a human in an interview, not like documentation.
 
-Previously asked questions/topics:
+DEPTH RULES:
+- Provide enough detail to demonstrate real understanding.
+- If a tool, framework, or concept is mentioned, briefly explain how you used it.
+- If leadership or decision-making is implied, explain impact and outcomes.
+
+EXAMPLES:
+- Naturally weave real project experience into the explanation.
+- Do NOT label sections like "Quick Answer" or "Project Example".
+- Do NOT use numbered sections or templates.
+
+FORMATTING:
+- Use Markdown lightly.
+- Short paragraphs preferred.
+- Bullets ONLY if they genuinely improve clarity.
+- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
+
+CONTEXT:
+- Stay grounded in the interviewer’s question.
+- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
+- Avoid repeating previously asked questions:
 ${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
 
-RESUME_TEXT (optional):
-${resumeTextMem ? resumeTextMem.slice(0, 4500) : "(none)"}
-
-CURRENT_TRANSCRIPT:
+INTERVIEWER QUESTION:
 ${base}
-
-Output requirements:
-- First line must be: "Q: ..."
-- Then answer in two sections only:
-1) Quick Answer (Interview Style)
-2) Real-Time Project Example
 `.trim();
 }
+
 
 //--------------------------------------------------------------
 // PROFILE
