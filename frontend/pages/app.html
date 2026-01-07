@@ -9,13 +9,6 @@
   <style>
     body { background: #f7f7f7; }
 
-    /* Use dynamic viewport height on mobile (prevents cut-off) */
-    .app-shell {
-      height: 100dvh;
-      min-height: 100dvh;
-      overflow: hidden;
-    }
-
     /* AI response */
     #responseBox{
       flex: 1 1 0%;
@@ -27,7 +20,6 @@
       font-size: 14px;
       line-height: 1.45;
       white-space: pre-wrap;
-      border-radius: 6px;
     }
 
     /* Edge-safe transcript sizing in flex */
@@ -45,9 +37,6 @@
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
     }
-
-    /* Better tap targets on mobile */
-    button, select, input { touch-action: manipulation; }
   </style>
 </head>
 
@@ -55,7 +44,7 @@
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
   <!-- App shell -->
-  <div class="app-shell flex flex-col">
+  <div class="flex flex-col h-screen overflow-hidden">
 
     <!-- TOP BAR (User + Credits + Logout) -->
     <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
@@ -103,22 +92,17 @@
         <!-- Controls -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Controls</h3>
-
           <div class="grid grid-cols-3 gap-2">
             <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
 
-          <!-- Mic toggle (OFF by default). Does NOT affect System Audio. -->
-          <div class="mt-2">
-            <button id="micBtn" disabled class="w-full px-3 py-2 bg-gray-700 text-white text-sm rounded opacity-50">
-              Mic: OFF
-            </button>
-            <div class="text-[11px] text-gray-500 mt-1">
-              Mic toggle only affects your voice/wire input. System audio continues normally.
-            </div>
-          </div>
+          <!-- NEW: Mic mute (only user/wire) -->
+          <button id="micMuteBtn"
+                  class="mt-2 w-full px-3 py-2 bg-gray-700 text-white text-sm rounded">
+            Mic: ON
+          </button>
 
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
