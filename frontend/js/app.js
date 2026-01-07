@@ -815,8 +815,11 @@ function asrFinalizeItem(which, itemId, transcript) {
   const final = normalize(transcript);
   if (!final) return;
 
-  addFinalSpeech(final);
+  // 🔒 ROLE IS THE KEY
+  const role = (which === "sys") ? "interviewer" : "candidate";
+  addFinalSpeech(final, role);
 }
+
 
 function sendAsrConfig(ws) {
   const cfgA = {
@@ -1255,7 +1258,7 @@ async function transcribeMicBlob(blob, myEpoch) {
     set value(v) { lastMicTail = v; }
   });
 
-  if (cleaned) addFinalSpeech(cleaned, "interviewer");
+  if (cleaned) addFinalSpeech(cleaned, "candidate");
 }
 
 //--------------------------------------------------------------
