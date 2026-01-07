@@ -51,7 +51,7 @@ const responseBox = document.getElementById("responseBox");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const sysBtn = document.getElementById("sysBtn");
-const micBtn = document.getElementById("micBtn"); // NEW
+const micBtn = document.getElementById("micBtn"); // Mic toggle
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const audioStatus = document.getElementById("audioStatus");
@@ -113,7 +113,7 @@ let lastFinalAt = 0;
 let timeline = [];
 let lastSpeechAt = 0;
 
-// IMPORTANT FIX: replace fragile sentCursor with stable sequence cursor
+// Stable cursoring
 let timelineSeq = 0;
 let sentSeq = 0;
 
@@ -142,8 +142,6 @@ const USE_STREAMING_ASR_SYS = true;     // system audio -> realtime transcriptio
 const USE_STREAMING_ASR_MIC_FALLBACK = true; // if SpeechRecognition missing/weak -> realtime transcription
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
-
-// prefer cheaper/fast model for deltas
 const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
 
 // audio frames cadence
@@ -152,14 +150,34 @@ const ASR_TARGET_RATE = 24000;
 
 let realtimeSecretCache = null; // { value, expires_at }
 
-// separate sessions for mic vs system
-let micAsr = null; // { ws, ctx, src, proc, gain, sendTimer, commitTimer, queue, audioMsSinceCommit, ... }
+// sessions
+let micAsr = null;
 let sysAsr = null;
 
-// NEW: manual commit for System Audio so it behaves “continuous” (not only after speech stops)
+// SYSTEM streaming behavior
 const SYS_ASR_MANUAL_COMMIT = true;
-const SYS_ASR_COMMIT_EVERY_MS = 450;   // tune: lower = faster, higher = cheaper
-const SYS_ASR_MIN_COMMIT_MS = 140;     // avoid “buffer too small” errors
+const SYS_ASR_COMMIT_EVERY_MS = 450;
+const SYS_ASR_MIN_VOICED_MS = 160;
+
+// CRITICAL FIX: Gate commits by voice energy (prevents garbage output)
+const SYS_RMS_THRESHOLD = 0.007; // tune 0.005–0.012 if needed
+const SYS_SILENCE_CLEAR_MS = 1600; // if mostly silence for this long -> clear buffer (no commit)
+
+// safer prompt for MIC only; SYSTEM uses no prompt to reduce leakage
+const REALTIME_TRANSCRIBE_PROMPT = "Verbatim transcript. No added words. No translation.";
+
+// boilerplate/leak phrases
+const DROP_TRANSCRIPT_PHRASES = [
+  "additional context/instructions",
+  "you will receive additional context",
+  "transcribe exactly",
+  "do not translate",
+  "system prompt",
+  "developer message",
+  "assistant:",
+  "user:",
+  "instructions:"
+];
 
 //--------------------------------------------------------------
 // CONSTANTS
@@ -185,7 +203,7 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Strong transcription prompt to reduce hallucinations/repeats
+// Legacy transcribe prompt (kept as-is)
 const TRANSCRIBE_PROMPT =
   "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
 
@@ -299,7 +317,6 @@ function getAllBlocksNewestFirst() {
     .filter(Boolean);
 }
 
-// FIX: fresh blocks based on stable seq, not array index
 function getFreshBlocksText() {
   return timeline
     .filter(x => x && x.seq > sentSeq && x !== micInterimEntry)
@@ -316,7 +333,6 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-// pause-aware append
 function removeInterimIfAny() {
   if (!micInterimEntry) return;
   const idx = timeline.indexOf(micInterimEntry);
@@ -324,7 +340,7 @@ function removeInterimIfAny() {
   micInterimEntry = null;
 }
 
-// HARD dedupe at final stage (Mic SR + Mic fallback)
+// Mic SR + Mic fallback final pipeline
 function addFinalSpeech(txt) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -355,6 +371,7 @@ function addFinalSpeech(txt) {
   updateTranscript();
 }
 
+// System “word-by-word”
 function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -425,7 +442,6 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
-// instant local “draft question”
 function buildDraftQuestion(base) {
   if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
   if (isGenericProjectAsk(base)) {
@@ -589,6 +605,42 @@ function dedupeByTail(text, tailRef) {
   return normalize(cleaned);
 }
 
+//--------------------------------------------------------------
+// SANITIZE (fix “additional context / do not translate / mixed junk”)
+//--------------------------------------------------------------
+function sanitizeTranscriptText(raw) {
+  let s = normalize(String(raw || ""));
+  if (!s) return "";
+
+  const lc = s.toLowerCase();
+
+  // Count phrase hits
+  let hits = 0;
+  for (const p of DROP_TRANSCRIPT_PHRASES) if (lc.includes(p)) hits++;
+
+  // Ratio of non-basic chars (helps drop the mixed-script garbage when it contains leak phrases)
+  const basic = /[A-Za-z0-9\s.,!?'"():;\-]/;
+  let nonBasic = 0;
+  for (const ch of s) if (!basic.test(ch)) nonBasic++;
+  const nonBasicRatio = nonBasic / Math.max(1, s.length);
+
+  // If it smells like leakage, drop hard
+  if (hits >= 2) return "";
+  if (hits >= 1 && (s.length < 240 || nonBasicRatio > 0.18)) return "";
+
+  // Otherwise remove those phrases if embedded
+  let out = s;
+  for (const p of DROP_TRANSCRIPT_PHRASES) {
+    const re = new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig");
+    out = out.replace(re, " ");
+  }
+  out = normalize(out);
+
+  // Drop tiny leftovers
+  if (!out || out.length < 2) return "";
+  return out;
+}
+
 function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
   if (!s) return true;
@@ -601,12 +653,9 @@ function looksLikeWhisperHallucination(t) {
     "transcribe clearly in english",
     "handle indian",
     "this is microphone speech",
-    "this is the microphone speech",
-    // IMPORTANT: if the system ever outputs your prompt text, drop it
-    "transcribe exactly what is spoken"
+    "this is the microphone speech"
   ];
 
-  if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) return true;
   return noise.some(p => s.includes(p));
 }
 
@@ -632,7 +681,6 @@ function floatToInt16Bytes(float32) {
   return new Uint8Array(out.buffer);
 }
 
-// general resample (linear)
 function resampleFloat32(input, inRate, outRate) {
   if (!input || !input.length) return new Float32Array(0);
   if (inRate === outRate) return input;
@@ -688,7 +736,7 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
-// Mic streaming can show deltas (optional). System uses typewriter on completed.
+// MIC delta display (optional)
 function asrUpsertDeltaMic(itemId, deltaText) {
   const s = micAsr;
   if (!s) return;
@@ -713,33 +761,35 @@ function asrUpsertDeltaMic(itemId, deltaText) {
   updateTranscript();
 }
 
+// session.update: SYSTEM omits prompt + omits turn_detection (manual commit)
 function sendAsrSessionUpdate(ws, which) {
-  // Use the official session.update shape for transcription sessions.
-  // For SYSTEM: disable turn_detection and manually commit frequently (continuous behavior).
-  // For MIC fallback: keep server_vad.
+  const transcription = {
+    model: REALTIME_ASR_MODEL,
+    language: "en"
+  };
+
+  // MIC can have a short prompt; SYSTEM should not (reduces leakage)
+  if (which !== "sys") transcription.prompt = REALTIME_TRANSCRIBE_PROMPT;
+
+  const input = {
+    format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
+    noise_reduction: { type: "far_field" },
+    transcription
+  };
+
+  // Only include turn_detection for MIC (SYSTEM manual commit = no VAD)
+  if (!(which === "sys" && SYS_ASR_MANUAL_COMMIT)) {
+    input.turn_detection = {
+      type: "server_vad",
+      threshold: 0.5,
+      prefix_padding_ms: 300,
+      silence_duration_ms: 350
+    };
+  }
+
   const sessionUpdate = {
     type: "session.update",
-    session: {
-      audio: {
-        input: {
-          format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
-          noise_reduction: { type: "far_field" },
-          transcription: {
-            model: REALTIME_ASR_MODEL,
-            prompt: TRANSCRIBE_PROMPT,
-            language: "en"
-          },
-          turn_detection: (which === "sys" && SYS_ASR_MANUAL_COMMIT)
-            ? null
-            : {
-                type: "server_vad",
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 350
-              }
-        }
-      }
-    }
+    session: { audio: { input } }
   };
 
   try { ws.send(JSON.stringify(sessionUpdate)); } catch {}
@@ -748,7 +798,6 @@ function sendAsrSessionUpdate(ws, which) {
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
 
-  // stop any existing session
   stopAsrSession(which);
 
   const secret = await getRealtimeClientSecretCached();
@@ -761,7 +810,6 @@ async function startStreamingAsr(which, mediaStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(mediaStream);
 
-  // silence output
   const gain = ctx.createGain();
   gain.gain.value = 0;
 
@@ -778,6 +826,7 @@ async function startStreamingAsr(which, mediaStream) {
     sendTimer: null,
     commitTimer: null,
     audioMsSinceCommit: 0,
+    voicedMsSinceCommit: 0,
     itemText: {},
     itemEntry: {}
   };
@@ -792,21 +841,29 @@ async function startStreamingAsr(which, mediaStream) {
     const ch0 = e.inputBuffer.getChannelData(0);
     const inRate = ctx.sampleRate || 48000;
 
+    // Voice energy gate (SYSTEM only)
+    if (which === "sys") {
+      let sum = 0;
+      for (let i = 0; i < ch0.length; i++) sum += ch0[i] * ch0[i];
+      const rms = Math.sqrt(sum / Math.max(1, ch0.length));
+      const frameMs = (ch0.length / inRate) * 1000;
+
+      state.audioMsSinceCommit += frameMs;
+      if (rms >= SYS_RMS_THRESHOLD) state.voicedMsSinceCommit += frameMs;
+    }
+
     const resampled = resampleFloat32(ch0, inRate, ASR_TARGET_RATE);
     const bytes = floatToInt16Bytes(resampled);
     if (bytes.length) queue.push(bytes);
   };
 
-  // connect nodes
   src.connect(proc);
   proc.connect(gain);
   gain.connect(ctx.destination);
 
   ws.onopen = () => {
-    // Configure transcription session
     sendAsrSessionUpdate(ws, which);
 
-    // send loop
     state.sendTimer = setInterval(() => {
       if (!isRunning) return;
       if (ws.readyState !== 1) return;
@@ -814,7 +871,7 @@ async function startStreamingAsr(which, mediaStream) {
 
       let mergedLen = 0;
       const parts = [];
-      while (queue.length && mergedLen < 4800 * 2) { // ~100ms at 24k PCM16
+      while (queue.length && mergedLen < 4800 * 2) {
         const b = queue.shift();
         mergedLen += b.length;
         parts.push(b);
@@ -828,30 +885,33 @@ async function startStreamingAsr(which, mediaStream) {
         off += p.length;
       }
 
-      // Track buffered audio for manual commits (system)
-      const samples = mergedLen / 2; // PCM16
-      const ms = (samples / ASR_TARGET_RATE) * 1000;
-      state.audioMsSinceCommit += ms;
-
-      const evt = {
-        type: "input_audio_buffer.append",
-        audio: base64FromBytes(merged)
-      };
+      const evt = { type: "input_audio_buffer.append", audio: base64FromBytes(merged) };
       try { ws.send(JSON.stringify(evt)); } catch {}
     }, ASR_SEND_EVERY_MS);
 
-    // MANUAL COMMIT LOOP (SYSTEM ONLY): gives continuous “word-by-word” behavior
+    // SYSTEM: manual commit ONLY when voiced audio exists.
+    // If long silence, clear buffer WITHOUT commit (prevents garbage output).
     if (which === "sys" && SYS_ASR_MANUAL_COMMIT) {
       state.commitTimer = setInterval(() => {
         if (!isRunning) return;
         if (ws.readyState !== 1) return;
 
-        if (state.audioMsSinceCommit < SYS_ASR_MIN_COMMIT_MS) return;
+        // If mostly silence for long time, discard buffer (NO commit)
+        if (state.audioMsSinceCommit >= SYS_SILENCE_CLEAR_MS && state.voicedMsSinceCommit < 40) {
+          try { ws.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
+          state.audioMsSinceCommit = 0;
+          state.voicedMsSinceCommit = 0;
+          return;
+        }
+
+        // Commit only when we have enough voiced audio
+        if (state.voicedMsSinceCommit < SYS_ASR_MIN_VOICED_MS) return;
 
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
 
         state.audioMsSinceCommit = 0;
+        state.voicedMsSinceCommit = 0;
       }, SYS_ASR_COMMIT_EVERY_MS);
     }
 
@@ -867,9 +927,7 @@ async function startStreamingAsr(which, mediaStream) {
     try { ev = JSON.parse(msg.data); } catch { return; }
     if (!ev?.type) return;
 
-    if (ev.type === "error") {
-      return;
-    }
+    if (ev.type === "error") return;
 
     // MIC streaming: show deltas (optional)
     if (ev.type === "conversation.item.input_audio_transcription.delta" && which === "mic") {
@@ -878,24 +936,21 @@ async function startStreamingAsr(which, mediaStream) {
     }
 
     if (ev.type === "conversation.item.input_audio_transcription.completed") {
-      const transcript = String(ev.transcript || "");
+      let transcript = sanitizeTranscriptText(ev.transcript || "");
+      if (!transcript) return;
       if (looksLikeWhisperHallucination(transcript)) return;
 
       if (which === "sys") {
-        // SYSTEM: dedupe + typewriter so it behaves like your earlier “word-by-word” UI
         const cleaned = dedupeByTail(transcript, {
           get value() { return lastSysTail; },
           set value(v) { lastSysTail = v; }
         });
-
         if (cleaned) addTypewriterSpeech(cleaned);
       } else {
-        // MIC streaming fallback: dedupe + normal final pipeline
         const cleaned = dedupeByTail(transcript, {
           get value() { return lastMicTail; },
           set value(v) { lastMicTail = v; }
         });
-
         if (cleaned) addFinalSpeech(cleaned);
       }
       return;
@@ -944,7 +999,7 @@ function startMic() {
 
   recognition.onresult = (ev) => {
     if (!isRunning) return;
-    if (!micEnabled) return; // IMPORTANT: mic toggle
+    if (!micEnabled) return;
     if (Date.now() < blockMicUntil) return;
 
     lastMicResultAt = Date.now();
@@ -957,7 +1012,6 @@ function startMic() {
       else latestInterim = text;
     }
 
-    // LIVE: show interim instantly
     if (latestInterim) {
       removeInterimIfAny();
       micInterimEntry = { t: Date.now(), text: latestInterim, seq: ++timelineSeq };
@@ -983,7 +1037,6 @@ function startMic() {
 
   lastMicResultAt = Date.now();
 
-  // Watchdog: if SR works -> STOP fallback. If SR idle -> start fallback.
   if (micWatchdog) clearInterval(micWatchdog);
   micWatchdog = setInterval(() => {
     if (!isRunning) return;
@@ -1164,7 +1217,9 @@ async function transcribeMicBlob(blob, myEpoch) {
   if (!res.ok) return;
 
   const data = await res.json().catch(() => ({}));
-  const raw = String(data.text || "");
+  let raw = String(data.text || "");
+  raw = sanitizeTranscriptText(raw);
+  if (!raw) return;
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeByTail(raw, {
@@ -1234,7 +1289,6 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
-// NEW: streaming ASR system audio with manual commits + typewriter
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
@@ -1367,7 +1421,9 @@ async function transcribeSysBlob(blob, myEpoch) {
   sysErrBackoffUntil = 0;
 
   const data = await res.json().catch(() => ({}));
-  const raw = String(data.text || "");
+  let raw = String(data.text || "");
+  raw = sanitizeTranscriptText(raw);
+  if (!raw) return;
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeByTail(raw, {
@@ -1550,7 +1606,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC TOGGLE (NEW)
+// MIC TOGGLE
 //--------------------------------------------------------------
 function updateMicBtnUI() {
   if (!micBtn) return;
@@ -1567,12 +1623,10 @@ function updateMicBtnUI() {
   }
 }
 
-// Enable/disable mic without touching system audio or transcript
 async function enableMicCapture() {
   micEnabled = true;
   updateMicBtnUI();
 
-  // Start SR mic immediately
   const micOk = startMic();
   if (!micOk) {
     setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
@@ -1585,7 +1639,6 @@ async function enableMicCapture() {
     }
   }
 
-  // If SR gives nothing in ~2s, try streaming ASR fallback, then recorder fallback
   setTimeout(() => {
     if (!isRunning) return;
     if (!micEnabled) return;
@@ -1603,7 +1656,6 @@ function disableMicCapture() {
   micEnabled = false;
   updateMicBtnUI();
 
-  // Stop ONLY mic pipelines (do NOT stop system)
   stopMicOnly();
   stopMicRecorderOnly();
   stopAsrSession("mic");
@@ -1627,13 +1679,11 @@ async function startAll() {
 
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
-  // Hard reset transcript state
   transcriptEpoch++;
   timeline = [];
   micInterimEntry = null;
   lastSpeechAt = 0;
 
-  // reset seq cursors
   timelineSeq = 0;
   sentSeq = 0;
 
@@ -1644,7 +1694,6 @@ async function startAll() {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  // reset streaming ASR session state
   stopAsrSession("mic");
   stopAsrSession("sys");
 
@@ -1661,7 +1710,7 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // Mic must be OFF by default
+  // Mic OFF by default
   micEnabled = false;
   updateMicBtnUI();
 
@@ -1673,12 +1722,10 @@ async function startAll() {
 function stopAll() {
   isRunning = false;
 
-  // stop mic pipelines
   stopMicOnly();
   stopMicRecorderOnly();
   stopAsrSession("mic");
 
-  // stop system pipelines
   stopSystemAudioOnly();
   stopAsrSession("sys");
 
@@ -1700,7 +1747,7 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// HARD CLEAR (stop late results + clear everything visible)
+// HARD CLEAR
 //--------------------------------------------------------------
 function hardClearTranscript() {
   transcriptEpoch++;
@@ -1746,7 +1793,7 @@ sendBtn.onclick = async () => {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // move cursor (do NOT clear transcript)
+  // cursor advance (do NOT clear transcript)
   sentSeq = timelineSeq;
   pinnedTop = true;
   updateTranscript();
@@ -1836,7 +1883,7 @@ window.addEventListener("load", async () => {
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
 
-  micEnabled = false; // OFF by default
+  micEnabled = false;
   updateMicBtnUI();
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
