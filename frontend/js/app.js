@@ -59,7 +59,7 @@ const sendStatus = document.getElementById("sendStatus");
 const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
 
-// NEW: Mic mute button
+// === MIC MUTE CHANGE ===
 const micMuteBtn = document.getElementById("micMuteBtn");
 
 //--------------------------------------------------------------
@@ -70,7 +70,7 @@ let isRunning = false;
 
 let hiddenInstructions = "";
 
-// NEW: mic mute state (ONLY mic/wire; system continues)
+// === MIC MUTE CHANGE ===
 let micMuted = false;
 
 // SpeechRecognition (fastest live words)
@@ -137,22 +137,24 @@ let transcriptEpoch = 0;
 //--------------------------------------------------------------
 // STREAMING ASR (Realtime) — NEW
 //--------------------------------------------------------------
-const USE_STREAMING_ASR_SYS = true;     // system audio -> realtime transcription
-const USE_STREAMING_ASR_MIC_FALLBACK = true; // if SpeechRecognition missing/weak -> realtime transcription
+// === SYS ASR FIX ===
+// Realtime streaming ASR is what breaks "Mic OFF → no system transcript" in your environment.
+// Force system audio to always use legacy MediaRecorder → /transcribe pipeline.
+const USE_STREAMING_ASR_SYS = false;
+
+// Keep mic fallback streaming as you had it (only used if SR missing/weak)
+const USE_STREAMING_ASR_MIC_FALLBACK = true;
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
+const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
 
-// prefer cheaper/fast model for deltas
-const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe"; // supported per docs :contentReference[oaicite:5]{index=5}
+const ASR_SEND_EVERY_MS = 40;
+const ASR_TARGET_RATE = 24000;
 
-// audio frames cadence
-const ASR_SEND_EVERY_MS = 40; // ~2–3 words cadence depends on speaker + VAD; 40ms keeps deltas responsive
-const ASR_TARGET_RATE = 24000; // session examples use 24k PCM :contentReference[oaicite:6]{index=6}
-
-let realtimeSecretCache = null; // { value, expires_at }
+let realtimeSecretCache = null;
 
 // separate sessions for mic vs system
-let micAsr = null; // { ws, ctx, src, proc, gain, sendTimer, queue, itemText, itemEntry, lastItemId }
+let micAsr = null;
 let sysAsr = null;
 
 //--------------------------------------------------------------
@@ -238,10 +240,11 @@ function authHeaders() {
 }
 
 //--------------------------------------------------------------
-// NEW: MIC MUTE HELPERS (ONLY mic; never touch system)
+// === MIC MUTE CHANGE === (UI + behavior)
 //--------------------------------------------------------------
 function updateMicMuteUI() {
   if (!micMuteBtn) return;
+
   if (micMuted) {
     micMuteBtn.textContent = "Mic: OFF";
     micMuteBtn.classList.remove("bg-gray-700");
@@ -253,38 +256,21 @@ function updateMicMuteUI() {
   }
 }
 
-// stop ONLY mic pipelines (SR + mic fallback + mic realtime)
+// Only stop mic pipelines. DO NOT touch system audio.
 function stopMicPipelinesOnly() {
-  // SR
+  // stop SR
   try { recognition?.stop(); } catch {}
   recognition = null;
 
-  // SR watchdog
+  // stop watchdog
   if (micWatchdog) clearInterval(micWatchdog);
   micWatchdog = null;
 
-  // mic realtime ASR session
-  try { stopAsrSession("mic"); } catch {}
+  // stop realtime mic ASR (if any)
+  stopAsrSession("mic");
 
-  // mic recorder fallback
-  try { micAbort?.abort(); } catch {}
-  micAbort = null;
-
-  if (micSegmentTimer) clearInterval(micSegmentTimer);
-  micSegmentTimer = null;
-
-  try { micRecorder?.stop(); } catch {}
-  micRecorder = null;
-
-  micSegmentChunks = [];
-  micQueue = [];
-  micInFlight = 0;
-
-  if (micStream) {
-    try { micStream.getTracks().forEach(t => t.stop()); } catch {}
-  }
-  micStream = null;
-  micTrack = null;
+  // stop recorder fallback
+  stopMicRecorderOnly();
 
   // remove interim line
   removeInterimIfAny();
@@ -294,7 +280,7 @@ async function setMicMuted(on) {
   micMuted = !!on;
   updateMicMuteUI();
 
-  // If app not running, just toggle state
+  // If not running, just change state/UI
   if (!isRunning) return;
 
   if (micMuted) {
@@ -303,23 +289,37 @@ async function setMicMuted(on) {
     return;
   }
 
-  // Unmute: restart mic exactly like your normal flow
+  // Unmute: resume normal mic behavior (SR first)
   const micOk = startMic();
   if (!micOk) {
-    setStatus(audioStatus, "Mic SR not available. Trying fallback…", "text-orange-600");
+    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
     if (USE_STREAMING_ASR_MIC_FALLBACK) {
       await enableMicStreamingFallback().catch(() => {});
     }
     if (!micAsr && !micStream) {
+      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
       await enableMicRecorderFallback().catch(() => {});
     }
   } else {
     setStatus(audioStatus, "Mic unmuted.", "text-green-600");
   }
+
+  // same “if SR gives nothing” fallback timer, but only when mic is ON
+  setTimeout(() => {
+    if (!isRunning) return;
+    if (micMuted) return;
+    if (micSrIsHealthy()) return;
+
+    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
+      enableMicStreamingFallback().catch(() => {});
+      return;
+    }
+    if (!micStream) enableMicRecorderFallback().catch(() => {});
+  }, 2000);
 }
 
 if (micMuteBtn) {
-  micMuteBtn.onclick = () => setMicMuted(!micMuted);
+  micMuteBtn.addEventListener("click", () => setMicMuted(!micMuted));
   updateMicMuteUI();
 }
 
@@ -503,7 +503,6 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
-// instant local “draft question”
 function buildDraftQuestion(base) {
   if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
   if (isGenericProjectAsk(base)) {
@@ -710,7 +709,6 @@ function floatToInt16Bytes(float32) {
   return new Uint8Array(out.buffer);
 }
 
-// general resample (linear)
 function resampleFloat32(input, inRate, outRate) {
   if (!input || !input.length) return new Float32Array(0);
   if (inRate === outRate) return input;
@@ -719,14 +717,12 @@ function resampleFloat32(input, inRate, outRate) {
   const newLen = Math.max(1, Math.floor(input.length / ratio));
   const output = new Float32Array(newLen);
 
-  let pos = 0;
   for (let i = 0; i < newLen; i++) {
     const idx = i * ratio;
     const i0 = Math.floor(idx);
     const i1 = Math.min(i0 + 1, input.length - 1);
     const frac = idx - i0;
     output[i] = input[i0] * (1 - frac) + input[i1] * frac;
-    pos = idx;
   }
   return output;
 }
@@ -740,10 +736,7 @@ async function getRealtimeClientSecretCached() {
   const res = await apiFetch("realtime/client_secret", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      // keep minimal; server sets config
-      ttl_sec: 600
-    })
+    body: JSON.stringify({ ttl_sec: 600 })
   }, true);
 
   const data = await res.json().catch(() => ({}));
@@ -770,7 +763,6 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
-// create/update a partial line in timeline for a given item_id
 function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
@@ -791,7 +783,6 @@ function asrUpsertDelta(which, itemId, deltaText) {
     s.itemEntry[itemId].t = now;
   }
 
-  // keep UI consistent with your pin-to-top behavior
   lastSpeechAt = now;
   updateTranscript();
 }
@@ -800,7 +791,6 @@ function asrFinalizeItem(which, itemId, transcript) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
-  // remove the interim entry for this item_id (if present)
   const entry = s.itemEntry[itemId];
   if (entry) {
     const idx = timeline.indexOf(entry);
@@ -812,12 +802,10 @@ function asrFinalizeItem(which, itemId, transcript) {
   const final = normalize(transcript);
   if (!final) return;
 
-  // use your final pipeline to keep PAUSE_NEWLINE_MS + dedupe consistent
   addFinalSpeech(final);
 }
 
 function sendAsrConfig(ws) {
-  // Try the "transcription_session.update" shape (speech-to-text guide) :contentReference[oaicite:7]{index=7}
   const cfgA = {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
@@ -839,7 +827,6 @@ function sendAsrConfig(ws) {
 }
 
 function sendAsrConfigFallbackSessionUpdate(ws) {
-  // Fallback to "session.update" shape (realtime client events) :contentReference[oaicite:8]{index=8}
   const cfgB = {
     type: "session.update",
     session: {
@@ -870,15 +857,13 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
 
-  // NEW: if mic is muted, do not start mic ASR
+  // IMPORTANT: do not start mic streaming if mic is muted
   if (which === "mic" && micMuted) return false;
 
-  // stop any existing session
   stopAsrSession(which);
 
   const secret = await getRealtimeClientSecretCached();
 
-  // Browser WebSocket auth uses subprotocols (openai-insecure-api-key.*) :contentReference[oaicite:9]{index=9}
   const ws = new WebSocket(REALTIME_INTENT_URL, [
     "realtime",
     "openai-insecure-api-key." + secret
@@ -887,11 +872,9 @@ async function startStreamingAsr(which, mediaStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(mediaStream);
 
-  // silence output
   const gain = ctx.createGain();
   gain.gain.value = 0;
 
-  // ScriptProcessor is widely supported (AudioWorklet is better but heavier)
   const proc = ctx.createScriptProcessor(4096, 1, 1);
   const queue = [];
 
@@ -914,10 +897,7 @@ async function startStreamingAsr(which, mediaStream) {
 
   proc.onaudioprocess = (e) => {
     if (!isRunning) return;
-
-    // NEW: if mic muted, drop mic audio frames only
     if (which === "mic" && micMuted) return;
-
     if (ws.readyState !== 1) return;
 
     const ch0 = e.inputBuffer.getChannelData(0);
@@ -928,29 +908,22 @@ async function startStreamingAsr(which, mediaStream) {
     if (bytes.length) queue.push(bytes);
   };
 
-  // connect nodes
   src.connect(proc);
   proc.connect(gain);
   gain.connect(ctx.destination);
 
   ws.onopen = () => {
-    // Configure transcription session
     sendAsrConfig(ws);
 
-    // send loop
     state.sendTimer = setInterval(() => {
       if (!isRunning) return;
-
-      // NEW: if mic muted, do not send mic audio
       if (which === "mic" && micMuted) return;
-
       if (ws.readyState !== 1) return;
       if (!queue.length) return;
 
-      // merge a few buffers to reduce message overhead
       let mergedLen = 0;
       const parts = [];
-      while (queue.length && mergedLen < 4800 * 2) { // ~100ms at 24k
+      while (queue.length && mergedLen < 4800 * 2) {
         const b = queue.shift();
         mergedLen += b.length;
         parts.push(b);
@@ -964,10 +937,7 @@ async function startStreamingAsr(which, mediaStream) {
         off += p.length;
       }
 
-      const evt = {
-        type: "input_audio_buffer.append",
-        audio: base64FromBytes(merged)
-      };
+      const evt = { type: "input_audio_buffer.append", audio: base64FromBytes(merged) };
       try { ws.send(JSON.stringify(evt)); } catch {}
     }, ASR_SEND_EVERY_MS);
 
@@ -983,7 +953,6 @@ async function startStreamingAsr(which, mediaStream) {
     try { ev = JSON.parse(msg.data); } catch { return; }
     if (!ev?.type) return;
 
-    // If server says unknown config event, fallback to session.update
     if (ev.type === "error") {
       const m = String(ev?.error?.message || ev?.message || "");
       if (!state.sawConfigError && m.toLowerCase().includes("transcription_session.update")) {
@@ -993,21 +962,16 @@ async function startStreamingAsr(which, mediaStream) {
       return;
     }
 
-    // Deltas (incremental hypotheses) :contentReference[oaicite:10]{index=10}
     if (ev.type === "conversation.item.input_audio_transcription.delta") {
       asrUpsertDelta(which, ev.item_id, ev.delta || "");
       return;
     }
 
-    // Completed turn :contentReference[oaicite:11]{index=11}
     if (ev.type === "conversation.item.input_audio_transcription.completed") {
       asrFinalizeItem(which, ev.item_id, ev.transcript || "");
       return;
     }
   };
-
-  ws.onerror = () => {};
-  ws.onclose = () => {};
 
   return true;
 }
@@ -1028,7 +992,6 @@ function stopMicOnly() {
 }
 
 function startMic() {
-  // NEW: don’t start mic when muted
   if (micMuted) return false;
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1051,7 +1014,7 @@ function startMic() {
 
   recognition.onresult = (ev) => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW: ignore mic results when muted
+    if (micMuted) return;
     if (Date.now() < blockMicUntil) return;
 
     lastMicResultAt = Date.now();
@@ -1064,7 +1027,6 @@ function startMic() {
       else latestInterim = text;
     }
 
-    // LIVE: show interim instantly
     if (latestInterim) {
       removeInterimIfAny();
       micInterimEntry = { t: Date.now(), text: latestInterim };
@@ -1080,7 +1042,7 @@ function startMic() {
 
   recognition.onend = () => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW: don’t restart while muted
+    if (micMuted) return;
     setTimeout(() => {
       if (!isRunning) return;
       if (micMuted) return;
@@ -1090,11 +1052,10 @@ function startMic() {
 
   lastMicResultAt = Date.now();
 
-  // Watchdog: if SR works -> STOP fallback. If SR idle -> start fallback.
   if (micWatchdog) clearInterval(micWatchdog);
   micWatchdog = setInterval(() => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW: no mic fallback while muted
+    if (micMuted) return;
 
     if (micSrIsHealthy()) {
       if (micRecorder || micStream) stopMicRecorderOnly();
@@ -1104,7 +1065,6 @@ function startMic() {
 
     const idle = Date.now() - (lastMicResultAt || 0);
     if (idle > 2500) {
-      // try streaming ASR first (NEW), then legacy recorder
       if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
         enableMicStreamingFallback().catch(() => {});
       } else if (!micRecorder && !micStream && !micAsr) {
@@ -1119,7 +1079,7 @@ function startMic() {
 
 async function enableMicStreamingFallback() {
   if (!isRunning) return;
-  if (micMuted) return; // NEW
+  if (micMuted) return;
   if (micAsr) return;
   if (micSrIsHealthy()) return;
 
@@ -1170,9 +1130,9 @@ function pickBestMimeType() {
 
 async function enableMicRecorderFallback() {
   if (!isRunning) return;
-  if (micMuted) return; // NEW
+  if (micMuted) return;
   if (micStream) return;
-  if (micSrIsHealthy()) return; // CRITICAL: do not run fallback if SR is alive
+  if (micSrIsHealthy()) return;
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
@@ -1210,13 +1170,13 @@ function startMicSegmentRecorder() {
 
   micRecorder.ondataavailable = (ev) => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW
+    if (micMuted) return;
     if (ev.data.size) micSegmentChunks.push(ev.data);
   };
 
   micRecorder.onstop = () => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW
+    if (micMuted) return;
 
     const blob = new Blob(micSegmentChunks, { type: micRecorder?.mimeType || "" });
     micSegmentChunks = [];
@@ -1234,14 +1194,14 @@ function startMicSegmentRecorder() {
   if (micSegmentTimer) clearInterval(micSegmentTimer);
   micSegmentTimer = setInterval(() => {
     if (!isRunning) return;
-    if (micMuted) return; // NEW
+    if (micMuted) return;
     try { micRecorder?.stop(); } catch {}
   }, MIC_SEGMENT_MS);
 }
 
 function drainMicQueue() {
   if (!isRunning) return;
-  if (micMuted) return; // NEW
+  if (micMuted) return;
   while (micInFlight < MIC_MAX_CONCURRENT && micQueue.length) {
     const blob = micQueue.shift();
     const myEpoch = transcriptEpoch;
@@ -1268,14 +1228,10 @@ async function transcribeMicBlob(blob, myEpoch) {
     signal: micAbort?.signal
   }, false);
 
-  if (myEpoch !== transcriptEpoch) return; // ignore late results after Clear
-  if (micMuted) return; // NEW: ignore if muted mid-flight
+  if (myEpoch !== transcriptEpoch) return;
+  if (micMuted) return;
 
-  if (!res.ok) {
-    const errText = await res.text().catch(() => "");
-    setStatus(audioStatus, `Mic transcribe failed (${res.status}). ${errText.slice(0, 120)}`, "text-red-600");
-    return;
-  }
+  if (!res.ok) return;
 
   const data = await res.json().catch(() => ({}));
   const raw = String(data.text || "");
@@ -1306,7 +1262,6 @@ function stopSystemAudioOnly() {
   sysQueue = [];
   sysInFlight = 0;
 
-  // stop streaming ASR session if active (NEW)
   stopAsrSession("sys");
 
   if (sysStream) {
@@ -1320,7 +1275,7 @@ function stopSystemAudioOnly() {
   sysErrBackoffUntil = 0;
 }
 
-// Legacy (your existing) system audio recorder pipeline
+// Legacy system audio pipeline (MediaRecorder -> /transcribe)
 async function enableSystemAudioLegacy() {
   if (!isRunning) return;
 
@@ -1337,6 +1292,7 @@ async function enableSystemAudioLegacy() {
   if (!sysTrack) {
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
+    showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
     return;
   }
 
@@ -1350,7 +1306,7 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
-// NEW: streaming ASR system audio.
+// Streaming system audio (kept, but disabled via flag)
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
@@ -1367,7 +1323,7 @@ async function enableSystemAudioStreaming() {
   if (!sysTrack) {
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
-    showingFixHint();
+    showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
     return;
   }
 
@@ -1382,17 +1338,13 @@ async function enableSystemAudioStreaming() {
   } catch (e) {
     console.error(e);
     setStatus(audioStatus, "Streaming ASR failed. Falling back to legacy system transcription…", "text-orange-600");
-    // fallback to your old chunking
     await enableSystemAudioLegacy();
   }
 }
 
-function showingFixHint() {
-  // minimal hint without changing your UI layout
-  showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
-}
-
 async function enableSystemAudio() {
+  // === SYS ASR FIX ===
+  // Force legacy pipeline so Mic OFF still prints + 3s pause newline works + Send uses timeline.
   if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming();
   return enableSystemAudioLegacy();
 }
@@ -1472,7 +1424,7 @@ async function transcribeSysBlob(blob, myEpoch) {
     signal: sysAbort?.signal
   }, false);
 
-  if (myEpoch !== transcriptEpoch) return; // ignore late results after Clear
+  if (myEpoch !== transcriptEpoch) return;
 
   if (!res.ok) {
     sysErrCount++;
@@ -1682,7 +1634,6 @@ async function startAll() {
 
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 
-  // Hard reset transcript state
   transcriptEpoch++;
   timeline = [];
   micInterimEntry = null;
@@ -1695,7 +1646,6 @@ async function startAll() {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  // reset streaming ASR session state
   stopAsrSession("mic");
   stopAsrSession("sys");
 
@@ -1712,11 +1662,11 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // Start SR mic immediately ONLY if not muted
+  // === MIC MUTE CHANGE ===
+  // Start mic only if mic is ON
   if (!micMuted) {
     const micOk = startMic();
     if (!micOk) {
-      // iOS/Chrome etc: no SpeechRecognition. Prefer streaming ASR, fallback to legacy recorder.
       setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
       if (USE_STREAMING_ASR_MIC_FALLBACK) {
         await enableMicStreamingFallback().catch(() => {});
@@ -1727,7 +1677,6 @@ async function startAll() {
       }
     }
 
-    // If SR gives nothing in ~2s, try streaming ASR fallback, then recorder fallback
     setTimeout(() => {
       if (!isRunning) return;
       if (micMuted) return;
@@ -1740,7 +1689,7 @@ async function startAll() {
       if (!micStream) enableMicRecorderFallback().catch(() => {});
     }, 2000);
   } else {
-    setStatus(audioStatus, "Mic muted (user/wire OFF). System audio continues.", "text-orange-600");
+    setStatus(audioStatus, "Mic is OFF. Press System Audio to capture system audio.", "text-orange-600");
   }
 
   startCreditTicking();
@@ -1753,7 +1702,6 @@ function stopAll() {
   stopMicRecorderOnly();
   stopSystemAudioOnly();
 
-  // Ensure ASR sessions closed
   stopAsrSession("mic");
   stopAsrSession("sys");
 
@@ -1772,16 +1720,14 @@ function stopAll() {
 }
 
 //--------------------------------------------------------------
-// HARD CLEAR (stop late results + clear everything visible)
+// HARD CLEAR
 //--------------------------------------------------------------
 function hardClearTranscript() {
-  transcriptEpoch++; // ignore any in-flight transcribe responses
+  transcriptEpoch++;
 
-  // Cancel in-flight transcribe immediately
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
 
-  // Clear queues and buffers
   micQueue = [];
   sysQueue = [];
   micSegmentChunks = [];
@@ -1792,7 +1738,6 @@ function hardClearTranscript() {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  // also clear live streaming ASR interim blocks
   if (micAsr) { micAsr.itemText = {}; micAsr.itemEntry = {}; }
   if (sysAsr) { sysAsr.itemText = {}; sysAsr.itemEntry = {}; }
 
@@ -1811,7 +1756,6 @@ function hardClearTranscript() {
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // If a response is streaming, STOP it and accept the new prompt immediately
   abortChatStreamOnly();
 
   const manual = normalize(manualQuestion?.value || "");
@@ -1822,14 +1766,12 @@ sendBtn.onclick = async () => {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // move cursor (do NOT clear transcript)
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
 
   if (manualQuestion) manualQuestion.value = "";
 
-  // Instant feedback
   const draftQ = buildDraftQuestion(base);
   responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
@@ -1841,7 +1783,6 @@ sendBtn.onclick = async () => {
 };
 
 clearBtn.onclick = () => {
-  // HARD STOP clear: wipe and prevent old text from coming back
   hardClearTranscript();
   if (manualQuestion) manualQuestion.value = "";
   setStatus(sendStatus, "Transcript cleared", "text-green-600");
@@ -1898,7 +1839,6 @@ window.addEventListener("load", async () => {
   lastFinalText = "";
   lastFinalAt = 0;
 
-  // close any leaked streaming sessions
   stopAsrSession("mic");
   stopAsrSession("sys");
 
@@ -1914,7 +1854,7 @@ window.addEventListener("load", async () => {
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 
-  // NEW: ensure mic mute button label is correct on load
+  // === MIC MUTE CHANGE ===
   updateMicMuteUI();
 });
 
