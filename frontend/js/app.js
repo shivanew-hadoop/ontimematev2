@@ -139,21 +139,28 @@ const USE_STREAMING_ASR_SYS = true;
 const USE_STREAMING_ASR_MIC_FALLBACK = true;
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
+
+// If you want higher accuracy than mini, switch to:
+// const REALTIME_ASR_MODEL = "gpt-4o-transcribe";
 const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
+
+// Force language to reduce random non-English junk
+const TRANSCRIBE_LANGUAGE = "en";
 
 // audio frames cadence
 const ASR_SEND_EVERY_MS = 40;
 const ASR_TARGET_RATE = 24000;
 
-// IMPORTANT: DO NOT use instruction-style prompt here (it leaks into transcript)
+// IMPORTANT: Do NOT use instruction-style prompt here (it can leak into transcript)
 // Keep empty for stability.
 const REALTIME_TRANSCRIBE_PROMPT = "";
 
 let realtimeSecretCache = null; // { value, expires_at }
 
-// system audio: force periodic commits to get continuous updates (no need to “stop speaking”)
-const SYS_FORCE_COMMIT_MS = 450;   // tweak 350–600 if you want faster/slower
-const MIN_BYTES_BEFORE_COMMIT = 7000; // avoid “buffer empty” errors
+// system audio: commit less aggressively to avoid chopping words mid-phoneme
+// (committing tiny buffers increases “guesses” / bad words)
+const SYS_FORCE_COMMIT_MS = 900;      // was 450
+const MIN_BYTES_BEFORE_COMMIT = 24000; // was 7000 (~500ms at 24kHz int16 mono)
 
 // separate sessions for mic vs system
 let micAsr = null;
@@ -183,9 +190,10 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Keep your REST /transcribe prompt unchanged (this is not the realtime prompt)
-const TRANSCRIBE_PROMPT =
-  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
+// REST /transcribe prompt:
+// DO NOT put instruction prompts like “Transcribe exactly…” (it can leak into output).
+// Use empty or minimal topical hints only.
+const TRANSCRIBE_PROMPT = "";
 
 //--------------------------------------------------------------
 // MODE INSTRUCTIONS
@@ -321,9 +329,69 @@ function removeInterimIfAny() {
   micInterimEntry = null;
 }
 
+//--------------------------------------------------------------
+// PROMPT-LEAK / HALLUCINATION SCRUBBER (hard safety)
+//--------------------------------------------------------------
+function escapeRegex(s) {
+  return String(s || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+const PROMPT_LEAK_PHRASES = [
+  "transcribe exactly what is spoken",
+  "do not add new words",
+  "do not repeat phrases",
+  "do not translate",
+  "keep punctuation minimal",
+  "if uncertain, omit"
+];
+
+function isPromptLeak(text) {
+  const s = normalize(text).toLowerCase();
+  if (!s) return false;
+
+  let hits = 0;
+  for (const p of PROMPT_LEAK_PHRASES) if (s.includes(p)) hits++;
+
+  // Common leakage formatting
+  if (s.includes("###") && s.includes("transcribe")) hits++;
+
+  // Repeated "transcribe" tokens usually indicate leakage (not real speech)
+  const tc = (s.match(/\btranscribe\b/g) || []).length;
+  if (tc >= 2) hits++;
+
+  return hits >= 2;
+}
+
+function sanitizeTranscriptText(text) {
+  let s = normalize(text);
+  if (!s) return "";
+
+  if (isPromptLeak(s)) {
+    // Remove markdown heading markers and instruction phrases
+    s = s.replace(/#{2,}\s*/g, " ");
+    for (const p of PROMPT_LEAK_PHRASES) {
+      s = s.replace(new RegExp(escapeRegex(p), "ig"), " ");
+    }
+    // Remove repeated "Transcribe" tokens
+    s = s.replace(/\btranscribe\b/ig, " ");
+
+    s = normalize(s);
+  }
+
+  // If still looks like instructions after cleanup, drop it
+  if (!s) return "";
+  const low = s.toLowerCase();
+  if (low.includes("transcribe exactly what is spoken")) return "";
+
+  return s;
+}
+
+//--------------------------------------------------------------
 // HARD dedupe at final stage
+//--------------------------------------------------------------
 function addFinalSpeech(txt) {
-  const cleaned = normalize(txt);
+  const sanitized = sanitizeTranscriptText(txt);
+  const cleaned = normalize(sanitized);
   if (!cleaned) return;
 
   const now = Date.now();
@@ -353,7 +421,8 @@ function addFinalSpeech(txt) {
 }
 
 function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
-  const cleaned = normalize(txt);
+  const sanitized = sanitizeTranscriptText(txt);
+  const cleaned = normalize(sanitized);
   if (!cleaned) return;
 
   removeInterimIfAny();
@@ -589,6 +658,9 @@ function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
   if (!s) return true;
 
+  // Hard-drop prompt leakage (your exact issue)
+  if (isPromptLeak(s)) return true;
+
   const noise = [
     "thanks for watching",
     "thank you for watching",
@@ -720,7 +792,7 @@ function asrFinalizeItem(which, itemId, transcript) {
   delete s.itemEntry[itemId];
   delete s.itemText[itemId];
 
-  const final = normalize(transcript);
+  const final = sanitizeTranscriptText(transcript);
   if (!final) return;
 
   addFinalSpeech(final);
@@ -729,21 +801,20 @@ function asrFinalizeItem(which, itemId, transcript) {
 function sendRealtimeSessionUpdate(ws, which, manualCommit) {
   const isSys = which === "sys";
 
+  const transcription = {
+    model: REALTIME_ASR_MODEL,
+    language: TRANSCRIBE_LANGUAGE
+  };
+  if (REALTIME_TRANSCRIBE_PROMPT) transcription.prompt = REALTIME_TRANSCRIBE_PROMPT;
+
   const payload = {
     type: "session.update",
     session: {
-      // Transcription session: configure input audio format and transcription
       audio: {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           noise_reduction: { type: isSys ? "far_field" : "near_field" },
-          transcription: {
-            model: REALTIME_ASR_MODEL,
-            language: "en",
-            prompt: REALTIME_TRANSCRIBE_PROMPT
-          },
-          // If manualCommit => turn_detection must be null (we manage commits)
-          // If not manualCommit => server_vad works but deltas arrive only after commit/silence.
+          transcription,
           turn_detection: manualCommit ? null : {
             type: "server_vad",
             threshold: 0.5,
@@ -792,7 +863,8 @@ async function startStreamingAsr(which, mediaStream, opts = {}) {
     itemEntry: {},
     bytesSinceCommit: 0,
     manualCommit: !!opts.manualCommit,
-    manualCommitEveryMs: Number(opts.manualCommitEveryMs || 0)
+    manualCommitEveryMs: Number(opts.manualCommitEveryMs || 0),
+    lastCommitAt: 0
   };
 
   if (which === "mic") micAsr = state;
@@ -815,7 +887,6 @@ async function startStreamingAsr(which, mediaStream, opts = {}) {
   gain.connect(ctx.destination);
 
   ws.onopen = () => {
-    // Correct config per current realtime transcription docs: session.update + audio.input.* config
     sendRealtimeSessionUpdate(ws, which, state.manualCommit);
 
     // audio append loop
@@ -846,20 +917,22 @@ async function startStreamingAsr(which, mediaStream, opts = {}) {
       state.bytesSinceCommit += mergedLen;
     }, ASR_SEND_EVERY_MS);
 
-    // NEW: system audio needs periodic commits to get “live” text even during continuous audio
+    // periodic commits (manual) — tuned for accuracy
     if (state.manualCommit && state.manualCommitEveryMs > 0) {
       state.commitTimer = setInterval(() => {
         if (!isRunning) return;
         if (ws.readyState !== 1) return;
 
-        // Avoid committing empty buffers
+        const now = Date.now();
         if (state.bytesSinceCommit < MIN_BYTES_BEFORE_COMMIT) return;
+        if (now - (state.lastCommitAt || 0) < state.manualCommitEveryMs) return;
 
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
 
+        state.lastCommitAt = now;
         state.bytesSinceCommit = 0;
-      }, state.manualCommitEveryMs);
+      }, Math.max(120, Math.floor(state.manualCommitEveryMs / 3)));
     }
 
     setStatus(
@@ -1047,7 +1120,14 @@ async function enableMicStreamingFallback() {
   if (micSrIsHealthy()) return;
 
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: false
+    });
   } catch {
     setStatus(audioStatus, "Mic permission denied for streaming ASR.", "text-red-600");
     return;
@@ -1101,7 +1181,14 @@ async function enableMicRecorderFallback() {
   if (micSrIsHealthy()) return;
 
   try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+    micStream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true
+      },
+      video: false
+    });
   } catch {
     setStatus(audioStatus, "Mic permission denied for fallback recorder.", "text-red-600");
     return;
@@ -1186,7 +1273,8 @@ async function transcribeMicBlob(blob, myEpoch) {
   const type = (blob.type || "").toLowerCase();
   const ext = type.includes("ogg") ? "ogg" : "webm";
   fd.append("file", blob, `mic.${ext}`);
-  fd.append("prompt", TRANSCRIBE_PROMPT);
+  fd.append("language", TRANSCRIBE_LANGUAGE);
+  if (TRANSCRIBE_PROMPT) fd.append("prompt", TRANSCRIBE_PROMPT);
 
   const res = await apiFetch("transcribe", {
     method: "POST",
@@ -1204,9 +1292,10 @@ async function transcribeMicBlob(blob, myEpoch) {
 
   const data = await res.json().catch(() => ({}));
   const raw = String(data.text || "");
-  if (looksLikeWhisperHallucination(raw)) return;
+  const sanitized = sanitizeTranscriptText(raw);
+  if (looksLikeWhisperHallucination(sanitized)) return;
 
-  const cleaned = dedupeByTail(raw, {
+  const cleaned = dedupeByTail(sanitized, {
     get value() { return lastMicTail; },
     set value(v) { lastMicTail = v; }
   });
@@ -1389,7 +1478,8 @@ async function transcribeSysBlob(blob, myEpoch) {
   const type = (blob.type || "").toLowerCase();
   const ext = type.includes("ogg") ? "ogg" : "webm";
   fd.append("file", blob, `sys.${ext}`);
-  fd.append("prompt", TRANSCRIBE_PROMPT);
+  fd.append("language", TRANSCRIBE_LANGUAGE);
+  if (TRANSCRIBE_PROMPT) fd.append("prompt", TRANSCRIBE_PROMPT);
 
   const res = await apiFetch("transcribe", {
     method: "POST",
@@ -1417,9 +1507,10 @@ async function transcribeSysBlob(blob, myEpoch) {
 
   const data = await res.json().catch(() => ({}));
   const raw = String(data.text || "");
-  if (looksLikeWhisperHallucination(raw)) return;
+  const sanitized = sanitizeTranscriptText(raw);
+  if (looksLikeWhisperHallucination(sanitized)) return;
 
-  const cleaned = dedupeByTail(raw, {
+  const cleaned = dedupeByTail(sanitized, {
     get value() { return lastSysTail; },
     set value(v) { lastSysTail = v; }
   });
