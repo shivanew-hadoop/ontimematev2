@@ -51,7 +51,7 @@ const responseBox = document.getElementById("responseBox");
 const startBtn = document.getElementById("startBtn");
 const stopBtn = document.getElementById("stopBtn");
 const sysBtn = document.getElementById("sysBtn");
-const micBtn = document.getElementById("micBtn"); // Mic toggle
+const micBtn = document.getElementById("micBtn"); // NEW
 const clearBtn = document.getElementById("clearBtn");
 const resetBtn = document.getElementById("resetBtn");
 const audioStatus = document.getElementById("audioStatus");
@@ -68,7 +68,7 @@ let isRunning = false;
 
 let hiddenInstructions = "";
 
-// Mic toggle (OFF by default)
+// Mic enabled flag (OFF by default) — NEW
 let micEnabled = false;
 
 // SpeechRecognition (fastest live words)
@@ -112,10 +112,7 @@ let lastFinalAt = 0;
 // Transcript blocks
 let timeline = [];
 let lastSpeechAt = 0;
-
-// Stable cursoring
-let timelineSeq = 0;
-let sentSeq = 0;
+let sentCursor = 0;
 
 // “pin to top” behavior
 let pinnedTop = true;
@@ -138,8 +135,8 @@ let transcriptEpoch = 0;
 //--------------------------------------------------------------
 // STREAMING ASR (Realtime)
 //--------------------------------------------------------------
-const USE_STREAMING_ASR_SYS = true;     // system audio -> realtime transcription
-const USE_STREAMING_ASR_MIC_FALLBACK = true; // if SpeechRecognition missing/weak -> realtime transcription
+const USE_STREAMING_ASR_SYS = true;
+const USE_STREAMING_ASR_MIC_FALLBACK = true;
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
 const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
@@ -148,36 +145,19 @@ const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
 const ASR_SEND_EVERY_MS = 40;
 const ASR_TARGET_RATE = 24000;
 
+// IMPORTANT: DO NOT use instruction-style prompt here (it leaks into transcript)
+// Keep empty for stability.
+const REALTIME_TRANSCRIBE_PROMPT = "";
+
 let realtimeSecretCache = null; // { value, expires_at }
 
-// sessions
+// system audio: force periodic commits to get continuous updates (no need to “stop speaking”)
+const SYS_FORCE_COMMIT_MS = 450;   // tweak 350–600 if you want faster/slower
+const MIN_BYTES_BEFORE_COMMIT = 7000; // avoid “buffer empty” errors
+
+// separate sessions for mic vs system
 let micAsr = null;
 let sysAsr = null;
-
-// SYSTEM streaming behavior
-const SYS_ASR_MANUAL_COMMIT = true;
-const SYS_ASR_COMMIT_EVERY_MS = 450;
-const SYS_ASR_MIN_VOICED_MS = 160;
-
-// CRITICAL FIX: Gate commits by voice energy (prevents garbage output)
-const SYS_RMS_THRESHOLD = 0.007; // tune 0.005–0.012 if needed
-const SYS_SILENCE_CLEAR_MS = 1600; // if mostly silence for this long -> clear buffer (no commit)
-
-// safer prompt for MIC only; SYSTEM uses no prompt to reduce leakage
-const REALTIME_TRANSCRIBE_PROMPT = "Verbatim transcript. No added words. No translation.";
-
-// boilerplate/leak phrases
-const DROP_TRANSCRIPT_PHRASES = [
-  "additional context/instructions",
-  "you will receive additional context",
-  "transcribe exactly",
-  "do not translate",
-  "system prompt",
-  "developer message",
-  "assistant:",
-  "user:",
-  "instructions:"
-];
 
 //--------------------------------------------------------------
 // CONSTANTS
@@ -203,7 +183,7 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Legacy transcribe prompt (kept as-is)
+// Keep your REST /transcribe prompt unchanged (this is not the realtime prompt)
 const TRANSCRIBE_PROMPT =
   "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
 
@@ -319,8 +299,8 @@ function getAllBlocksNewestFirst() {
 
 function getFreshBlocksText() {
   return timeline
-    .filter(x => x && x.seq > sentSeq && x !== micInterimEntry)
-    .sort((a, b) => (a.seq || 0) - (b.seq || 0))
+    .slice(sentCursor)
+    .filter(x => x && x !== micInterimEntry)
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -333,6 +313,7 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
+// pause-aware append
 function removeInterimIfAny() {
   if (!micInterimEntry) return;
   const idx = timeline.indexOf(micInterimEntry);
@@ -340,7 +321,7 @@ function removeInterimIfAny() {
   micInterimEntry = null;
 }
 
-// Mic SR + Mic fallback final pipeline
+// HARD dedupe at final stage
 function addFinalSpeech(txt) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -360,7 +341,7 @@ function addFinalSpeech(txt) {
   const gap = now - (lastSpeechAt || 0);
 
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    timeline.push({ t: now, text: cleaned, seq: ++timelineSeq });
+    timeline.push({ t: now, text: cleaned });
   } else {
     const last = timeline[timeline.length - 1];
     last.text = normalize((last.text || "") + " " + cleaned);
@@ -371,7 +352,6 @@ function addFinalSpeech(txt) {
   updateTranscript();
 }
 
-// System “word-by-word”
 function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -383,7 +363,7 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
 
   let entry;
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    entry = { t: now, text: "", seq: ++timelineSeq };
+    entry = { t: now, text: "" };
     timeline.push(entry);
   } else {
     entry = timeline[timeline.length - 1];
@@ -400,7 +380,6 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
     if (!isRunning) return clearInterval(timer);
     if (i >= words.length) return clearInterval(timer);
     entry.text += (entry.text && !entry.text.endsWith(" ") ? " " : "") + words[i++];
-    entry.t = Date.now();
     updateTranscript();
   }, msPerWord);
 }
@@ -442,6 +421,7 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
+// instant local “draft question”
 function buildDraftQuestion(base) {
   if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
   if (isGenericProjectAsk(base)) {
@@ -605,42 +585,6 @@ function dedupeByTail(text, tailRef) {
   return normalize(cleaned);
 }
 
-//--------------------------------------------------------------
-// SANITIZE (fix “additional context / do not translate / mixed junk”)
-//--------------------------------------------------------------
-function sanitizeTranscriptText(raw) {
-  let s = normalize(String(raw || ""));
-  if (!s) return "";
-
-  const lc = s.toLowerCase();
-
-  // Count phrase hits
-  let hits = 0;
-  for (const p of DROP_TRANSCRIPT_PHRASES) if (lc.includes(p)) hits++;
-
-  // Ratio of non-basic chars (helps drop the mixed-script garbage when it contains leak phrases)
-  const basic = /[A-Za-z0-9\s.,!?'"():;\-]/;
-  let nonBasic = 0;
-  for (const ch of s) if (!basic.test(ch)) nonBasic++;
-  const nonBasicRatio = nonBasic / Math.max(1, s.length);
-
-  // If it smells like leakage, drop hard
-  if (hits >= 2) return "";
-  if (hits >= 1 && (s.length < 240 || nonBasicRatio > 0.18)) return "";
-
-  // Otherwise remove those phrases if embedded
-  let out = s;
-  for (const p of DROP_TRANSCRIPT_PHRASES) {
-    const re = new RegExp(p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "ig");
-    out = out.replace(re, " ");
-  }
-  out = normalize(out);
-
-  // Drop tiny leftovers
-  if (!out || out.length < 2) return "";
-  return out;
-}
-
 function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
   if (!s) return true;
@@ -652,10 +596,13 @@ function looksLikeWhisperHallucination(t) {
     "please like and subscribe",
     "transcribe clearly in english",
     "handle indian",
+    "i don't know",
+    "i dont know",
     "this is microphone speech",
     "this is the microphone speech"
   ];
 
+  if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) return true;
   return noise.some(p => s.includes(p));
 }
 
@@ -736,9 +683,9 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
-// MIC delta display (optional)
-function asrUpsertDeltaMic(itemId, deltaText) {
-  const s = micAsr;
+// create/update a partial line in timeline for a given item_id
+function asrUpsertDelta(which, itemId, deltaText) {
+  const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
   const now = Date.now();
@@ -749,7 +696,7 @@ function asrUpsertDeltaMic(itemId, deltaText) {
   if (!cur) return;
 
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur, seq: ++timelineSeq };
+    const entry = { t: now, text: cur };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
@@ -761,41 +708,57 @@ function asrUpsertDeltaMic(itemId, deltaText) {
   updateTranscript();
 }
 
-// session.update: SYSTEM omits prompt + omits turn_detection (manual commit)
-function sendAsrSessionUpdate(ws, which) {
-  const transcription = {
-    model: REALTIME_ASR_MODEL,
-    language: "en"
-  };
+function asrFinalizeItem(which, itemId, transcript) {
+  const s = which === "mic" ? micAsr : sysAsr;
+  if (!s) return;
 
-  // MIC can have a short prompt; SYSTEM should not (reduces leakage)
-  if (which !== "sys") transcription.prompt = REALTIME_TRANSCRIBE_PROMPT;
-
-  const input = {
-    format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
-    noise_reduction: { type: "far_field" },
-    transcription
-  };
-
-  // Only include turn_detection for MIC (SYSTEM manual commit = no VAD)
-  if (!(which === "sys" && SYS_ASR_MANUAL_COMMIT)) {
-    input.turn_detection = {
-      type: "server_vad",
-      threshold: 0.5,
-      prefix_padding_ms: 300,
-      silence_duration_ms: 350
-    };
+  const entry = s.itemEntry[itemId];
+  if (entry) {
+    const idx = timeline.indexOf(entry);
+    if (idx >= 0) timeline.splice(idx, 1);
   }
+  delete s.itemEntry[itemId];
+  delete s.itemText[itemId];
 
-  const sessionUpdate = {
-    type: "session.update",
-    session: { audio: { input } }
-  };
+  const final = normalize(transcript);
+  if (!final) return;
 
-  try { ws.send(JSON.stringify(sessionUpdate)); } catch {}
+  addFinalSpeech(final);
 }
 
-async function startStreamingAsr(which, mediaStream) {
+function sendRealtimeSessionUpdate(ws, which, manualCommit) {
+  const isSys = which === "sys";
+
+  const payload = {
+    type: "session.update",
+    session: {
+      // Transcription session: configure input audio format and transcription
+      audio: {
+        input: {
+          format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
+          noise_reduction: { type: isSys ? "far_field" : "near_field" },
+          transcription: {
+            model: REALTIME_ASR_MODEL,
+            language: "en",
+            prompt: REALTIME_TRANSCRIBE_PROMPT
+          },
+          // If manualCommit => turn_detection must be null (we manage commits)
+          // If not manualCommit => server_vad works but deltas arrive only after commit/silence.
+          turn_detection: manualCommit ? null : {
+            type: "server_vad",
+            threshold: 0.5,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 350
+          }
+        }
+      }
+    }
+  };
+
+  try { ws.send(JSON.stringify(payload)); } catch {}
+}
+
+async function startStreamingAsr(which, mediaStream, opts = {}) {
   if (!isRunning) return false;
 
   stopAsrSession(which);
@@ -825,10 +788,11 @@ async function startStreamingAsr(which, mediaStream) {
     queue,
     sendTimer: null,
     commitTimer: null,
-    audioMsSinceCommit: 0,
-    voicedMsSinceCommit: 0,
     itemText: {},
-    itemEntry: {}
+    itemEntry: {},
+    bytesSinceCommit: 0,
+    manualCommit: !!opts.manualCommit,
+    manualCommitEveryMs: Number(opts.manualCommitEveryMs || 0)
   };
 
   if (which === "mic") micAsr = state;
@@ -841,17 +805,6 @@ async function startStreamingAsr(which, mediaStream) {
     const ch0 = e.inputBuffer.getChannelData(0);
     const inRate = ctx.sampleRate || 48000;
 
-    // Voice energy gate (SYSTEM only)
-    if (which === "sys") {
-      let sum = 0;
-      for (let i = 0; i < ch0.length; i++) sum += ch0[i] * ch0[i];
-      const rms = Math.sqrt(sum / Math.max(1, ch0.length));
-      const frameMs = (ch0.length / inRate) * 1000;
-
-      state.audioMsSinceCommit += frameMs;
-      if (rms >= SYS_RMS_THRESHOLD) state.voicedMsSinceCommit += frameMs;
-    }
-
     const resampled = resampleFloat32(ch0, inRate, ASR_TARGET_RATE);
     const bytes = floatToInt16Bytes(resampled);
     if (bytes.length) queue.push(bytes);
@@ -862,8 +815,10 @@ async function startStreamingAsr(which, mediaStream) {
   gain.connect(ctx.destination);
 
   ws.onopen = () => {
-    sendAsrSessionUpdate(ws, which);
+    // Correct config per current realtime transcription docs: session.update + audio.input.* config
+    sendRealtimeSessionUpdate(ws, which, state.manualCommit);
 
+    // audio append loop
     state.sendTimer = setInterval(() => {
       if (!isRunning) return;
       if (ws.readyState !== 1) return;
@@ -871,7 +826,7 @@ async function startStreamingAsr(which, mediaStream) {
 
       let mergedLen = 0;
       const parts = [];
-      while (queue.length && mergedLen < 4800 * 2) {
+      while (queue.length && mergedLen < 4800 * 2) { // ~100ms at 24k
         const b = queue.shift();
         mergedLen += b.length;
         parts.push(b);
@@ -887,37 +842,31 @@ async function startStreamingAsr(which, mediaStream) {
 
       const evt = { type: "input_audio_buffer.append", audio: base64FromBytes(merged) };
       try { ws.send(JSON.stringify(evt)); } catch {}
+
+      state.bytesSinceCommit += mergedLen;
     }, ASR_SEND_EVERY_MS);
 
-    // SYSTEM: manual commit ONLY when voiced audio exists.
-    // If long silence, clear buffer WITHOUT commit (prevents garbage output).
-    if (which === "sys" && SYS_ASR_MANUAL_COMMIT) {
+    // NEW: system audio needs periodic commits to get “live” text even during continuous audio
+    if (state.manualCommit && state.manualCommitEveryMs > 0) {
       state.commitTimer = setInterval(() => {
         if (!isRunning) return;
         if (ws.readyState !== 1) return;
 
-        // If mostly silence for long time, discard buffer (NO commit)
-        if (state.audioMsSinceCommit >= SYS_SILENCE_CLEAR_MS && state.voicedMsSinceCommit < 40) {
-          try { ws.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
-          state.audioMsSinceCommit = 0;
-          state.voicedMsSinceCommit = 0;
-          return;
-        }
-
-        // Commit only when we have enough voiced audio
-        if (state.voicedMsSinceCommit < SYS_ASR_MIN_VOICED_MS) return;
+        // Avoid committing empty buffers
+        if (state.bytesSinceCommit < MIN_BYTES_BEFORE_COMMIT) return;
 
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.commit" })); } catch {}
         try { ws.send(JSON.stringify({ type: "input_audio_buffer.clear" })); } catch {}
 
-        state.audioMsSinceCommit = 0;
-        state.voicedMsSinceCommit = 0;
-      }, SYS_ASR_COMMIT_EVERY_MS);
+        state.bytesSinceCommit = 0;
+      }, state.manualCommitEveryMs);
     }
 
     setStatus(
       audioStatus,
-      which === "sys" ? "System audio (streaming) enabled." : "Mic (streaming) enabled.",
+      which === "sys"
+        ? "System audio (streaming ASR) enabled."
+        : "Mic (streaming ASR) enabled.",
       "text-green-600"
     );
   };
@@ -929,30 +878,13 @@ async function startStreamingAsr(which, mediaStream) {
 
     if (ev.type === "error") return;
 
-    // MIC streaming: show deltas (optional)
-    if (ev.type === "conversation.item.input_audio_transcription.delta" && which === "mic") {
-      asrUpsertDeltaMic(ev.item_id, ev.delta || "");
+    if (ev.type === "conversation.item.input_audio_transcription.delta") {
+      asrUpsertDelta(which, ev.item_id, ev.delta || "");
       return;
     }
 
     if (ev.type === "conversation.item.input_audio_transcription.completed") {
-      let transcript = sanitizeTranscriptText(ev.transcript || "");
-      if (!transcript) return;
-      if (looksLikeWhisperHallucination(transcript)) return;
-
-      if (which === "sys") {
-        const cleaned = dedupeByTail(transcript, {
-          get value() { return lastSysTail; },
-          set value(v) { lastSysTail = v; }
-        });
-        if (cleaned) addTypewriterSpeech(cleaned);
-      } else {
-        const cleaned = dedupeByTail(transcript, {
-          get value() { return lastMicTail; },
-          set value(v) { lastMicTail = v; }
-        });
-        if (cleaned) addFinalSpeech(cleaned);
-      }
+      asrFinalizeItem(which, ev.item_id, ev.transcript || "");
       return;
     }
   };
@@ -961,6 +893,50 @@ async function startStreamingAsr(which, mediaStream) {
   ws.onclose = () => {};
 
   return true;
+}
+
+//--------------------------------------------------------------
+// MIC ENABLE / DISABLE (UI toggle) — NEW
+//--------------------------------------------------------------
+function updateMicButtonUI() {
+  if (!micBtn) return;
+
+  micBtn.textContent = micEnabled ? "Mic: ON" : "Mic: OFF";
+
+  micBtn.classList.remove("bg-gray-600", "bg-green-700", "opacity-50");
+  micBtn.classList.add(micEnabled ? "bg-green-700" : "bg-gray-600");
+
+  // allow toggling even when stopped
+  micBtn.disabled = false;
+}
+
+async function setMicEnabled(on) {
+  micEnabled = !!on;
+  updateMicButtonUI();
+
+  // If app is running, start/stop ONLY mic pipeline, do NOT touch system audio or transcript.
+  if (!isRunning) return;
+
+  if (!micEnabled) {
+    stopMicOnly();
+    stopMicRecorderOnly();
+    stopAsrSession("mic");
+    setStatus(audioStatus, sysTrack ? "System audio running. Mic muted." : "Mic muted.", "text-orange-600");
+    return;
+  }
+
+  // mic ON
+  const micOk = startMic();
+  if (!micOk) {
+    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
+    if (USE_STREAMING_ASR_MIC_FALLBACK) {
+      await enableMicStreamingFallback().catch(() => {});
+    }
+    if (!micAsr && !micStream) {
+      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
+      await enableMicRecorderFallback().catch(() => {});
+    }
+  }
 }
 
 //--------------------------------------------------------------
@@ -979,6 +955,8 @@ function stopMicOnly() {
 }
 
 function startMic() {
+  if (!micEnabled) return false;
+
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
     setStatus(audioStatus, "SpeechRecognition not supported in this browser.", "text-red-600");
@@ -1014,7 +992,7 @@ function startMic() {
 
     if (latestInterim) {
       removeInterimIfAny();
-      micInterimEntry = { t: Date.now(), text: latestInterim, seq: ++timelineSeq };
+      micInterimEntry = { t: Date.now(), text: latestInterim };
       timeline.push(micInterimEntry);
       updateTranscript();
     }
@@ -1082,7 +1060,10 @@ async function enableMicStreamingFallback() {
     return;
   }
 
-  await startStreamingAsr("mic", micStream);
+  await startStreamingAsr("mic", micStream, {
+    manualCommit: false,
+    manualCommitEveryMs: 0
+  });
 }
 
 // ---- Mic fallback (MediaRecorder -> /transcribe) ----
@@ -1214,12 +1195,15 @@ async function transcribeMicBlob(blob, myEpoch) {
   }, false);
 
   if (myEpoch !== transcriptEpoch) return;
-  if (!res.ok) return;
+
+  if (!res.ok) {
+    const errText = await res.text().catch(() => "");
+    setStatus(audioStatus, `Mic transcribe failed (${res.status}). ${errText.slice(0, 120)}`, "text-red-600");
+    return;
+  }
 
   const data = await res.json().catch(() => ({}));
-  let raw = String(data.text || "");
-  raw = sanitizeTranscriptText(raw);
-  if (!raw) return;
+  const raw = String(data.text || "");
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeByTail(raw, {
@@ -1260,6 +1244,7 @@ function stopSystemAudioOnly() {
   sysErrBackoffUntil = 0;
 }
 
+// Legacy system audio recorder pipeline
 async function enableSystemAudioLegacy() {
   if (!isRunning) return;
 
@@ -1289,6 +1274,7 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
+// NEW: streaming ASR system audio (with periodic commits)
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
@@ -1305,7 +1291,7 @@ async function enableSystemAudioStreaming() {
   if (!sysTrack) {
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
+    showingFixHint();
     return;
   }
 
@@ -1315,7 +1301,10 @@ async function enableSystemAudioStreaming() {
   };
 
   try {
-    const ok = await startStreamingAsr("sys", sysStream);
+    const ok = await startStreamingAsr("sys", sysStream, {
+      manualCommit: true,
+      manualCommitEveryMs: SYS_FORCE_COMMIT_MS
+    });
     if (!ok) throw new Error("ASR start failed");
   } catch (e) {
     console.error(e);
@@ -1324,12 +1313,15 @@ async function enableSystemAudioStreaming() {
   }
 }
 
+function showingFixHint() {
+  showBanner("System audio requires selecting a window/tab and enabling “Share audio” in the picker.");
+}
+
 async function enableSystemAudio() {
   if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming();
   return enableSystemAudioLegacy();
 }
 
-// Legacy system recorder pipeline
 function startSystemSegmentRecorder() {
   if (!sysTrack) return;
 
@@ -1409,6 +1401,9 @@ async function transcribeSysBlob(blob, myEpoch) {
 
   if (!res.ok) {
     sysErrCount++;
+    const errText = await res.text().catch(() => "");
+    setStatus(audioStatus, `System transcribe failed (${res.status}). ${errText.slice(0, 160)}`, "text-red-600");
+
     if (sysErrCount >= SYS_ERR_MAX) {
       sysErrBackoffUntil = Date.now() + SYS_ERR_BACKOFF_MS;
       stopSystemAudioOnly();
@@ -1421,9 +1416,7 @@ async function transcribeSysBlob(blob, myEpoch) {
   sysErrBackoffUntil = 0;
 
   const data = await res.json().catch(() => ({}));
-  let raw = String(data.text || "");
-  raw = sanitizeTranscriptText(raw);
-  if (!raw) return;
+  const raw = String(data.text || "");
   if (looksLikeWhisperHallucination(raw)) return;
 
   const cleaned = dedupeByTail(raw, {
@@ -1606,71 +1599,6 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 //--------------------------------------------------------------
-// MIC TOGGLE
-//--------------------------------------------------------------
-function updateMicBtnUI() {
-  if (!micBtn) return;
-
-  micBtn.textContent = micEnabled ? "Mic: ON" : "Mic: OFF";
-  micBtn.classList.remove("bg-gray-700", "bg-green-700", "opacity-50");
-  micBtn.classList.add(micEnabled ? "bg-green-700" : "bg-gray-700");
-
-  if (!isRunning) {
-    micBtn.disabled = true;
-    micBtn.classList.add("opacity-50");
-  } else {
-    micBtn.disabled = false;
-  }
-}
-
-async function enableMicCapture() {
-  micEnabled = true;
-  updateMicBtnUI();
-
-  const micOk = startMic();
-  if (!micOk) {
-    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-    if (USE_STREAMING_ASR_MIC_FALLBACK) {
-      await enableMicStreamingFallback().catch(() => {});
-    }
-    if (!micAsr && !micStream) {
-      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
-      await enableMicRecorderFallback().catch(() => {});
-    }
-  }
-
-  setTimeout(() => {
-    if (!isRunning) return;
-    if (!micEnabled) return;
-    if (micSrIsHealthy()) return;
-
-    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
-      enableMicStreamingFallback().catch(() => {});
-      return;
-    }
-    if (!micStream) enableMicRecorderFallback().catch(() => {});
-  }, 2000);
-}
-
-function disableMicCapture() {
-  micEnabled = false;
-  updateMicBtnUI();
-
-  stopMicOnly();
-  stopMicRecorderOnly();
-  stopAsrSession("mic");
-
-  removeInterimIfAny();
-  setStatus(audioStatus, "Mic muted (OFF). System audio continues.", "text-orange-600");
-}
-
-micBtn && (micBtn.onclick = async () => {
-  if (!isRunning) return;
-  if (micEnabled) disableMicCapture();
-  else await enableMicCapture();
-});
-
-//--------------------------------------------------------------
 // START / STOP
 //--------------------------------------------------------------
 async function startAll() {
@@ -1683,10 +1611,7 @@ async function startAll() {
   timeline = [];
   micInterimEntry = null;
   lastSpeechAt = 0;
-
-  timelineSeq = 0;
-  sentSeq = 0;
-
+  sentCursor = 0;
   pinnedTop = true;
 
   lastSysTail = "";
@@ -1710,11 +1635,18 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // Mic OFF by default
-  micEnabled = false;
-  updateMicBtnUI();
-
-  setStatus(audioStatus, "Started. Mic is OFF by default. Turn Mic ON only if needed.", "text-green-600");
+  // mic is OFF by default; only start mic if micEnabled==true
+  updateMicButtonUI();
+  if (micEnabled) {
+    const micOk = startMic();
+    if (!micOk) {
+      setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
+      if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
+      if (!micAsr && !micStream) await enableMicRecorderFallback().catch(() => {});
+    }
+  } else {
+    setStatus(audioStatus, "Started. Mic is OFF (you can turn it ON anytime).", "text-orange-600");
+  }
 
   startCreditTicking();
 }
@@ -1724,9 +1656,9 @@ function stopAll() {
 
   stopMicOnly();
   stopMicRecorderOnly();
-  stopAsrSession("mic");
-
   stopSystemAudioOnly();
+
+  stopAsrSession("mic");
   stopAsrSession("sys");
 
   if (creditTimer) clearInterval(creditTimer);
@@ -1740,14 +1672,11 @@ function stopAll() {
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
 
-  micEnabled = false;
-  updateMicBtnUI();
-
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
 //--------------------------------------------------------------
-// HARD CLEAR
+// HARD CLEAR (stop late results + clear everything visible)
 //--------------------------------------------------------------
 function hardClearTranscript() {
   transcriptEpoch++;
@@ -1765,13 +1694,13 @@ function hardClearTranscript() {
   lastFinalText = "";
   lastFinalAt = 0;
 
+  if (micAsr) { micAsr.itemText = {}; micAsr.itemEntry = {}; }
+  if (sysAsr) { sysAsr.itemText = {}; sysAsr.itemEntry = {}; }
+
   timeline = [];
   micInterimEntry = null;
   lastSpeechAt = 0;
-
-  timelineSeq = 0;
-  sentSeq = 0;
-
+  sentCursor = 0;
   pinnedTop = true;
 
   updateTranscript();
@@ -1793,8 +1722,7 @@ sendBtn.onclick = async () => {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // cursor advance (do NOT clear transcript)
-  sentSeq = timelineSeq;
+  sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
 
@@ -1848,6 +1776,10 @@ window.addEventListener("load", async () => {
     return (window.location.href = "/auth?tab=login");
   }
 
+  // mic OFF by default
+  micEnabled = false;
+  updateMicButtonUI();
+
   chatHistory = [];
   resumeTextMem = "";
   if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
@@ -1859,10 +1791,7 @@ window.addEventListener("load", async () => {
   timeline = [];
   micInterimEntry = null;
   lastSpeechAt = 0;
-
-  timelineSeq = 0;
-  sentSeq = 0;
-
+  sentCursor = 0;
   pinnedTop = true;
 
   lastSysTail = "";
@@ -1883,9 +1812,6 @@ window.addEventListener("load", async () => {
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
 
-  micEnabled = false;
-  updateMicBtnUI();
-
   setStatus(audioStatus, "Stopped", "text-orange-600");
 });
 
@@ -1895,3 +1821,10 @@ window.addEventListener("load", async () => {
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 sysBtn.onclick = enableSystemAudio;
+
+// NEW: mic toggle button (does NOT clear transcript; does NOT affect system audio)
+if (micBtn) {
+  micBtn.onclick = async () => {
+    await setMicEnabled(!micEnabled);
+  };
+}
