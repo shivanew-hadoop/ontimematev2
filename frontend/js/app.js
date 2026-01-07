@@ -447,7 +447,7 @@ function addFinalSpeech(txt, role) {
   updateTranscript();
 }
 
-function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
+function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "interviewer") {
   const cleaned = normalize(txt);
   if (!cleaned) return;
 
@@ -458,10 +458,11 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
 
   let entry;
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    entry = { t: now, text: "" };
+    entry = { t: now, text: "", role };   // ✅ role added
     timeline.push(entry);
   } else {
     entry = timeline[timeline.length - 1];
+    if (!entry.role) entry.role = role;   // ✅ ensure role exists
     if (entry.text) entry.text = normalize(entry.text) + " ";
     entry.t = now;
   }
@@ -478,6 +479,7 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD) {
     updateTranscript();
   }, msPerWord);
 }
+
 
 //--------------------------------------------------------------
 // QUESTION RELEVANCE HELPERS
