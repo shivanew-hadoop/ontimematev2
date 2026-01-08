@@ -1529,11 +1529,21 @@ function startCreditTicking() {
 // SEND QUEUE (prevent stream aborts)
 let sendQueue = [];
 let sendLocked = false;
-function abortChatStreamOnly() {
-  try { chatAbort?.abort(); } catch {}
+function abortChatStreamOnly(silent = true) {
+  try {
+    chatAbort?.abort();
+  } catch {}
+
   chatAbort = null;
+
+  // Do NOT mark failure on abort
+  if (silent) {
+    setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
+  }
+
   chatStreamActive = false;
 }
+
 
 function pushHistory(role, content) {
   const c = normalize(content);
@@ -1550,7 +1560,8 @@ function compactHistoryForRequest() {
 }
 
 async function startChatStreaming(prompt, userTextForHistory) {
-  abortChatStreamOnly();
+  // Abort any existing stream, but SILENTLY (no "Failed" UI)
+  abortChatStreamOnly(true);
 
   chatAbort = new AbortController();
   chatStreamActive = true;
@@ -1597,6 +1608,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+
+      // if a newer stream started, stop updating UI
       if (!chatStreamActive || mySeq !== chatStreamSeq) break;
 
       raw += decoder.decode(value, { stream: true });
@@ -1610,19 +1623,37 @@ async function startChatStreaming(prompt, userTextForHistory) {
       if (raw.length < 1800) render();
     }
 
+    // Only finalize if we are still the active stream
     if (chatStreamActive && mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
       pushHistory("assistant", raw);
     }
   } catch (e) {
+    // ✅ KEY FIX: Abort is NOT a failure
+    const aborted =
+      chatAbort?.signal?.aborted ||
+      e?.name === "AbortError" ||
+      String(e?.message || "").toLowerCase().includes("abort");
+
+    if (aborted) {
+      // silent cancel (new request will start immediately)
+      return;
+    }
+
     console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
     responseBox.innerHTML = `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
   } finally {
     if (flushTimer) clearInterval(flushTimer);
+
+    // Only mark inactive if we are still the latest stream
+    if (mySeq === chatStreamSeq) {
+      chatStreamActive = false;
+    }
   }
 }
+
 
 //--------------------------------------------------------------
 // RESUME UPLOAD
@@ -1786,18 +1817,39 @@ function hardClearTranscript() {
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
+  // 1) Always take textbox immediately (your requirement)
   const manual = normalize(manualQuestion?.value || "");
-  const fresh = normalize(getFreshInterviewerBlocksText());
-  const base = manual || fresh;
+
+  // 2) If textbox empty, fallback to transcript blocks (does not wait for system audio stop)
+  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+  const base = manual || freshInterviewer;
   if (!base) return;
 
-  // enqueue prompt instead of aborting active stream
-  sendQueue.push(base);
-
+  // Clear textbox immediately (UX like huddlemate)
   if (manualQuestion) manualQuestion.value = "";
 
-  processSendQueue();
+  // Preempt current stream NOW
+  abortChatStreamOnly(true);
+
+  // Update transcript cursor (so next "fresh" is clean)
+  blockMicUntil = Date.now() + 700;
+  removeInterimIfAny();
+
+  sentCursor = timeline.length;
+  pinnedTop = true;
+  updateTranscript();
+
+  const draftQ = buildDraftQuestion(base);
+  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
+  setStatus(sendStatus, "Queued…", "text-orange-600");
+
+  const mode = modeSelect?.value || "interview";
+  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
+
+  // Start streaming immediately (new wins)
+  await startChatStreaming(promptToSend, base);
 };
+
 
 async function processSendQueue() {
   if (sendLocked) return;
@@ -1861,7 +1913,7 @@ resetBtn.onclick = async () => {
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
   resumeTextMem = "";
-  abortChatStreamOnly();
+  // abortChatStreamOnly();
   stopAll();
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
