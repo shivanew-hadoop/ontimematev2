@@ -1526,6 +1526,9 @@ function startCreditTicking() {
 //--------------------------------------------------------------
 // CHAT STREAMING
 //--------------------------------------------------------------
+// SEND QUEUE (prevent stream aborts)
+let sendQueue = [];
+let sendLocked = false;
 function abortChatStreamOnly() {
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
@@ -1783,12 +1786,28 @@ function hardClearTranscript() {
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  abortChatStreamOnly();
-
   const manual = normalize(manualQuestion?.value || "");
   const fresh = normalize(getFreshInterviewerBlocksText());
   const base = manual || fresh;
   if (!base) return;
+
+  // enqueue prompt instead of aborting active stream
+  sendQueue.push(base);
+
+  if (manualQuestion) manualQuestion.value = "";
+
+  processSendQueue();
+};
+
+async function processSendQueue() {
+  if (sendLocked) return;
+  if (!sendQueue.length) return;
+
+  sendLocked = true;
+
+  // combine all queued prompts
+  const combined = sendQueue.join("\n\n");
+  sendQueue = [];
 
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
@@ -1797,17 +1816,30 @@ sendBtn.onclick = async () => {
   pinnedTop = true;
   updateTranscript();
 
-  if (manualQuestion) manualQuestion.value = "";
-
-  const draftQ = buildDraftQuestion(base);
-  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
-  setStatus(sendStatus, "Queued…", "text-orange-600");
+  const draftQ = buildDraftQuestion(combined);
+  responseBox.innerHTML = renderMarkdown(
+    `${draftQ}\n\n_Generating answer…_`
+  );
+  setStatus(sendStatus, "Streaming…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
-  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
+  const promptToSend =
+    mode === "interview"
+      ? buildInterviewQuestionPrompt(combined)
+      : combined;
 
-  await startChatStreaming(promptToSend, base);
-};
+  try {
+    await startChatStreaming(promptToSend, combined);
+  } finally {
+    sendLocked = false;
+
+    // if user clicked Send again while streaming
+    if (sendQueue.length) {
+      processSendQueue();
+    }
+  }
+}
+
 
 clearBtn.onclick = () => {
   hardClearTranscript();
@@ -1817,7 +1849,7 @@ clearBtn.onclick = () => {
 };
 
 resetBtn.onclick = async () => {
-  abortChatStreamOnly();
+  // abortChatStreamOnly();
   responseBox.innerHTML = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
