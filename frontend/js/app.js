@@ -69,6 +69,8 @@ let session = null;
 let isRunning = false;
 
 let hiddenInstructions = "";
+let lastCommittedText = "";
+let lastCommittedAt = 0;
 
 // === MIC MUTE CHANGE ===
 let micMuted = false;
@@ -418,18 +420,23 @@ function removeInterimIfAny() {
 
 // HARD dedupe at final stage
 function addFinalSpeech(txt, role) {
-   const cleaned = normalize(txt);
-   if (!cleaned) return;
+  const cleaned = normalize(txt);
+  if (!cleaned) return;
 
   const now = Date.now();
-  if (
-    cleaned.toLowerCase() === (lastFinalText || "").toLowerCase() &&
-    now - (lastFinalAt || 0) < 1200
-  ) {
-    return;
+
+  // 🔒 HARD DEDUPE (exact or near-exact repeat within short window)
+  const sameText =
+    cleaned.toLowerCase() === lastCommittedText.toLowerCase();
+
+  const tooSoon = now - lastCommittedAt < 2500; // 2.5 sec window
+
+  if (sameText && tooSoon) {
+    return; // ❌ drop duplicate
   }
-  lastFinalText = cleaned;
-  lastFinalAt = now;
+
+  lastCommittedText = cleaned;
+  lastCommittedAt = now;
 
   removeInterimIfAny();
 
@@ -446,6 +453,7 @@ function addFinalSpeech(txt, role) {
   lastSpeechAt = now;
   updateTranscript();
 }
+
 
 function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "interviewer") {
   const cleaned = normalize(txt);
@@ -1690,6 +1698,8 @@ resumeInput?.addEventListener("change", async () => {
 // START / STOP
 //--------------------------------------------------------------
 async function startAll() {
+  lastCommittedText = "";
+lastCommittedAt = 0;
   hideBanner();
   if (isRunning) return;
 
@@ -1785,6 +1795,8 @@ function stopAll() {
 //--------------------------------------------------------------
 function hardClearTranscript() {
   transcriptEpoch++;
+  lastCommittedText = "";
+lastCommittedAt = 0;
 
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
