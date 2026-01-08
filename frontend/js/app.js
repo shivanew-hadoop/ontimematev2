@@ -1831,47 +1831,47 @@ lastCommittedAt = 0;
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // Abort current stream immediately and allow new request to take priority
+  // Stop any running stream immediately
   abortChatStreamOnly(true);
 
-  // 1) Always prefer what user typed now (no waiting)
+  // Capture prompt instantly (no waiting for audio stop)
   const typedNow = normalize(manualQuestion?.value || "");
-
-  // 2) Interviewer-only blocks (can be empty mid-speech)
   const interviewerNow = normalize(getFreshInterviewerBlocksText());
+  const fallbackNow = normalize(
+    getAllBlocksNewestFirst().slice(0, 2).join(" ")
+  );
 
-  // 3) Fallback: latest visible transcript (mid-speech safe)
-  const fallbackNow = normalize(getAllBlocksNewestFirst().slice(0, 2).join(" "));
+  const promptNow = typedNow || interviewerNow || fallbackNow;
+  if (!promptNow) return;
 
-  // FINAL prompt selection
-  const basePrompt = typedNow || interviewerNow || fallbackNow;
-  if (!basePrompt) return;
-
-  // Prevent mic interim from polluting the send
+  // Block mic noise from leaking
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // Mark everything so far as "already sent"
+  // Mark transcript consumed
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
 
-  // Clear textbox immediately so next click captures new input
+  // Clear input immediately
   if (manualQuestion) manualQuestion.value = "";
 
-  // UI
-  const draftQ = buildDraftQuestion(basePrompt);
-  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
-  setStatus(sendStatus, "Queued…", "text-orange-600");
+  // Immediate UI feedback (no waiting)
+  responseBox.innerHTML = `
+    <b>Answer:</b><br>
+    <span class="opacity-70">Thinking…</span>
+  `;
+  setStatus(sendStatus, "Sending…", "text-orange-600");
 
-  // Prompt to backend
   const mode = modeSelect?.value || "interview";
-  const promptToSend = (mode === "interview")
-    ? buildInterviewQuestionPrompt(basePrompt)
-    : basePrompt;
+  const finalPrompt =
+    mode === "interview"
+      ? buildInterviewQuestionPrompt(promptNow)
+      : promptNow;
 
-  await startChatStreaming(promptToSend, basePrompt);
+  startChatStreaming(finalPrompt, promptNow);
 };
+
 
 
 
