@@ -1543,14 +1543,16 @@ function abortChatStreamOnly(silent = true) {
   } catch {}
 
   chatAbort = null;
+  chatStreamActive = false;
 
-  // Do NOT mark failure on abort
+  // 🔥 CRITICAL: invalidate ALL in-flight streams immediately
+  chatStreamSeq++;
+
   if (silent) {
     setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
   }
-
-  chatStreamActive = false;
 }
+
 
 
 function pushHistory(role, content) {
@@ -1829,38 +1831,48 @@ lastCommittedAt = 0;
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // 1) Always take textbox immediately (your requirement)
-  const manual = normalize(manualQuestion?.value || "");
-
-  // 2) If textbox empty, fallback to transcript blocks (does not wait for system audio stop)
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-  const base = manual || freshInterviewer;
-  if (!base) return;
-
-  // Clear textbox immediately (UX like huddlemate)
-  if (manualQuestion) manualQuestion.value = "";
-
-  // Preempt current stream NOW
+  // Abort current stream immediately and allow new request to take priority
   abortChatStreamOnly(true);
 
-  // Update transcript cursor (so next "fresh" is clean)
+  // 1) Always prefer what user typed now (no waiting)
+  const typedNow = normalize(manualQuestion?.value || "");
+
+  // 2) Interviewer-only blocks (can be empty mid-speech)
+  const interviewerNow = normalize(getFreshInterviewerBlocksText());
+
+  // 3) Fallback: latest visible transcript (mid-speech safe)
+  const fallbackNow = normalize(getAllBlocksNewestFirst().slice(0, 2).join(" "));
+
+  // FINAL prompt selection
+  const basePrompt = typedNow || interviewerNow || fallbackNow;
+  if (!basePrompt) return;
+
+  // Prevent mic interim from polluting the send
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
+  // Mark everything so far as "already sent"
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
 
-  const draftQ = buildDraftQuestion(base);
-  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
+  // Clear textbox immediately so next click captures new input
+  if (manualQuestion) manualQuestion.value = "";
+
+  // UI
+  const draftQ = buildDraftQuestion(basePrompt);
+  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n**Generating answer…**`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
+  // Prompt to backend
   const mode = modeSelect?.value || "interview";
-  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
+  const promptToSend = (mode === "interview")
+    ? buildInterviewQuestionPrompt(basePrompt)
+    : basePrompt;
 
-  // Start streaming immediately (new wins)
-  await startChatStreaming(promptToSend, base);
+  await startChatStreaming(promptToSend, basePrompt);
 };
+
 
 
 async function processSendQueue() {
