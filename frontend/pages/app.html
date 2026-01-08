@@ -3,111 +3,144 @@
 <head>
   <meta charset="UTF-8" />
   <title>ThoughtMatters • Voice Agent</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-  <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
 
   <style>
     body { background: #f7f7f7; }
 
-    .scroll-box {
+    #responseBox{
+      flex: 1 1 0%;
       min-height: 0;
       overflow-y: auto;
-      white-space: pre-wrap;
+      background: #fffef5;
+      border: 1px solid #ddd;
+      padding: 12px;
       font-size: 14px;
       line-height: 1.45;
+      white-space: pre-wrap;
     }
 
-    #liveTranscript {
+    #liveTranscript{
+      flex: 1 1 0%;
+      min-height: 0;
+      overflow-y: auto;
       background: #f3f4f6;
       border: 1px solid #ccc;
       border-radius: 6px;
       padding: 12px;
+      font-size: 14px;
+      line-height: 1.45;
+      white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
-    }
-
-    #responseBox {
-      background: #fffef5;
-      border: 1px solid #ddd;
-      border-radius: 6px;
-      padding: 12px;
     }
   </style>
 </head>
 
-<body class="h-screen overflow-hidden">
+<body>
 
-  <!-- TOP BAR -->
-  <div class="bg-white border-b px-4 py-3 flex items-center justify-between">
-    <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
-    <button id="logoutBtn" class="text-sm text-red-600 hover:underline">Logout</button>
+  <!-- REQUIRED: banner for credits/messages -->
+  <div id="bannerTop"
+       class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
+
+  <!-- App shell -->
+  <div class="flex flex-col h-screen overflow-hidden">
+
+    <!-- TOP BAR (UNCHANGED IDS) -->
+    <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+      <div class="flex items-center gap-3 min-w-0">
+        <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
+      </div>
+      <div class="flex items-center gap-2">
+        <button id="logoutBtn" class="text-sm text-red-600 hover:underline">Logout</button>
+      </div>
+    </div>
+
+    <!-- CONTENT -->
+    <div class="flex flex-1 min-h-0 overflow-hidden">
+
+      <!-- LEFT PANEL – 30% -->
+      <div class="w-[30%] bg-white border-r p-4 flex flex-col gap-4 min-h-0 overflow-hidden">
+
+        <div class="flex flex-col flex-1 min-h-0 gap-3">
+          <div class="flex items-center justify-between">
+            <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
+            <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
+          </div>
+
+          <div id="liveTranscript"></div>
+
+          <!-- Refine Question (UNCHANGED) -->
+          <div>
+            <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
+            <input id="manualQuestion"
+                   class="w-full border p-2 text-sm bg-white rounded"
+                   placeholder="Optional manual refinement…" />
+          </div>
+
+          <!-- Send ONLY (Clear + Reset removed) -->
+          <div>
+            <button id="sendBtn"
+                    disabled
+                    class="w-full px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">
+              Send
+            </button>
+            <div id="sendStatus" class="text-xs mt-1 text-gray-600"></div>
+          </div>
+        </div>
+
+        <!-- Controls (Mic toggle REMOVED, IDs preserved) -->
+        <div class="shrink-0">
+          <h3 class="font-semibold mb-2">Controls</h3>
+          <div class="grid grid-cols-3 gap-2">
+            <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
+            <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
+            <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
+          </div>
+
+          <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
+        </div>
+
+        <!-- Mode (UNCHANGED) -->
+        <div class="shrink-0">
+          <h3 class="font-semibold mb-2">Mode</h3>
+          <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
+            <option value="interview" selected>Interview Mode</option>
+            <option value="sales">Sales Mode</option>
+            <option value="general">General</option>
+          </select>
+        </div>
+
+        <!-- Resume (UNCHANGED) -->
+        <div class="shrink-0">
+          <h3 class="font-semibold mb-2">Resume Upload</h3>
+          <input type="file" id="resumeInput" class="text-sm">
+          <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
+        </div>
+
+      </div>
+
+      <!-- CENTER PANEL – 40% -->
+      <div class="w-[40%] p-4 flex flex-col min-h-0 border-r bg-white">
+        <h3 class="text-lg font-semibold mb-2">AI Response</h3>
+        <div id="responseBox"></div>
+      </div>
+
+      <!-- RIGHT PANEL – 30% -->
+      <div class="w-[30%] p-4 flex flex-col min-h-0 bg-gray-50">
+        <h3 class="font-semibold mb-2">Questions Asked</h3>
+        <div class="flex-1 border border-dashed border-gray-300 rounded
+                    flex items-center justify-center text-sm text-gray-500">
+          Questions will appear here
+        </div>
+      </div>
+
+    </div>
   </div>
 
-  <!-- MAIN CONTENT -->
-  <div class="flex flex-col lg:flex-row h-[calc(100vh-56px)] overflow-hidden">
-
-    <!-- LEFT PANEL (30%) -->
-    <div class="lg:w-[30%] w-full bg-white border-r p-4 flex flex-col gap-4 min-h-0">
-
-      <!-- Transcript -->
-      <div class="flex flex-col flex-1 min-h-0">
-        <div class="flex items-center justify-between mb-2">
-          <h3 class="font-semibold">Live Transcript</h3>
-          <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
-        </div>
-        <div id="liveTranscript" class="scroll-box flex-1"></div>
-      </div>
-
-      <!-- Controls -->
-      <div>
-        <h3 class="font-semibold mb-2">Controls</h3>
-        <div class="grid grid-cols-3 gap-2">
-          <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
-          <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
-          <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
-        </div>
-        <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
-      </div>
-
-      <!-- Mode -->
-      <div>
-        <h3 class="font-semibold mb-2">Mode</h3>
-        <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
-          <option value="interview" selected>Interview Mode</option>
-          <option value="sales">Sales Mode</option>
-          <option value="general">General</option>
-        </select>
-      </div>
-
-      <!-- Resume -->
-      <div>
-        <h3 class="font-semibold mb-2">Resume Upload</h3>
-        <input type="file" id="resumeInput" class="text-sm">
-        <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
-      </div>
-
-    </div>
-
-    <!-- CENTER PANEL (40%) -->
-    <div class="lg:w-[40%] w-full p-4 flex flex-col min-h-0 border-r bg-white">
-      <h3 class="text-lg font-semibold mb-2">AI Response</h3>
-      <div id="responseBox" class="scroll-box flex-1"></div>
-    </div>
-
-    <!-- RIGHT PANEL (30%) -->
-    <div class="lg:w-[30%] w-full p-4 flex flex-col min-h-0 bg-gray-50">
-      <h3 class="font-semibold mb-2">Questions Asked</h3>
-      <div class="flex-1 border border-dashed border-gray-300 rounded
-                  flex items-center justify-center text-sm text-gray-500">
-        Questions will appear here
-      </div>
-    </div>
-
-  </div>
-
-  <!-- JS -->
+  <!-- JS (UNCHANGED) -->
   <script src="/js/app.js"></script>
 </body>
 </html>
