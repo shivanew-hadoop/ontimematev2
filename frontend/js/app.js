@@ -212,6 +212,9 @@ let lastMicTail = "";
 let lastSysPrinted = "";
 let lastSysPrintedAt = 0;
 
+let activeIntent = null;   // "code" | "debug" | "design" | "theory"
+let activeTech = null;    // "java" | "python" | ...
+
 // Transcript blocks
 let timeline = [];
 let lastSpeechAt = 0;
@@ -698,99 +701,65 @@ function isGenericProjectAsk(text) {
 }
 
 function buildDraftQuestion(spoken) {
-  let s = normalizeSpokenText(normalize(spoken));
+  // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
+  let s = normalizeSpokenText(normalize(spoken))
+    .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
+    .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
 
-  // ------------------------------------------------------------------
-  // 1️⃣ Strong coding verb & pattern detection (NON-NEGOTIABLE)
-  // ------------------------------------------------------------------
-  const CODE_VERBS = [
-    "reverse","count","sort","find","search","merge","split","parse","convert",
-    "remove","replace","validate","check","compare","loop","iterate","filter",
-    "map","reduce","calculate","compute","encrypt","decrypt","hash"
-  ];
+  // 2️⃣ Detect language
+  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd)/i.exec(low);
+  if (techMatch) activeTech = techMatch[1].toLowerCase();
 
-  const CODE_NOUNS = [
-    "string","number","array","list","map","object","json","character","digits",
-    "vowels","palindrome","anagram","substring","file","csv","xml","api","response"
-  ];
+  // 3️⃣ Coding signals
+  const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge"];
+  const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","api"];
 
-  const looksLikeCode =
-    CODE_VERBS.some(v => low.includes(v)) &&
-    CODE_NOUNS.some(n => low.includes(n));
+  const hasVerb = CODE_VERBS.some(v => low.includes(v));
+  const hasNoun = CODE_NOUNS.some(n => low.includes(n));
 
-  // ------------------------------------------------------------------
-  // 2️⃣ Hard tech detection
-  // ------------------------------------------------------------------
-  const TECH = /(java|python|sql|selenium|playwright|cucumber|bdd|api|rest|spring|node|react|aws|azure)/i.exec(low)?.[0];
-
-  // ------------------------------------------------------------------
-  // 3️⃣ Conversation memory bias
-  // ------------------------------------------------------------------
-  const lastTopics = recentTopics.join(" ");
-  const domainBias = guessDomainBias((resumeTextMem || "") + " " + lastTopics);
-
-  // ------------------------------------------------------------------
-  // 4️⃣ If already a full question — normalize and pass
-  // ------------------------------------------------------------------
-  if (/^(how|what|why|can|explain|describe)\b/i.test(low) || s.endsWith("?")) {
-    return "Q: " + capitalizeQuestion(s);
+  // 4️⃣ If user just said "java" or "python"
+  if (!hasVerb && activeIntent === "code" && activeTech) {
+    return `Q: Write ${activeTech} code for the previous problem and explain the logic.`;
   }
 
-  // ------------------------------------------------------------------
-  // 5️⃣ CODING QUESTION (absolute priority)
-  // ------------------------------------------------------------------
-  if (looksLikeCode) {
-    return `Q: Write ${TECH || "a"} program to ${s} and explain the logic and time complexity.`;
+  // 5️⃣ Lock coding intent
+  if (hasVerb && hasNoun) {
+    activeIntent = "code";
+    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic and time complexity.`;
   }
 
-  // Single coding keyword (like: "palindrome", "anagram", "vowels")
-  if (CODE_NOUNS.some(n => low.includes(n))) {
-    return `Q: Write ${TECH || "a"} program related to ${s} and explain how it works.`;
+  // 6️⃣ Debug
+  if (/error|issue|not working|failed|bug|timeout/.test(low)) {
+    activeIntent = "debug";
+    return `Q: How would you debug ${s} and what steps did you take in production?`;
   }
 
-  // ------------------------------------------------------------------
-  // 6️⃣ Debugging
-  // ------------------------------------------------------------------
-  if (/error|issue|bug|failed|not working|exception|timeout|flaky/.test(low)) {
-    return `Q: How would you debug ${s} and what steps have you taken to fix similar issues in production?`;
+  // 7️⃣ Design
+  if (/architecture|design|flow|system|microservice|pattern/.test(low)) {
+    activeIntent = "design";
+    return `Q: Explain the ${s} you designed and why this architecture was chosen.`;
   }
 
-  // ------------------------------------------------------------------
-  // 7️⃣ Architecture / Design
-  // ------------------------------------------------------------------
-  if (/architecture|design|flow|microservice|system|pattern|framework/.test(low)) {
-    return `Q: Explain the ${s} you have worked with and why that design was chosen.`;
+  // 8️⃣ Theory
+  if (/what is|explain|define|theory/.test(low)) {
+    activeIntent = "theory";
+    return `Q: Can you explain ${s} with a real-world example?`;
   }
 
-  // ------------------------------------------------------------------
-  // 8️⃣ Data & Analytics
-  // ------------------------------------------------------------------
-  if (/data|sql|tableau|powerbi|kpi|metric|warehouse|etl/.test(low)) {
-    return `Q: How do you handle ${s} in a real analytics project and why it matters.`;
+  // 9️⃣ Fallback using previous intent
+  if (activeIntent === "code") {
+    return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  // ------------------------------------------------------------------
-  // 9️⃣ Experience
-  // ------------------------------------------------------------------
-  if (/project|experience|responsibility|role|team|stakeholder/.test(low)) {
-    return `Q: Describe ${s} from your real project and its business impact.`;
-  }
-
-  // ------------------------------------------------------------------
-  // 🔟 Tech keyword without clarity
-  // ------------------------------------------------------------------
-  if (TECH) {
-    return `Q: Explain ${s} in the context of ${TECH} and how you used it in production.`;
-  }
-
-  // ------------------------------------------------------------------
-  // Fallback (interview-grade)
-  // ------------------------------------------------------------------
-  return `Q: Can you explain ${s} with a real-world project example?`;
+  return `Q: Can you explain ${s} with a real project example?`;
 }
+
 
 
 function capitalizeQuestion(q) {
