@@ -108,6 +108,8 @@ let sysErrBackoffUntil = 0;
 // DEDUPE STATE (separate mic vs system)
 let lastSysTail = "";
 let lastMicTail = "";
+let lastSysPrinted = ""
+let lastSysPrintedAt = 0;
 
 // final-level dedupe across pipelines
 let lastFinalText = "";
@@ -171,7 +173,7 @@ const MIC_MAX_CONCURRENT = 2;
 
 const SYS_SEGMENT_MS = 2800;
 const SYS_MIN_BYTES = 6000;
-const SYS_MAX_CONCURRENT = 2;
+const SYS_MAX_CONCURRENT = 1;
 const SYS_TYPE_MS_PER_WORD = 18;
 
 const SYS_ERR_MAX = 3;
@@ -1486,7 +1488,20 @@ async function transcribeSysBlob(blob, myEpoch) {
     set value(v) { lastSysTail = v; }
   });
 
-  if (cleaned) addTypewriterSpeech(cleaned);
+  if (cleaned) {
+  const now = Date.now();
+  const c = normalize(cleaned).toLowerCase();
+
+  // Drop duplicate system text printed within a short window
+  if (c && c === lastSysPrinted && (now - lastSysPrintedAt) < 2500) {
+    return;
+  }
+
+  lastSysPrinted = c;
+  lastSysPrintedAt = now;
+  addTypewriterSpeech(cleaned);
+}
+
 }
 
 //--------------------------------------------------------------
@@ -1721,6 +1736,8 @@ lastCommittedAt = 0;
   lastMicTail = "";
   lastFinalText = "";
   lastFinalAt = 0;
+  lastSysPrinted = "";
+  lastSysPrintedAt = 0;
 
   stopAsrSession("mic");
   stopAsrSession("sys");
@@ -1803,6 +1820,7 @@ function hardClearTranscript() {
   lastCommittedText = "";
 lastCommittedAt = 0;
 
+
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
 
@@ -1815,6 +1833,8 @@ lastCommittedAt = 0;
   lastMicTail = "";
   lastFinalText = "";
   lastFinalAt = 0;
+  lastSysPrinted = "";
+lastSysPrintedAt = 0;
 
   if (micAsr) { micAsr.itemText = {}; micAsr.itemEntry = {}; }
   if (sysAsr) { sysAsr.itemText = {}; sysAsr.itemEntry = {}; }
