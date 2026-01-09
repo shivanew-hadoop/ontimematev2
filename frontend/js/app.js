@@ -142,7 +142,7 @@ let transcriptEpoch = 0;
 // === SYS ASR FIX ===
 // Realtime streaming ASR is what breaks "Mic OFF → no system transcript" in your environment.
 // Force system audio to always use legacy MediaRecorder → /transcribe pipeline.
-const USE_STREAMING_ASR_SYS = true;
+const USE_STREAMING_ASR_SYS = false;
 
 // Keep mic fallback streaming as you had it (only used if SR missing/weak)
 const USE_STREAMING_ASR_MIC_FALLBACK = true;
@@ -239,39 +239,6 @@ function normalize(s) {
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-//--------------------------------------------------------------
-// TRANSCRIPT DOM HELPERS (NO FULL REPAINT)
-//--------------------------------------------------------------
-let transcriptEls = new Map(); // entry object → DOM element
-
-function ensureEntryEl(entry) {
-  if (!liveTranscript) return null;
-
-  let el = transcriptEls.get(entry);
-  if (el) return el;
-
-  el = document.createElement("div");
-  el.className = "whitespace-pre-wrap";
-
-  // newest text on top
-  liveTranscript.prepend(el);
-
-  transcriptEls.set(entry, el);
-  return el;
-}
-
-function updateEntryEl(entry) {
-  const el = ensureEntryEl(entry);
-  if (!el) return;
-  el.textContent = String(entry.text || "").trim();
-}
-
-function removeEntryEl(entry) {
-  const el = transcriptEls.get(entry);
-  if (el) el.remove();
-  transcriptEls.delete(entry);
 }
 
 //--------------------------------------------------------------
@@ -828,85 +795,49 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
-function commonWordPrefix(a, b) {
-  const x = a.split(" ");
-  const y = b.split(" ");
-  let i = 0;
-  while (i < x.length && i < y.length && x[i] === y[i]) i++;
-  return {
-    prefix: x.slice(0, i).join(" "),
-    suffix: y.slice(i).join(" ")
-  };
-}
-
 function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
   const now = Date.now();
-  const delta = normalize(deltaText);
-  if (!delta) return;
+  if (!s.itemText[itemId]) s.itemText[itemId] = "";
+  s.itemText[itemId] += String(deltaText || "");
 
-  // 🔑 accumulate hypothesis safely
-  const prevHyp = s.itemText[itemId] || "";
-  const nextHyp = prevHyp
-    ? normalize(prevHyp + " " + delta)
-    : delta;
-
-  // diff previous vs new hypothesis
-  const { prefix, suffix } = commonWordPrefix(prevHyp, nextHyp);
-
-  // store full hypothesis
-  s.itemText[itemId] = nextHyp;
+  const cur = normalize(s.itemText[itemId]);
+  if (!cur) return;
 
   if (!s.itemEntry[itemId]) {
-    const entry = {
-      t: now,
-      text: prefix,
-      role: which === "sys" ? "interviewer" : "candidate"
-    };
+    const entry = { t: now, text: cur };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
+  } else {
+    s.itemEntry[itemId].text = cur;
+    s.itemEntry[itemId].t = now;
   }
 
-  // ✅ replace tail only
-  s.itemEntry[itemId].text = normalize(
-    suffix ? `${prefix} ${suffix}` : prefix
-  );
-  s.itemEntry[itemId].t = now;
-
   lastSpeechAt = now;
-
-  // update only this line
-  updateEntryEl(s.itemEntry[itemId]);
+  updateTranscript();
 }
-
-
-
 
 function asrFinalizeItem(which, itemId, transcript) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
-  const final = normalize(transcript);
-  if (!final) return;
-
-  // remove interim line
   const entry = s.itemEntry[itemId];
   if (entry) {
     const idx = timeline.indexOf(entry);
     if (idx >= 0) timeline.splice(idx, 1);
-    removeEntryEl(entry);
   }
-
   delete s.itemEntry[itemId];
   delete s.itemText[itemId];
 
-  addFinalSpeech(final, which === "sys" ? "interviewer" : "candidate");
+  const final = normalize(transcript);
+  if (!final) return;
+
+  // 🔒 ROLE IS THE KEY
+  const role = (which === "sys") ? "interviewer" : "candidate";
+  addFinalSpeech(final, role);
 }
-
-
-
 
 
 function sendAsrConfig(ws) {
@@ -993,8 +924,6 @@ async function startStreamingAsr(which, mediaStream) {
     itemText: {},
     itemEntry: {},
     lastItemId: null,
-    committedText: "",
-    liveText: "",
     sawConfigError: false
   };
 
@@ -1137,7 +1066,7 @@ function startMic() {
       removeInterimIfAny();
       micInterimEntry = { t: Date.now(), text: latestInterim };
       timeline.push(micInterimEntry);
-      // updateTranscript();
+      updateTranscript();
     }
   };
 
@@ -1791,7 +1720,7 @@ lastCommittedAt = 0;
   stopAsrSession("mic");
   stopAsrSession("sys");
 
-  // updateTranscript();
+  updateTranscript();
 
   isRunning = true;
 
@@ -1891,7 +1820,7 @@ lastCommittedAt = 0;
   sentCursor = 0;
   pinnedTop = true;
 
-  // updateTranscript();
+  updateTranscript();
 }
 
 //--------------------------------------------------------------
@@ -1920,7 +1849,7 @@ sendBtn.onclick = async () => {
 
   sentCursor = timeline.length;
   pinnedTop = true;
-  // updateTranscript();
+  updateTranscript();
 
   const draftQ = buildDraftQuestion(base);
   responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
@@ -1949,8 +1878,7 @@ async function processSendQueue() {
 
   sentCursor = timeline.length;
   pinnedTop = true;
-  // updateTranscript();
-
+  updateTranscript();
 
   const draftQ = buildDraftQuestion(combined);
   responseBox.innerHTML = renderMarkdown(
@@ -2037,7 +1965,7 @@ window.addEventListener("load", async () => {
   stopAsrSession("mic");
   stopAsrSession("sys");
 
-  // updateTranscript();
+  updateTranscript();
 
   stopBtn.disabled = true;
   sysBtn.disabled = true;
