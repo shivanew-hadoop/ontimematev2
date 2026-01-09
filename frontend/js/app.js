@@ -800,18 +800,24 @@ function asrUpsertDelta(which, itemId, deltaText) {
   if (!s) return;
 
   const now = Date.now();
-  if (!s.itemText[itemId]) s.itemText[itemId] = "";
-  s.itemText[itemId] += String(deltaText || "");
+  const delta = normalize(deltaText);
+  if (!delta) return;
 
-  const cur = normalize(s.itemText[itemId]);
-  if (!cur) return;
+  // append only NEW words
+  if (!s.liveText.endsWith(delta)) {
+    s.liveText = delta;
+  }
+
+  const displayText = normalize(
+    (s.committedText + " " + s.liveText).trim()
+  );
 
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur };
+    const entry = { t: now, text: displayText };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
-    s.itemEntry[itemId].text = cur;
+    s.itemEntry[itemId].text = displayText;
     s.itemEntry[itemId].t = now;
   }
 
@@ -819,25 +825,36 @@ function asrUpsertDelta(which, itemId, deltaText) {
   updateTranscript();
 }
 
+
 function asrFinalizeItem(which, itemId, transcript) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
+  const final = normalize(transcript);
+  if (!final) return;
+
+  // move live → committed
+  s.committedText = normalize(
+    (s.committedText + " " + final).trim()
+  );
+  s.liveText = "";
+
+  // remove live entry
   const entry = s.itemEntry[itemId];
   if (entry) {
     const idx = timeline.indexOf(entry);
     if (idx >= 0) timeline.splice(idx, 1);
   }
+
   delete s.itemEntry[itemId];
-  delete s.itemText[itemId];
 
-  const final = normalize(transcript);
-  if (!final) return;
+  const role = which === "sys" ? "interviewer" : "candidate";
+  addFinalSpeech(s.committedText, role);
 
-  // 🔒 ROLE IS THE KEY
-  const role = (which === "sys") ? "interviewer" : "candidate";
-  addFinalSpeech(final, role);
+  // reset for next utterance
+  s.committedText = "";
 }
+
 
 
 function sendAsrConfig(ws) {
@@ -924,6 +941,8 @@ async function startStreamingAsr(which, mediaStream) {
     itemText: {},
     itemEntry: {},
     lastItemId: null,
+    committedText: "",
+    liveText: "",
     sawConfigError: false
   };
 
