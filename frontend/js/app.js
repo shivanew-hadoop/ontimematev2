@@ -643,11 +643,12 @@ function normalizeSpokenText(s) {
   const map = {
     "kod": "code",
     "coad": "code",
+    "site":"side",
     "carecter": "character",
     "charactors": "characters",
-    "flacky": "flaky",
     "analitics": "analytics",
-    "statics": "statistics"
+    "statics": "statistics",
+    "flacky": "flaky"
   };
 
   let out = s.toLowerCase();
@@ -656,6 +657,7 @@ function normalizeSpokenText(s) {
   }
   return out;
 }
+
 
 function extractPriorQuestions() {
   const qs = [];
@@ -699,77 +701,88 @@ function isGenericProjectAsk(text) {
 
 function buildDraftQuestion(spoken) {
   let s = normalizeSpokenText(normalize(spoken));
-   if (recentTopics.includes("code") && s.includes("count") && s.includes("character")) {
-    s = "code to count characters in a string";
-  }
-  if (!s) return "Q: Can you walk me through your current project end-to-end?";
+  if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
+  const role = resumeFocus || "general";
 
-  // If already a clean question, pass through
-  if (low.startsWith("how ") || low.startsWith("what ") || low.startsWith("why ") ||
-      low.startsWith("can ") || low.startsWith("explain ") || low.startsWith("tell ") ||
-      s.endsWith("?")) {
+  // ------------------------------------------------
+  // 1) Preserve real questions
+  // ------------------------------------------------
+  if (
+    low.startsWith("how ") ||
+    low.startsWith("what ") ||
+    low.startsWith("why ") ||
+    low.startsWith("can ") ||
+    low.startsWith("do ") ||
+    low.startsWith("did ") ||
+    low.startsWith("is ") ||
+    low.startsWith("are ") ||
+    low.startsWith("explain ") ||
+    s.endsWith("?")
+  ) {
     return "Q: " + capitalizeQuestion(s);
   }
 
-  // -----------------------------
-  // 1️⃣ Detect INTENT
-  // -----------------------------
-  const isConcept = /(what is|what are|explain|define|meaning|concept|theory|scp|oops|acid|normalization)/i.test(low);
-  const isTask = /^(write|create|build|implement|design|develop|reverse|convert|test|optimize|generate)/i.test(low);
+  // ------------------------------------------------
+  // 2) Commands → interview questions
+  // ------------------------------------------------
+  if (low.match(/^(write|create|build|design|implement|reverse|count|test|optimize|generate)\b/)) {
+    if (role === "automation") {
+      return "Q: How would you " + s + " in a Selenium or automation framework?";
+    }
+    if (role === "data") {
+      return "Q: How would you " + s + " for data processing or analytics?";
+    }
+    return "Q: How would you " + s + " in a real project?";
+  }
+
+  // ------------------------------------------------
+  // 3) Intent detection
+  // ------------------------------------------------
   const isDebug = /(error|issue|bug|not working|failed|exception|timeout|flaky|broken)/i.test(low);
-  const isDesign = /(architecture|design|flow|structure|pattern|microservice|system)/i.test(low);
+  const isDesign = /(framework|architecture|flow|structure|pattern|microservice|system)/i.test(low);
   const isExperience = /(project|responsibility|role|worked|experience|handled|led)/i.test(low);
   const isData = /(dataset|data|missing|null|etl|kpi|metric|warehouse|tableau|powerbi|sql)/i.test(low);
-
-  // -----------------------------
-  // 2️⃣ Detect TECH CONTEXT
-  // -----------------------------
-  const tech =
-    /(java|python|selenium|playwright|sql|api|rest|spring|cucumber|bdd|aws|azure|react|node)/i.exec(low)?.[0];
-
-  // -----------------------------
-  // 3️⃣ Build smart question
-  // -----------------------------
-
-  if (isConcept) {
-    return `Q: Can you explain ${s} and how it is used in real-world systems?`;
-  }
-
-  if (isTask) {
-    return `Q: How would you ${s} and how have you implemented something similar in your project?`;
-  }
+  const isCoding = /(code|string|array|loop|function|method|class|python|java|algorithm|reverse|count|sort)/i.test(low);
 
   if (isDebug) {
-    return `Q: How do you troubleshoot ${s} and what steps did you take in your real project to fix it?`;
+    if (role === "automation") return "Q: How do you debug and stabilize " + s + " in your automation framework?";
+    return "Q: How do you resolve " + s + " in your project?";
+  }
+
+  if (isCoding) {
+    if (role === "automation") return "Q: How would you implement " + s + " in your test automation framework?";
+    if (role === "data") return "Q: How would you implement " + s + " for data processing?";
+    return "Q: How would you implement " + s + " in your project?";
   }
 
   if (isDesign) {
-    return `Q: Can you explain the ${s} you worked with and why that design was chosen?`;
+    return "Q: Can you explain your " + s + " and why that design was chosen?";
   }
 
   if (isExperience) {
-    return `Q: Can you describe ${s} in your current or past project and its impact?`;
+    return "Q: Can you describe " + s + " from your project experience?";
   }
 
   if (isData) {
-    return `Q: How do you handle ${s} in a real data analytics project, and why is it important?`;
+    if (role === "automation") return "Q: How do you validate " + s + " in test automation or reporting?";
+    return "Q: How do you handle " + s + " in a real data analytics project?";
   }
 
-  // Tech mentioned but concept unclear
-  if (tech) {
-    return `Q: Can you explain ${s} in the context of ${tech} and how you used it in your project?`;
+  // ------------------------------------------------
+  // 4) Short topic phrases
+  // ------------------------------------------------
+  if (s.split(" ").length <= 7) {
+    return "Q: Can you explain " + s + " with a real project example?";
   }
 
-  // Short keyword phrases
-  if (s.split(" ").length <= 6) {
-    return `Q: Can you explain ${s} with a real project example?`;
-  }
-
-  // Fallback
-  return `Q: Can you walk me through what you meant by "${s}" and how it applies to your work?`;
+  // ------------------------------------------------
+  // 5) Last fallback
+  // ------------------------------------------------
+  return "Q: How does " + s + " apply in your current or past project?";
 }
+
 
 function capitalizeQuestion(q) {
   q = q.replace(/\s+/g, " ").trim();
@@ -1945,13 +1958,29 @@ resumeInput?.addEventListener("change", async () => {
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    resumeTextMem = "";
+    let resumeFocus = "";
+
+function inferResumeFocus() {
+  const t = (resumeTextMem || "").toLowerCase();
+
+  if (t.match(/selenium|playwright|cucumber|bdd|test automation|qa|sdet/)) {
+    resumeFocus = "automation";
+  } else if (t.match(/data analyst|sql|tableau|power bi|etl|warehouse|analytics/)) {
+    resumeFocus = "data";
+  } else if (t.match(/java|spring|api|microservice|backend|node/)) {
+    resumeFocus = "backend";
+  } else {
+    resumeFocus = "general";
+  }
+}
+
     if (resumeStatus) resumeStatus.textContent = `Resume extract failed (${res.status}): ${errText.slice(0, 160)}`;
     return;
   }
 
   const data = await res.json().catch(() => ({}));
   resumeTextMem = String(data.text || "").trim();
+  inferResumeFocus();
 
   if (resumeStatus) {
     resumeStatus.textContent = resumeTextMem
