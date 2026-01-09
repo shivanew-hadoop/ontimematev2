@@ -1490,18 +1490,42 @@ async function transcribeSysBlob(blob, myEpoch) {
 
   if (cleaned) {
   const now = Date.now();
-  const c = normalize(cleaned).toLowerCase();
+  const text = normalize(cleaned);
 
-  // Drop duplicate system text printed within a short window
-  if (c && c === lastSysPrinted && (now - lastSysPrintedAt) < 2500) {
-    return;
-  }
+  // Trim overlapping prefix from previous system output
+  const trimmed = trimOverlap(lastSysPrinted, text);
+  if (!trimmed) return;
 
-  lastSysPrinted = c;
+  lastSysPrinted = text;
   lastSysPrintedAt = now;
-  addTypewriterSpeech(cleaned);
+
+  addTypewriterSpeech(trimmed);
 }
 
+
+}
+
+function trimOverlap(prev, next) {
+  if (!prev || !next) return next;
+
+  const p = prev.toLowerCase();
+  const n = next.toLowerCase();
+
+  const pWords = p.split(" ");
+  const nWords = n.split(" ");
+
+  const maxCheck = Math.min(12, pWords.length, nWords.length);
+
+  for (let k = maxCheck; k >= 3; k--) {
+    const pTail = pWords.slice(-k).join(" ");
+    const nHead = nWords.slice(0, k).join(" ");
+
+    if (pTail === nHead) {
+      return nWords.slice(k).join(" ");
+    }
+  }
+
+  return next;
 }
 
 //--------------------------------------------------------------
