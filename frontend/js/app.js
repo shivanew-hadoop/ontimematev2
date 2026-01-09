@@ -187,8 +187,6 @@ let micTrack = null;
 let micRecorder = null;
 let micSegmentChunks = [];
 let micSegmentTimer = null;
-let lastIntent = "";
-let lastTech = "";
 let micQueue = [];
 let micAbort = null;
 let micInFlight = 0;
@@ -236,12 +234,6 @@ let resumeTextMem = "";
 
 // HARD CLEAR TOKEN
 let transcriptEpoch = 0;
-let lastAnchor = {
-  type: "",   // "coding_task" | "concept" | "debug" | "design" | "experience" | "data" | ""
-  task: "",   // normalized task text like "reverse an integer"
-  lang: "",   // "java" | "python" | ...
-  raw: ""     // last raw spoken
-};
 
 /* -------------------------------------------------------------------------- */
 /* CONSTANTS                                                                    */
@@ -633,38 +625,6 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* -------------------------------------------------------------------------- */
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
-let recentTopics = [];
-
-function updateTopicMemory(text) {
-  const low = text.toLowerCase();
-  const topics = [];
-
-  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
-  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
-  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
-  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
-
-  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
-}
-
-function normalizeSpokenText(s) {
-  const map = {
-    "kod": "code",
-    "coad": "code",
-    "carecter": "character",
-    "charactors": "characters",
-    "flacky": "flaky",
-    "analitics": "analytics",
-    "statics": "statistics"
-  };
-
-  let out = s.toLowerCase();
-  for (const k in map) {
-    out = out.replace(new RegExp("\\b" + k + "\\b", "gi"), map[k]);
-  }
-  return out;
-}
-
 function extractPriorQuestions() {
   const qs = [];
   for (const m of chatHistory.slice(-30)) {
@@ -705,178 +665,17 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
-function buildDraftQuestion(spoken) {
-  let s = normalizeSpokenText(normalize(spoken));
-  if (!s) return "Q: Explain your current project end-to-end (tech stack, your role, key challenges, and outcomes).";
-
-  const low = s.toLowerCase().trim();
-
-  // -------------------------
-  // Helpers (self-contained)
-  // -------------------------
-  const detectLang = (txt) => {
-    const m = txt.match(/\b(java|python|javascript|typescript|c#|csharp|cpp|c\+\+|node|sql)\b/i);
-    if (!m) return "";
-    const v = m[1].toLowerCase();
-    if (v === "csharp" || v === "c#") return "c#";
-    if (v === "cpp" || v === "c++" || v === "c\\+\\+") return "c++";
-    if (v === "node") return "node.js";
-    return v;
-  };
-
-  const isOnlyLang = (txt) => {
-    const t = txt.replace(/[^\p{L}\p{N}\s]/gu, " ").replace(/\s+/g, " ").trim().toLowerCase();
-    return /^(java|python|javascript|typescript|c#|csharp|cpp|c\+\+|node|sql)$/.test(t);
-  };
-
-  const prefersLang = () => {
-    // preference order: explicit last language > resumeFocus > sensible default
-    if (lastAnchor.lang) && lastAnchor.lang) return lastAnchor.lang;
-    if (typeof resumeFocus !== "undefined") {
-      if (resumeFocus === "automation" || resumeFocus === "backend") return "java";
-      if (resumeFocus === "data") return "python";
-    }
-    return "java";
-  };
-
-  const looksLikeCoding = (txtLow) => {
-    // treat these as algorithm/code asks even if user didn’t say "write code"
-    const codingVerbs = /\b(reverse|count|implement|write|code|program|algorithm|solve|print|find|sort|remove|convert|validate|parse)\b/;
-    const codingObjects = /\b(string|number|integer|array|list|map|hashmap|vowel|character|palindrome|fibonacci|factorial|prime|anagram)\b/;
-    const explicitCode = /\b(code|program|implementation|function|method|class)\b/;
-
-    // "reverse the number", "count vowels", "code for counting characters"
-    return explicitCode.test(txtLow) || (codingVerbs.test(txtLow) && codingObjects.test(txtLow));
-  };
-
-  const extractCodingTask = (txtLow) => {
-    // Normalize common spoken variants into a clean task description
-    // Keep it short and objective: "<verb> <object>"
-    if (/\breverse\b/.test(txtLow) && /\b(number|integer|int)\b/.test(txtLow)) return "reverse an integer";
-    if (/\breverse\b/.test(txtLow) && /\bstring\b/.test(txtLow)) return "reverse a string";
-    if (/\bcount\b/.test(txtLow) && /\bvowel/.test(txtLow)) return "count vowels in a string";
-    if (/\bcount\b/.test(txtLow) && /\bcharacter/.test(txtLow)) return "count character occurrences in a string";
-    if (/\bpalindrome\b/.test(txtLow)) return "check if a string is a palindrome";
-    if (/\bfibonacci\b/.test(txtLow)) return "generate Fibonacci series";
-    if (/\bfactorial\b/.test(txtLow)) return "compute factorial of a number";
-    if (/\bprime\b/.test(txtLow)) return "check if a number is prime";
-
-    // fallback: keep the original phrase as task
-    return txtLow.replace(/^code\s*(to|for)\s*/i, "").trim();
-  };
-
-  const makeCodingQuestion = (task, lang) => {
-    return (
-      "Q: Write " + lang + " code to " + task + ". " +
-      "Include: (1) clean function/method, (2) edge cases, (3) time & space complexity, " +
-      "and (4) a short example input/output."
-    );
-  };
-
-  const isConcept = /(what is|what are|define|definition|meaning|concept|theory|explain)\b/.test(low);
-  const isDebug = /(error|issue|bug|not working|failed|exception|timeout|flaky|broken)\b/.test(low);
-  const isDesign = /(framework|architecture|design|pattern|microservice|system|pom|page object|pipeline|workflow)\b/.test(low);
-  const isExperience = /(roles?|responsibilit|project|experience|handled|led|stakeholder)\b/.test(low);
-  const isData = /(dataset|data|etl|kpi|metric|warehouse|tableau|powerbi|sql|missing|null)\b/.test(low);
-
-  const langInThis = detectLang(low);
-
-  // ------------------------------------------------
-  // 1) If user says ONLY a language, reuse last coding task
-  // ------------------------------------------------
-  if (isOnlyLang(s) && lastAnchor.type === "coding_task" && lastAnchor.task) {
-    const lang = detectLang(s) || prefersLang();
-    lastAnchor.lang = lang;
-    return makeCodingQuestion(lastAnchor.task, lang);
+function buildDraftQuestion(base) {
+  if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
+  if (isGenericProjectAsk(base)) {
+    return "Q: Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
   }
-
-  // ------------------------------------------------
-  // 2) Preserve already well-formed questions (don’t rewrite)
-  // ------------------------------------------------
-  if (
-    low.startsWith("how ") || low.startsWith("what ") || low.startsWith("why ") ||
-    low.startsWith("can ") || low.startsWith("do ") || low.startsWith("did ") ||
-    low.startsWith("is ")  || low.startsWith("are ") || low.startsWith("explain ") ||
-    s.endsWith("?")
-  ) {
-    lastAnchor.raw = s;
-    if (langInThis) lastAnchor.lang = langInThis;
-    // If this question looks like coding, store task anchor too
-    if (looksLikeCoding(low)) {
-      lastAnchor.type = "coding_task";
-      lastAnchor.task = extractCodingTask(low);
-      lastAnchor.lang = langInThis || prefersLang();
-    }
-    return "Q: " + capitalizeQuestion(s);
+  const kws = extractAnchorKeywords(base);
+  if (kws.length) {
+    return `Q: Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
   }
-
-  // ------------------------------------------------
-  // 3) CODING TASK (your main complaint)
-  // ------------------------------------------------
-  if (looksLikeCoding(low)) {
-    const task = extractCodingTask(low);
-    const lang = langInThis || prefersLang();
-
-    lastAnchor.type = "coding_task";
-    lastAnchor.task = task;
-    lastAnchor.lang = lang;
-    lastAnchor.raw = s;
-
-    return makeCodingQuestion(task, lang);
-  }
-
-  // ------------------------------------------------
-  // 4) Other intents (professional, not “walk me through…”)
-  // ------------------------------------------------
-  lastAnchor.raw = s;
-  if (langInThis) lastAnchor.lang = langInThis;
-
-  if (isDebug) {
-    lastAnchor.type = "debug";
-    return "Q: You mentioned: \"" + s + "\". What is the root cause, and what exact steps would you take to fix and prevent it?";
-  }
-
-  if (isDesign) {
-    lastAnchor.type = "design";
-    return "Q: Explain the " + s + " you’ve worked with: design choice, key components, trade-offs, and how you implemented it.";
-  }
-
-  if (isExperience) {
-    lastAnchor.type = "experience";
-    return "Q: In your current/past project, explain " + s + " with ownership, decisions you made, and measurable impact.";
-  }
-
-  if (isData) {
-    lastAnchor.type = "data";
-    return "Q: In a real analytics/data pipeline, how do you handle " + s + " (approach, validation, and impact on reporting)?";
-  }
-
-  if (isConcept) {
-    lastAnchor.type = "concept";
-    return "Q: Define " + s + ", explain when to use it, and give a real-world example.";
-  }
-
-  // ------------------------------------------------
-  // 5) Short fragments → convert cleanly
-  // ------------------------------------------------
-  if (s.split(" ").length <= 7) {
-    lastAnchor.type = "concept";
-    return "Q: Explain " + s + " with a practical example from a real project.";
-  }
-
-  lastAnchor.type = "";
-  return "Q: Rephrase and answer this professionally: " + capitalizeQuestion(s);
+  return `Q: Can you explain what you meant by "${base}" and how it maps to your real project work?`;
 }
-
-
-
-function capitalizeQuestion(q) {
-  q = q.replace(/\s+/g, " ").trim();
-  q = q.charAt(0).toUpperCase() + q.slice(1);
-  if (!q.endsWith("?")) q += "?";
-  return q;
-}
-
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
@@ -2193,7 +1992,6 @@ sendBtn.onclick = async () => {
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
-  updateTopicMemory(base);
   const question = buildDraftQuestion(base);
   if (!base) return;
 
