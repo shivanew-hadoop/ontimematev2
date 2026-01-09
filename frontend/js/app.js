@@ -1164,6 +1164,7 @@ function stopMicOnly() {
 
 function startMic() {
   if (micMuted) return false;
+  if (!USE_BROWSER_SR) return false;
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
@@ -1235,6 +1236,7 @@ function startMic() {
       // If SR healthy, stop fallbacks
       if (micRecorder || micStream) stopMicRecorderOnly();
       if (micAsr) stopAsrSession("mic");
+      if (!USE_BROWSER_SR) return;
       return;
     }
 
@@ -1856,6 +1858,8 @@ resumeInput?.addEventListener("change", async () => {
 /* START / STOP                                                                 */
 /* -------------------------------------------------------------------------- */
 async function startAll() {
+  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+await startStreamingAsr("mic", micStream);
   hideBanner();
   if (isRunning) return;
 
