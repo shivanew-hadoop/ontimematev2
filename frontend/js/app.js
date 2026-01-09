@@ -1992,6 +1992,7 @@ sendBtn.onclick = async () => {
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
+  const question = buildDraftQuestion(base);
   if (!base) return;
 
   if (manualQuestion) manualQuestion.value = "";
@@ -2005,12 +2006,14 @@ sendBtn.onclick = async () => {
   pinnedTop = true;
   updateTranscript();
 
-  const draftQ = buildDraftQuestion(base);
+  const draftQ = question;
   responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
-  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
+ const promptToSend = (mode === "interview")
+  ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+  : question;
 
   await startChatStreaming(promptToSend, base);
 };
