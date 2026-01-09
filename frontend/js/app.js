@@ -940,6 +940,10 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
   s.itemText[itemId] += String(deltaText || "");
+ const words = normalize(s.itemText[itemId]).split(" ");
+if (words.length >= COMMIT_WORDS) {
+  asrFinalizeItem(which, itemId, s.itemText[itemId]);
+}
 
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
