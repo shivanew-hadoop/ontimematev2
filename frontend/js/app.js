@@ -965,18 +965,23 @@ function asrFinalizeItem(which, itemId, transcript) {
   if (!s) return;
 
   const entry = s.itemEntry[itemId];
-  if (entry) {
-    const idx = timeline.indexOf(entry);
-    if (idx >= 0) timeline.splice(idx, 1);
-  }
-  delete s.itemEntry[itemId];
-  delete s.itemText[itemId];
+let draftText = "";
 
-  const final = normalize(transcript);
-  if (!final) return;
+if (entry) {
+  draftText = entry.text || "";
+  const idx = timeline.indexOf(entry);
+  if (idx >= 0) timeline.splice(idx, 1);
+}
 
-  const role = (which === "sys") ? "interviewer" : "candidate";
-  addFinalSpeech(final, role);
+delete s.itemEntry[itemId];
+delete s.itemText[itemId];
+
+const final = normalize(transcript || draftText);
+if (!final) return;
+
+const role = (which === "sys") ? "interviewer" : "candidate";
+addFinalSpeech(final, role);
+
 }
 
 function sendAsrConfig(ws) {
