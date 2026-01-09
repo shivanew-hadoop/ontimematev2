@@ -265,7 +265,7 @@ const TRANSCRIBE_PROMPT =
 /* STREAMING ASR (Realtime)                                                     */
 /* -------------------------------------------------------------------------- */
 // Force system audio to legacy MediaRecorder -> /transcribe
-const USE_STREAMING_ASR_SYS = false;
+const USE_STREAMING_ASR_SYS = true;
 // Allow mic streaming fallback when SR is weak
 const USE_STREAMING_ASR_MIC_FALLBACK = true;
 
