@@ -540,10 +540,10 @@ export default async function handler(req, res) {
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
-      res.write("Analyzing question...\n");
-res.flushHeaders?.();
+      res.flushHeaders?.();
+
       // Kick chunk so UI receives "first token" immediately
-      res.write("Thinking...\n");
+      res.write(" ");
 
       const messages = [];
 
@@ -613,7 +613,7 @@ Your goal is to sound like a real candidate answering live — clear, decisive, 
           role: "system",
           content:
             "Use this resume context when answering. Do not invent details.\n\n" +
-            resumeText.trim().slice(0, 4000)
+            resumeText.trim().slice(0, 12000)
         });
       }
 
