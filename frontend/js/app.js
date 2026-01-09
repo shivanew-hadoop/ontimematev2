@@ -242,6 +242,39 @@ function authHeaders() {
 }
 
 //--------------------------------------------------------------
+// TRANSCRIPT DOM HELPERS (NO FULL REPAINT)
+//--------------------------------------------------------------
+let transcriptEls = new Map(); // entry object → DOM element
+
+function ensureEntryEl(entry) {
+  if (!liveTranscript) return null;
+
+  let el = transcriptEls.get(entry);
+  if (el) return el;
+
+  el = document.createElement("div");
+  el.className = "whitespace-pre-wrap";
+
+  // newest text on top
+  liveTranscript.prepend(el);
+
+  transcriptEls.set(entry, el);
+  return el;
+}
+
+function updateEntryEl(entry) {
+  const el = ensureEntryEl(entry);
+  if (!el) return;
+  el.textContent = String(entry.text || "").trim();
+}
+
+function removeEntryEl(entry) {
+  const el = transcriptEls.get(entry);
+  if (el) el.remove();
+  transcriptEls.delete(entry);
+}
+
+//--------------------------------------------------------------
 // === MIC MUTE CHANGE === (UI + behavior)
 //--------------------------------------------------------------
 function updateMicMuteUI() {
@@ -795,6 +828,17 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
+function commonWordPrefix(a, b) {
+  const x = a.split(" ");
+  const y = b.split(" ");
+  let i = 0;
+  while (i < x.length && i < y.length && x[i] === y[i]) i++;
+  return {
+    prefix: x.slice(0, i).join(" "),
+    suffix: y.slice(i).join(" ")
+  };
+}
+
 function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
@@ -803,27 +847,41 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const delta = normalize(deltaText);
   if (!delta) return;
 
-  // append only NEW words
-  if (!s.liveText.endsWith(delta)) {
-    s.liveText = delta;
-  }
+  // 🔑 accumulate hypothesis safely
+  const prevHyp = s.itemText[itemId] || "";
+  const nextHyp = prevHyp
+    ? normalize(prevHyp + " " + delta)
+    : delta;
 
-  const displayText = normalize(
-    (s.committedText + " " + s.liveText).trim()
-  );
+  // diff previous vs new hypothesis
+  const { prefix, suffix } = commonWordPrefix(prevHyp, nextHyp);
+
+  // store full hypothesis
+  s.itemText[itemId] = nextHyp;
 
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: displayText };
+    const entry = {
+      t: now,
+      text: prefix,
+      role: which === "sys" ? "interviewer" : "candidate"
+    };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
-  } else {
-    s.itemEntry[itemId].text = displayText;
-    s.itemEntry[itemId].t = now;
   }
 
+  // ✅ replace tail only
+  s.itemEntry[itemId].text = normalize(
+    suffix ? `${prefix} ${suffix}` : prefix
+  );
+  s.itemEntry[itemId].t = now;
+
   lastSpeechAt = now;
-  updateTranscript();
+
+  // update only this line
+  updateEntryEl(s.itemEntry[itemId]);
 }
+
+
 
 
 function asrFinalizeItem(which, itemId, transcript) {
@@ -833,27 +891,21 @@ function asrFinalizeItem(which, itemId, transcript) {
   const final = normalize(transcript);
   if (!final) return;
 
-  // move live → committed
-  s.committedText = normalize(
-    (s.committedText + " " + final).trim()
-  );
-  s.liveText = "";
-
-  // remove live entry
+  // remove interim line
   const entry = s.itemEntry[itemId];
   if (entry) {
     const idx = timeline.indexOf(entry);
     if (idx >= 0) timeline.splice(idx, 1);
+    removeEntryEl(entry);
   }
 
   delete s.itemEntry[itemId];
+  delete s.itemText[itemId];
 
-  const role = which === "sys" ? "interviewer" : "candidate";
-  addFinalSpeech(s.committedText, role);
-
-  // reset for next utterance
-  s.committedText = "";
+  addFinalSpeech(final, which === "sys" ? "interviewer" : "candidate");
 }
+
+
 
 
 
@@ -1085,7 +1137,7 @@ function startMic() {
       removeInterimIfAny();
       micInterimEntry = { t: Date.now(), text: latestInterim };
       timeline.push(micInterimEntry);
-      updateTranscript();
+      // updateTranscript();
     }
   };
 
@@ -1739,7 +1791,7 @@ lastCommittedAt = 0;
   stopAsrSession("mic");
   stopAsrSession("sys");
 
-  updateTranscript();
+  // updateTranscript();
 
   isRunning = true;
 
@@ -1839,7 +1891,7 @@ lastCommittedAt = 0;
   sentCursor = 0;
   pinnedTop = true;
 
-  updateTranscript();
+  // updateTranscript();
 }
 
 //--------------------------------------------------------------
@@ -1868,7 +1920,7 @@ sendBtn.onclick = async () => {
 
   sentCursor = timeline.length;
   pinnedTop = true;
-  updateTranscript();
+  // updateTranscript();
 
   const draftQ = buildDraftQuestion(base);
   responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
@@ -1897,7 +1949,8 @@ async function processSendQueue() {
 
   sentCursor = timeline.length;
   pinnedTop = true;
-  updateTranscript();
+  // updateTranscript();
+
 
   const draftQ = buildDraftQuestion(combined);
   responseBox.innerHTML = renderMarkdown(
@@ -1984,7 +2037,7 @@ window.addEventListener("load", async () => {
   stopAsrSession("mic");
   stopAsrSession("sys");
 
-  updateTranscript();
+  // updateTranscript();
 
   stopBtn.disabled = true;
   sysBtn.disabled = true;
