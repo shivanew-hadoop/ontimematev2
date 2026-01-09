@@ -665,17 +665,84 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
-function buildDraftQuestion(base) {
-  if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
-  if (isGenericProjectAsk(base)) {
-    return "Q: Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
+function buildDraftQuestion(spoken) {
+  let s = normalize(spoken);
+  if (!s) return "Q: Can you walk me through your current project end-to-end?";
+
+  const low = s.toLowerCase();
+
+  // If already a clean question, pass through
+  if (low.startsWith("how ") || low.startsWith("what ") || low.startsWith("why ") ||
+      low.startsWith("can ") || low.startsWith("explain ") || low.startsWith("tell ") ||
+      s.endsWith("?")) {
+    return "Q: " + capitalizeQuestion(s);
   }
-  const kws = extractAnchorKeywords(base);
-  if (kws.length) {
-    return `Q: Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
+
+  // -----------------------------
+  // 1️⃣ Detect INTENT
+  // -----------------------------
+  const isConcept = /(what is|what are|explain|define|meaning|concept|theory|scp|oops|acid|normalization)/i.test(low);
+  const isTask = /^(write|create|build|implement|design|develop|reverse|convert|test|optimize|generate)/i.test(low);
+  const isDebug = /(error|issue|bug|not working|failed|exception|timeout|flaky|broken)/i.test(low);
+  const isDesign = /(architecture|design|flow|structure|pattern|microservice|system)/i.test(low);
+  const isExperience = /(project|responsibility|role|worked|experience|handled|led)/i.test(low);
+  const isData = /(dataset|data|missing|null|etl|kpi|metric|warehouse|tableau|powerbi|sql)/i.test(low);
+
+  // -----------------------------
+  // 2️⃣ Detect TECH CONTEXT
+  // -----------------------------
+  const tech =
+    /(java|python|selenium|playwright|sql|api|rest|spring|cucumber|bdd|aws|azure|react|node)/i.exec(low)?.[0];
+
+  // -----------------------------
+  // 3️⃣ Build smart question
+  // -----------------------------
+
+  if (isConcept) {
+    return `Q: Can you explain ${s} and how it is used in real-world systems?`;
   }
-  return `Q: Can you explain what you meant by "${base}" and how it maps to your real project work?`;
+
+  if (isTask) {
+    return `Q: How would you ${s} and how have you implemented something similar in your project?`;
+  }
+
+  if (isDebug) {
+    return `Q: How do you troubleshoot ${s} and what steps did you take in your real project to fix it?`;
+  }
+
+  if (isDesign) {
+    return `Q: Can you explain the ${s} you worked with and why that design was chosen?`;
+  }
+
+  if (isExperience) {
+    return `Q: Can you describe ${s} in your current or past project and its impact?`;
+  }
+
+  if (isData) {
+    return `Q: How do you handle ${s} in a real data analytics project, and why is it important?`;
+  }
+
+  // Tech mentioned but concept unclear
+  if (tech) {
+    return `Q: Can you explain ${s} in the context of ${tech} and how you used it in your project?`;
+  }
+
+  // Short keyword phrases
+  if (s.split(" ").length <= 6) {
+    return `Q: Can you explain ${s} with a real project example?`;
+  }
+
+  // Fallback
+  return `Q: Can you walk me through what you meant by "${s}" and how it applies to your work?`;
 }
+
+function capitalizeQuestion(q) {
+  q = q.replace(/\s+/g, " ").trim();
+  q = q.charAt(0).toUpperCase() + q.slice(1);
+  if (!q.endsWith("?")) q += "?";
+  return q;
+}
+
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
