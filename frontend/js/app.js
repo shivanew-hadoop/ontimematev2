@@ -1568,8 +1568,8 @@ function compactHistoryForRequest() {
 }
 
 async function startChatStreaming(prompt, userTextForHistory) {
-  // Abort any existing stream, but SILENTLY (no "Failed" UI)
-  abortChatStreamOnly(true);
+  // Cancel any previous stream immediately (silent)
+  abortChatStreamOnly();
 
   chatAbort = new AbortController();
   chatStreamActive = true;
@@ -1591,24 +1591,33 @@ async function startChatStreaming(prompt, userTextForHistory) {
   let flushTimer = null;
   let sawFirstChunk = false;
 
-  const render = () => { responseBox.innerHTML = renderMarkdown(raw); };
+  const render = () => {
+    responseBox.innerHTML = renderMarkdown(raw);
+  };
 
   try {
-    const res = await apiFetch("chat/send", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Accept": "text/plain" },
-      body: JSON.stringify(body),
-      signal: chatAbort.signal
-    }, false);
+    const res = await apiFetch(
+      "chat/send",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "text/plain"
+        },
+        body: JSON.stringify(body),
+        signal: chatAbort.signal
+      },
+      false
+    );
 
     if (!res.ok) throw new Error(await res.text());
-    if (!res.body) throw new Error("No stream body (backend buffering).");
+    if (!res.body) throw new Error("No stream body");
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
 
     flushTimer = setInterval(() => {
-      if (!chatStreamActive || mySeq !== chatStreamSeq) return;
+      if (mySeq !== chatStreamSeq) return;
       if (!sawFirstChunk) return;
       render();
     }, 30);
@@ -1617,8 +1626,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // if a newer stream started, stop updating UI
-      if (!chatStreamActive || mySeq !== chatStreamSeq) break;
+      // 🔒 HARD GUARANTEE: newer Send wins
+      if (mySeq !== chatStreamSeq) return;
 
       raw += decoder.decode(value, { stream: true });
 
@@ -1631,36 +1640,32 @@ async function startChatStreaming(prompt, userTextForHistory) {
       if (raw.length < 1800) render();
     }
 
-    // Only finalize if we are still the active stream
-    if (chatStreamActive && mySeq === chatStreamSeq) {
+    // Finalize ONLY if still latest
+    if (mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
       pushHistory("assistant", raw);
     }
   } catch (e) {
-    // ✅ KEY FIX: Abort is NOT a failure
-    const aborted =
-      chatAbort?.signal?.aborted ||
-      e?.name === "AbortError" ||
-      String(e?.message || "").toLowerCase().includes("abort");
-
-    if (aborted) {
-      // silent cancel (new request will start immediately)
+    // ✅ Abort = expected (user clicked Send again)
+    if (e?.name === "AbortError" || chatAbort?.signal?.aborted) {
       return;
     }
 
     console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
-    responseBox.innerHTML = `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
+    responseBox.innerHTML =
+      `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
   } finally {
     if (flushTimer) clearInterval(flushTimer);
 
-    // Only mark inactive if we are still the latest stream
     if (mySeq === chatStreamSeq) {
       chatStreamActive = false;
     }
   }
 }
+
+
 
 
 //--------------------------------------------------------------
