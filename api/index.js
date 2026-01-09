@@ -180,97 +180,144 @@ function looksLikeCodeText(s = "") {
   return tokenHits >= 6;
 }
 
-function isExplanationQuestion(q = "") {
-  const s = String(q).toLowerCase().trim();
+// -------------------------------------------------------
+// QUESTION INTENT DETECTION (FIXED / PRACTICAL)
+// -------------------------------------------------------
 
-  // explicit explain-only patterns
-  const starts = [
+function normalizeQ(q = "") {
+  return String(q || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isExplanationQuestion(q = "") {
+  const s = normalizeQ(q);
+
+  // Strong explanation patterns (no code needed)
+  const explainStarts = [
     "explain",
     "what is",
-    "why",
     "how does",
-    "how do",
-    "tell me about",
+    "why",
+    "describe",
+    "define",
     "difference between",
-    "compare"
+    "compare",
+    "advantages",
+    "disadvantages",
+    "pros and cons"
   ];
 
-  if (starts.some(x => s.startsWith(x))) return true;
-
-  // typical theory/architecture prompts
-  const theorySignals = [
+  // Common deep-dive / theory topics (usually explanation)
+  const explainTopics = [
     "architecture",
     "design",
     "lifecycle",
     "internals",
-    "under the hood",
-    "concept",
-    "theory",
-    "pros and cons",
-    "advantages",
-    "disadvantages",
-    "complexity",
-    "time complexity",
-    "space complexity",
-    "class loader",
     "jvm",
     "garbage collector",
-    "dependency injection",
-    "solid principles"
+    "class loader",
+    "multithreading",
+    "deadlock",
+    "solid",
+    "oops",
+    "normalization"
   ];
 
-  return theorySignals.some(x => s.includes(x));
+  return (
+    explainStarts.some(p => s.startsWith(p)) ||
+    explainTopics.some(t => s.includes(t))
+  );
 }
 
 function isCodeQuestion(q = "") {
-  const s = String(q).toLowerCase().trim();
+  const s = normalizeQ(q);
 
-  // if user is clearly asking for explanation, do NOT force code mode
-  if (isExplanationQuestion(s) && !s.includes("write") && !s.includes("implement")) return false;
+  // If user explicitly wants code, always treat as code
+  const explicitCode = [
+    "code",
+    "program",
+    "snippet",
+    "implementation",
+    "source code",
+    "write a function",
+    "write a program",
+    "give me code",
+    "show me code"
+  ];
 
-  // explicit "write/build/implement" intent
-  const codeVerbs = [
+  // Task verbs that strongly indicate coding even without "code" word
+  const taskVerbs = [
     "write",
     "implement",
     "create",
     "build",
     "develop",
     "program",
-    "code",
-    "give code",
-    "show code",
-    "provide code",
-    "sample code",
-    "code snippet",
-    "solution in",
-    "program to",
-    "function to",
-    "method to"
+    "solve",
+    "print",
+    "return",
+    "calculate",
+    "count",
+    "find",
+    "check",
+    "validate",
+    "reverse",
+    "sort",
+    "remove",
+    "replace",
+    "convert"
   ];
 
-  // code-ish patterns even if user didn't say "write"
-  const codeSignals = [
-    "syntax",
-    "pseudocode",
-    "regex",
-    "api endpoint",
-    "unit test",
-    "test case code",
-    "cucumber",
-    "step definition",
-    "selenium code",
-    "playwright code",
-    "jest",
-    "junit",
-    "pytest",
-    "()",
-    "{}"
+  // Classic coding-problem keywords
+  const algoKeywords = [
+    "vowel",
+    "vowels",
+    "palindrome",
+    "anagram",
+    "fibonacci",
+    "prime",
+    "factorial",
+    "string",
+    "array",
+    "hashmap",
+    "hash set",
+    "linked list",
+    "stack",
+    "queue",
+    "binary search",
+    "time complexity",
+    "space complexity"
   ];
 
-  if (looksLikeCodeText(s)) return true;
+  // Code-looking characters/signals
+  const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
 
-  return codeVerbs.some(v => s.includes(v)) || codeSignals.some(v => s.includes(v));
+  const wantsExample = /\b(example|sample|demo)\b/.test(s);
+  const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
+
+  // Explanation override ONLY when it’s purely theory (no "example/code/task")
+  const looksLikeExplain = isExplanationQuestion(s);
+
+  let score = 0;
+
+  if (explicitCode.some(x => s.includes(x))) score += 4;
+  if (codeSignals.some(x => s.includes(x))) score += 4;
+
+  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
+  if (algoKeywords.some(k => s.includes(k))) score += 2;
+
+  if (wantsExample) score += 1;
+  if (mentionsLanguage) score += 1; // LOW weight on purpose
+
+  // If it's strongly explanation AND score is weak, keep it explanation
+  if (looksLikeExplain && score < 3) return false;
+
+  // Threshold: >=3 => code-intent
+  return score >= 3;
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
