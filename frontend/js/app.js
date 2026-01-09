@@ -700,6 +700,23 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
+function isNewTopic(text) {
+  const s = (text || "").toLowerCase().trim();
+
+  // Social / filler resets
+  if (/^(hi|hello|hey|thanks|thank you|cheers|okay|cool|alright)\b/.test(s)) return true;
+
+  // Interview soft switches
+  if (/tell me about|your project|your role|responsibilities|experience|walk me through|about your/i.test(s)) return true;
+
+  // If it's not a coding sentence and it's longer than a few words → topic change
+  const codeVerbs = ["reverse","count","sort","find","validate","check","convert","parse","remove","merge"];
+  const hasCode = codeVerbs.some(v => s.includes(v));
+  if (!hasCode && s.split(" ").length > 4) return true;
+
+  return false;
+}
+
 function buildDraftQuestion(spoken) {
   // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
   let s = normalizeSpokenText(normalize(spoken))
@@ -707,6 +724,10 @@ function buildDraftQuestion(spoken) {
     .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
+     if (isNewTopic(s)) {
+    activeIntent = null;
+    activeTech = null;
+  }
 
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
@@ -731,7 +752,7 @@ function buildDraftQuestion(spoken) {
   // 5️⃣ Lock coding intent
   if (hasVerb && hasNoun) {
     activeIntent = "code";
-    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic and time complexity.`;
+    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic `;
   }
 
   // 6️⃣ Debug
