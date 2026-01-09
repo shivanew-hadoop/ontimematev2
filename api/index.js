@@ -161,52 +161,115 @@ function safeHistory(history) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* QUESTION INTENT DETECTION (NON-BREAKING ADDITION)                           */
+/* LIGHTWEIGHT CODE-INTENT DETECTION (ADDED)                                  */
+/* - DOES NOT rely on "java/python" keywords                                   */
+/* - Explanation intent overrides language mentions like "in Java"             */
 /* -------------------------------------------------------------------------- */
 
+function looksLikeCodeText(s = "") {
+  // quick signals: braces/semicolons/common code tokens OR fenced blocks
+  if (!s) return false;
+  const t = String(s);
+
+  if (t.includes("```")) return true;
+
+  const tokenHits =
+    (t.match(/[{}();]/g)?.length || 0) +
+    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
+
+  return tokenHits >= 6;
+}
+
 function isExplanationQuestion(q = "") {
-  const s = q.toLowerCase().trim();
-  return (
-    s.startsWith("explain") ||
-    s.startsWith("what is") ||
-    s.startsWith("how does") ||
-    s.startsWith("why") ||
-    s.includes("architecture") ||
-    s.includes("design") ||
-    s.includes("lifecycle") ||
-    s.includes("internals") ||
-    s.includes("class loader")
-  );
+  const s = String(q).toLowerCase().trim();
+
+  // explicit explain-only patterns
+  const starts = [
+    "explain",
+    "what is",
+    "why",
+    "how does",
+    "how do",
+    "tell me about",
+    "difference between",
+    "compare"
+  ];
+
+  if (starts.some(x => s.startsWith(x))) return true;
+
+  // typical theory/architecture prompts
+  const theorySignals = [
+    "architecture",
+    "design",
+    "lifecycle",
+    "internals",
+    "under the hood",
+    "concept",
+    "theory",
+    "pros and cons",
+    "advantages",
+    "disadvantages",
+    "complexity",
+    "time complexity",
+    "space complexity",
+    "class loader",
+    "jvm",
+    "garbage collector",
+    "dependency injection",
+    "solid principles"
+  ];
+
+  return theorySignals.some(x => s.includes(x));
 }
 
 function isCodeQuestion(q = "") {
-  const s = q.toLowerCase();
-  if (isExplanationQuestion(s)) return false;
+  const s = String(q).toLowerCase().trim();
 
-  const verbs = [
+  // if user is clearly asking for explanation, do NOT force code mode
+  if (isExplanationQuestion(s) && !s.includes("write") && !s.includes("implement")) return false;
+
+  // explicit "write/build/implement" intent
+  const codeVerbs = [
     "write",
     "implement",
     "create",
     "build",
+    "develop",
     "program",
-    "show code",
-    "give code",
-    "example program"
-  ];
-
-  const signals = [
     "code",
-    "algorithm",
-    "function",
-    "method",
-    "()",
-    "{}",
-    "for(",
-    "while(",
-    "if("
+    "give code",
+    "show code",
+    "provide code",
+    "sample code",
+    "code snippet",
+    "solution in",
+    "program to",
+    "function to",
+    "method to"
   ];
 
-  return verbs.some(v => s.includes(v)) || signals.some(v => s.includes(v));
+  // code-ish patterns even if user didn't say "write"
+  const codeSignals = [
+    "syntax",
+    "pseudocode",
+    "regex",
+    "api endpoint",
+    "unit test",
+    "test case code",
+    "cucumber",
+    "step definition",
+    "selenium code",
+    "playwright code",
+    "jest",
+    "junit",
+    "pytest",
+    "()",
+    "{}"
+  ];
+
+  if (looksLikeCodeText(s)) return true;
+
+  return codeVerbs.some(v => s.includes(v)) || codeSignals.some(v => s.includes(v));
 }
 
 /* -------------------------------------------------------------------------- */
@@ -481,7 +544,6 @@ export default async function handler(req, res) {
       const body = await readJson(req).catch(() => ({}));
       const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
 
-      // Create ephemeral client secret for Realtime transcription sessions :contentReference[oaicite:13]{index=13}
       const payload = {
         expires_after: { anchor: "created_at", seconds: ttl },
         session: {
@@ -518,7 +580,9 @@ export default async function handler(req, res) {
 
       const out = await r.json().catch(() => ({}));
       if (!r.ok) {
-        return res.status(r.status).json({ error: out?.error?.message || out?.error || "Failed to create client secret" });
+        return res.status(r.status).json({
+          error: out?.error?.message || out?.error || "Failed to create client secret"
+        });
       }
 
       return res.json({ value: out.value, expires_at: out.expires_at || 0 });
@@ -557,7 +621,10 @@ export default async function handler(req, res) {
           "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(
+          0,
+          800
+        );
 
         const out = await openai.audio.transcriptions.create({
           file: audioFile,
@@ -596,6 +663,7 @@ export default async function handler(req, res) {
 
       const messages = [];
 
+      // IMPORTANT: baseSystem unchanged (your original)
       const baseSystem = `
 You are answering a REAL technical interview question.
 
@@ -648,7 +716,9 @@ STRICTLY AVOID:
 
 Your goal is to sound like a real candidate answering live — clear, decisive, and experienced.
 `.trim();
-const CODE_FIRST_SYSTEM = `
+
+      // ADDED: code-first system prompt (only used when intent is code)
+      const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
 MANDATORY OUTPUT ORDER:
@@ -657,30 +727,26 @@ MANDATORY OUTPUT ORDER:
 3. Example input and output
 4. Brief explanation after code
 
-RULES:
+STRICT RULES:
 - Never explain before showing code
 - No essay-style answers
-- Use fenced code blocks only
+- Code must compile/run
+- Use fenced code blocks
 `.trim();
 
+      // ADDED: lightweight intent detection (no "java/python" dependency)
+      const codeMode = isCodeQuestion(String(prompt || ""));
 
+      // ADDED: switch system message based on intent
+      messages.push({
+        role: "system",
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+      });
 
-
-   const codeMode = isCodeQuestion(prompt);
-
-messages.push({
-  role: "system",
-  content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-});
-
-
+      // ADDED: keep your custom instructions for interview/explain mode only
       if (!codeMode && instructions?.trim()) {
-  messages.push({
-    role: "system",
-    content: instructions.trim().slice(0, 4000)
-  });
-}
-
+        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
+      }
 
       if (resumeText?.trim()) {
         messages.push({
@@ -692,6 +758,8 @@ messages.push({
       }
 
       for (const m of safeHistory(history)) messages.push(m);
+
+      // Keep prompt as-is (no extra prefix that might alter meaning)
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
       const stream = await openai.chat.completions.create({
@@ -785,7 +853,9 @@ messages.push({
 
     // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
-      return res.status(400).json({ error: "Unexpected end of form (multipart stream was consumed or interrupted)." });
+      return res.status(400).json({
+        error: "Unexpected end of form (multipart stream was consumed or interrupted)."
+      });
     }
 
     return res.status(500).json({ error: msg });
