@@ -1,41 +1,4 @@
 //--------------------------------------------------------------
-// MARKDOWN → HTML (stream-safe bold + spacing fix)
-//--------------------------------------------------------------
-function escapeHtml(s) {
-  return String(s || "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function fixSpacingOutsideCodeBlocks(text) {
-  if (!text) return "";
-  const parts = String(text).split("```");
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 1) continue;
-    parts[i] = parts[i]
-      .replace(/([,.;:!?])([A-Za-z0-9])/g, "$1 $2")
-      .replace(/([\)\]])([A-Za-z0-9])/g, "$1 $2")
-      .replace(/[ \t]{2,}/g, " ")
-      .replace(/(\S)(\?|\!|\.)(\S)/g, "$1$2 $3");
-  }
-  return parts.join("```");
-}
-
-function renderMarkdown(md) {
-  if (!md) return "";
-  let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
-  safe = fixSpacingOutsideCodeBlocks(safe);
-  safe = escapeHtml(safe);
-  safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  safe = safe
-    .replace(/\r\n/g, "\n")
-    .replace(/\n\s*\n/g, "<br><br>")
-    .replace(/\n/g, "<br>");
-  return safe.trim();
-}
-
-//--------------------------------------------------------------
 // DOM
 //--------------------------------------------------------------
 const userInfo = document.getElementById("userInfo");
@@ -61,8 +24,6 @@ const modeSelect = document.getElementById("modeSelect");
 
 // === MIC MUTE CHANGE ===
 const micMuteBtn = document.getElementById("micMuteBtn");
-
-
 
 //--------------------------------------------------------------
 // SESSION + STATE
@@ -110,7 +71,7 @@ let sysErrBackoffUntil = 0;
 // DEDUPE STATE (separate mic vs system)
 let lastSysTail = "";
 let lastMicTail = "";
-let lastSysPrinted = ""
+let lastSysPrinted = "";
 let lastSysPrintedAt = 0;
 
 // final-level dedupe across pipelines
@@ -141,28 +102,19 @@ let resumeTextMem = "";
 let transcriptEpoch = 0;
 
 /* -------------------------------------------------------------------------- */
-/* MARKDOWN RENDERING (responseBox)                                            */
+/* MARKDOWN RENDERING (Single renderer for responseBox)                        */
 /* -------------------------------------------------------------------------- */
 
-let aiRawBuffer = "";
+let aiRawBuffer = ""; // streamed text buffer (current response)
+
+function libsReady() {
+  return !!(window.marked && window.DOMPurify && window.hljs);
+}
 
 function setupMarkdownRenderer() {
-  if (!window.marked || !window.hljs || !window.DOMPurify) return;
-
-  marked.setOptions({
-    gfm: true,
-    breaks: true,
-    highlight: (code, lang) => {
-      try {
-        if (lang && hljs.getLanguage(lang)) {
-          return hljs.highlight(code, { language: lang }).value;
-        }
-        return hljs.highlightAuto(code).value;
-      } catch {
-        return code;
-      }
-    }
-  });
+  if (!libsReady()) return;
+  // marked v12: keep it simple; highlight done after render using hljs.highlightElement
+  marked.setOptions({ gfm: true, breaks: true });
 }
 
 function escapeHtml(s) {
@@ -180,6 +132,13 @@ function renderMarkdownSafe(mdText) {
   }
   const html = marked.parse(mdText || "");
   return DOMPurify.sanitize(html);
+}
+
+function highlightAll(containerEl) {
+  if (!containerEl || !window.hljs) return;
+  containerEl.querySelectorAll("pre code").forEach((block) => {
+    try { hljs.highlightElement(block); } catch {}
+  });
 }
 
 function enhanceCodeBlocks(containerEl) {
@@ -214,21 +173,14 @@ function enhanceCodeBlocks(containerEl) {
   });
 }
 
-function appendStreamChunk(chunkText) {
-  aiRawBuffer += chunkText;
-  // streaming view: keep it fast and stable
+function renderStreamFast() {
+  // streaming: plain text (fast + stable)
   responseBox.textContent = aiRawBuffer;
 }
 
-function finalizeRenderedResponse() {
+function renderFinalPretty() {
   responseBox.innerHTML = renderMarkdownSafe(aiRawBuffer);
-
-  if (window.hljs) {
-    responseBox.querySelectorAll("pre code").forEach((block) => {
-      try { hljs.highlightElement(block); } catch {}
-    });
-  }
-
+  highlightAll(responseBox);
   enhanceCodeBlocks(responseBox);
 }
 
@@ -236,12 +188,10 @@ document.addEventListener("DOMContentLoaded", () => {
   setupMarkdownRenderer();
 });
 
-
 //--------------------------------------------------------------
 // STREAMING ASR (Realtime) — NEW
 //--------------------------------------------------------------
 // === SYS ASR FIX ===
-// Realtime streaming ASR is what breaks "Mic OFF → no system transcript" in your environment.
 // Force system audio to always use legacy MediaRecorder → /transcribe pipeline.
 const USE_STREAMING_ASR_SYS = false;
 
@@ -362,21 +312,14 @@ function updateMicMuteUI() {
 
 // Only stop mic pipelines. DO NOT touch system audio.
 function stopMicPipelinesOnly() {
-  // stop SR
   try { recognition?.stop(); } catch {}
   recognition = null;
 
-  // stop watchdog
   if (micWatchdog) clearInterval(micWatchdog);
   micWatchdog = null;
 
-  // stop realtime mic ASR (if any)
   stopAsrSession("mic");
-
-  // stop recorder fallback
   stopMicRecorderOnly();
-
-  // remove interim line
   removeInterimIfAny();
 }
 
@@ -384,7 +327,6 @@ async function setMicMuted(on) {
   micMuted = !!on;
   updateMicMuteUI();
 
-  // If not running, just change state/UI
   if (!isRunning) return;
 
   if (micMuted) {
@@ -393,7 +335,6 @@ async function setMicMuted(on) {
     return;
   }
 
-  // Unmute: resume normal mic behavior (SR first)
   const micOk = startMic();
   if (!micOk) {
     setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
@@ -408,7 +349,6 @@ async function setMicMuted(on) {
     setStatus(audioStatus, "Mic unmuted.", "text-green-600");
   }
 
-  // same “if SR gives nothing” fallback timer, but only when mic is ON
   setTimeout(() => {
     if (!isRunning) return;
     if (micMuted) return;
@@ -527,15 +467,10 @@ function addFinalSpeech(txt, role) {
 
   const now = Date.now();
 
-  // 🔒 HARD DEDUPE (exact or near-exact repeat within short window)
-  const sameText =
-    cleaned.toLowerCase() === lastCommittedText.toLowerCase();
+  const sameText = cleaned.toLowerCase() === lastCommittedText.toLowerCase();
+  const tooSoon = now - lastCommittedAt < 2500;
 
-  const tooSoon = now - lastCommittedAt < 2500; // 2.5 sec window
-
-  if (sameText && tooSoon) {
-    return; // ❌ drop duplicate
-  }
+  if (sameText && tooSoon) return;
 
   lastCommittedText = cleaned;
   lastCommittedAt = now;
@@ -556,7 +491,6 @@ function addFinalSpeech(txt, role) {
   updateTranscript();
 }
 
-
 function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "interviewer") {
   const cleaned = normalize(txt);
   if (!cleaned) return;
@@ -568,11 +502,11 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 
   let entry;
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    entry = { t: now, text: "", role };   // ✅ role added
+    entry = { t: now, text: "", role };
     timeline.push(entry);
   } else {
     entry = timeline[timeline.length - 1];
-    if (!entry.role) entry.role = role;   // ✅ ensure role exists
+    if (!entry.role) entry.role = role;
     if (entry.text) entry.text = normalize(entry.text) + " ";
     entry.t = now;
   }
@@ -589,7 +523,6 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
     updateTranscript();
   }, msPerWord);
 }
-
 
 //--------------------------------------------------------------
 // QUESTION RELEVANCE HELPERS
@@ -687,7 +620,6 @@ INTERVIEWER QUESTION:
 ${base}
 `.trim();
 }
-
 
 //--------------------------------------------------------------
 // PROFILE
@@ -936,11 +868,9 @@ function asrFinalizeItem(which, itemId, transcript) {
   const final = normalize(transcript);
   if (!final) return;
 
-  // 🔒 ROLE IS THE KEY
   const role = (which === "sys") ? "interviewer" : "candidate";
   addFinalSpeech(final, role);
 }
-
 
 function sendAsrConfig(ws) {
   const cfgA = {
@@ -993,8 +923,6 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
-
-  // IMPORTANT: do not start mic streaming if mic is muted
   if (which === "mic" && micMuted) return false;
 
   stopAsrSession(which);
@@ -1480,8 +1408,6 @@ async function enableSystemAudioStreaming() {
 }
 
 async function enableSystemAudio() {
-  // === SYS ASR FIX ===
-  // Force legacy pipeline so Mic OFF still prints + 3s pause newline works + Send uses timeline.
   if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming();
   return enableSystemAudioLegacy();
 }
@@ -1546,6 +1472,29 @@ function drainSysQueue() {
   }
 }
 
+function trimOverlap(prev, next) {
+  if (!prev || !next) return next;
+
+  const p = prev.toLowerCase();
+  const n = next.toLowerCase();
+
+  const pWords = p.split(" ");
+  const nWords = n.split(" ");
+
+  const maxCheck = Math.min(12, pWords.length, nWords.length);
+
+  for (let k = maxCheck; k >= 3; k--) {
+    const pTail = pWords.slice(-k).join(" ");
+    const nHead = nWords.slice(0, k).join(" ");
+
+    if (pTail === nHead) {
+      return nWords.slice(k).join(" ");
+    }
+  }
+
+  return next;
+}
+
 async function transcribeSysBlob(blob, myEpoch) {
   if (Date.now() < sysErrBackoffUntil) return;
 
@@ -1589,43 +1538,17 @@ async function transcribeSysBlob(blob, myEpoch) {
   });
 
   if (cleaned) {
-  const now = Date.now();
-  const text = normalize(cleaned);
+    const now = Date.now();
+    const text = normalize(cleaned);
 
-  // Trim overlapping prefix from previous system output
-  const trimmed = trimOverlap(lastSysPrinted, text);
-  if (!trimmed) return;
+    const trimmed = trimOverlap(lastSysPrinted, text);
+    if (!trimmed) return;
 
-  lastSysPrinted = text;
-  lastSysPrintedAt = now;
+    lastSysPrinted = text;
+    lastSysPrintedAt = now;
 
-  addTypewriterSpeech(trimmed);
-}
-
-
-}
-
-function trimOverlap(prev, next) {
-  if (!prev || !next) return next;
-
-  const p = prev.toLowerCase();
-  const n = next.toLowerCase();
-
-  const pWords = p.split(" ");
-  const nWords = n.split(" ");
-
-  const maxCheck = Math.min(12, pWords.length, nWords.length);
-
-  for (let k = maxCheck; k >= 3; k--) {
-    const pTail = pWords.slice(-k).join(" ");
-    const nHead = nWords.slice(0, k).join(" ");
-
-    if (pTail === nHead) {
-      return nWords.slice(k).join(" ");
-    }
+    addTypewriterSpeech(trimmed, SYS_TYPE_MS_PER_WORD, "interviewer");
   }
-
-  return next;
 }
 
 //--------------------------------------------------------------
@@ -1673,24 +1596,19 @@ function startCreditTicking() {
 //--------------------------------------------------------------
 // CHAT STREAMING
 //--------------------------------------------------------------
-// SEND QUEUE (prevent stream aborts)
 let sendQueue = [];
 let sendLocked = false;
-function abortChatStreamOnly(silent = true) {
-  try {
-    chatAbort?.abort();
-  } catch {}
 
+function abortChatStreamOnly(silent = true) {
+  try { chatAbort?.abort(); } catch {}
   chatAbort = null;
 
-  // Do NOT mark failure on abort
   if (silent) {
     setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
   }
 
   chatStreamActive = false;
 }
-
 
 function pushHistory(role, content) {
   const c = normalize(content);
@@ -1707,7 +1625,6 @@ function compactHistoryForRequest() {
 }
 
 async function startChatStreaming(prompt, userTextForHistory) {
-  // Cancel any previous stream immediately (silent)
   abortChatStreamOnly();
 
   chatAbort = new AbortController();
@@ -1716,7 +1633,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
 
   if (userTextForHistory) pushHistory("user", userTextForHistory);
 
-  responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
+  aiRawBuffer = "";
+  responseBox.textContent = "Receiving…";
   setStatus(sendStatus, "Connecting…", "text-orange-600");
 
   const body = {
@@ -1729,10 +1647,6 @@ async function startChatStreaming(prompt, userTextForHistory) {
   let raw = "";
   let flushTimer = null;
   let sawFirstChunk = false;
-
-  const render = () => {
-    responseBox.innerHTML = renderMarkdown(raw);
-  };
 
   try {
     const res = await apiFetch(
@@ -1758,54 +1672,44 @@ async function startChatStreaming(prompt, userTextForHistory) {
     flushTimer = setInterval(() => {
       if (mySeq !== chatStreamSeq) return;
       if (!sawFirstChunk) return;
-      render();
+      renderStreamFast();
     }, 30);
 
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
 
-      // 🔒 HARD GUARANTEE: newer Send wins
       if (mySeq !== chatStreamSeq) return;
 
-      raw += decoder.decode(value, { stream: true });
+      const chunkText = decoder.decode(value, { stream: true });
+      raw += chunkText;
+      aiRawBuffer = raw;
 
       if (!sawFirstChunk) {
         sawFirstChunk = true;
-        responseBox.innerHTML = "";
+        responseBox.textContent = "";
         setStatus(sendStatus, "Receiving…", "text-orange-600");
       }
 
-      if (raw.length < 1800) render();
+      if (aiRawBuffer.length < 1800) renderStreamFast();
     }
 
-    // Finalize ONLY if still latest
     if (mySeq === chatStreamSeq) {
-      render();
+      renderFinalPretty();
       setStatus(sendStatus, "Done", "text-green-600");
-      pushHistory("assistant", raw);
+      pushHistory("assistant", aiRawBuffer);
     }
   } catch (e) {
-    // ✅ Abort = expected (user clicked Send again)
-    if (e?.name === "AbortError" || chatAbort?.signal?.aborted) {
-      return;
-    }
+    if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;
 
     console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
-    responseBox.innerHTML =
-      `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
+    responseBox.innerHTML = renderMarkdownSafe("Failed. Check backend /chat/send streaming.");
   } finally {
     if (flushTimer) clearInterval(flushTimer);
-
-    if (mySeq === chatStreamSeq) {
-      chatStreamActive = false;
-    }
+    if (mySeq === chatStreamSeq) chatStreamActive = false;
   }
 }
-
-
-
 
 //--------------------------------------------------------------
 // RESUME UPLOAD
@@ -1843,7 +1747,8 @@ resumeInput?.addEventListener("change", async () => {
 //--------------------------------------------------------------
 async function startAll() {
   lastCommittedText = "";
-lastCommittedAt = 0;
+  lastCommittedAt = 0;
+
   hideBanner();
   if (isRunning) return;
 
@@ -1879,8 +1784,6 @@ lastCommittedAt = 0;
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  // === MIC MUTE CHANGE ===
-  // Start mic only if mic is ON
   if (!micMuted) {
     const micOk = startMic();
     if (!micOk) {
@@ -1942,8 +1845,7 @@ function stopAll() {
 function hardClearTranscript() {
   transcriptEpoch++;
   lastCommittedText = "";
-lastCommittedAt = 0;
-
+  lastCommittedAt = 0;
 
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
@@ -1958,7 +1860,7 @@ lastCommittedAt = 0;
   lastFinalText = "";
   lastFinalAt = 0;
   lastSysPrinted = "";
-lastSysPrintedAt = 0;
+  lastSysPrintedAt = 0;
 
   if (micAsr) { micAsr.itemText = {}; micAsr.itemEntry = {}; }
   if (sysAsr) { sysAsr.itemText = {}; sysAsr.itemEntry = {}; }
@@ -1978,21 +1880,15 @@ lastSysPrintedAt = 0;
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // 1) Always take textbox immediately (your requirement)
   const manual = normalize(manualQuestion?.value || "");
-
-  // 2) If textbox empty, fallback to transcript blocks (does not wait for system audio stop)
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
   if (!base) return;
 
-  // Clear textbox immediately (UX like huddlemate)
   if (manualQuestion) manualQuestion.value = "";
 
-  // Preempt current stream NOW
   abortChatStreamOnly(true);
 
-  // Update transcript cursor (so next "fresh" is clean)
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
@@ -2001,16 +1897,14 @@ sendBtn.onclick = async () => {
   updateTranscript();
 
   const draftQ = buildDraftQuestion(base);
-  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
+  responseBox.innerHTML = renderMarkdownSafe(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
   const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
 
-  // Start streaming immediately (new wins)
   await startChatStreaming(promptToSend, base);
 };
-
 
 async function processSendQueue() {
   if (sendLocked) return;
@@ -2018,7 +1912,6 @@ async function processSendQueue() {
 
   sendLocked = true;
 
-  // combine all queued prompts
   const combined = sendQueue.join("\n\n");
   sendQueue = [];
 
@@ -2030,9 +1923,7 @@ async function processSendQueue() {
   updateTranscript();
 
   const draftQ = buildDraftQuestion(combined);
-  responseBox.innerHTML = renderMarkdown(
-    `${draftQ}\n\n_Generating answer…_`
-  );
+  responseBox.innerHTML = renderMarkdownSafe(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Streaming…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -2045,14 +1936,9 @@ async function processSendQueue() {
     await startChatStreaming(promptToSend, combined);
   } finally {
     sendLocked = false;
-
-    // if user clicked Send again while streaming
-    if (sendQueue.length) {
-      processSendQueue();
-    }
+    if (sendQueue.length) processSendQueue();
   }
 }
-
 
 clearBtn.onclick = () => {
   hardClearTranscript();
@@ -2062,7 +1948,7 @@ clearBtn.onclick = () => {
 };
 
 resetBtn.onclick = async () => {
-  // abortChatStreamOnly();
+  aiRawBuffer = "";
   responseBox.innerHTML = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
@@ -2074,7 +1960,6 @@ resetBtn.onclick = async () => {
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
   resumeTextMem = "";
-  // abortChatStreamOnly();
   stopAll();
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
@@ -2126,7 +2011,6 @@ window.addEventListener("load", async () => {
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
 
-  // === MIC MUTE CHANGE ===
   updateMicMuteUI();
 });
 
