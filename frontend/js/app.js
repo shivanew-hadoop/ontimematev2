@@ -267,7 +267,7 @@ const TRANSCRIBE_PROMPT =
 // Force system audio to legacy MediaRecorder -> /transcribe
 const USE_STREAMING_ASR_SYS = true;
 // Allow mic streaming fallback when SR is weak
-const USE_STREAMING_ASR_MIC_FALLBACK = true;
+const USE_STREAMING_ASR_MIC_FALLBACK = false;
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
 const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
@@ -1891,7 +1891,7 @@ async function startAll() {
   sendBtn.classList.remove("opacity-60");
 
   if (!micMuted) {
-    const micOk = startMic();
+    const micOk = false;
     if (!micOk) {
       setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
       if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
