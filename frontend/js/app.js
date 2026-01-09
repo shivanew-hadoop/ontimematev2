@@ -1,120 +1,17 @@
-//--------------------------------------------------------------
-// DOM
-//--------------------------------------------------------------
-const userInfo = document.getElementById("userInfo");
-const instructionsBox = document.getElementById("instructionsBox");
-const instrStatus = document.getElementById("instrStatus");
-const resumeInput = document.getElementById("resumeInput");
-const resumeStatus = document.getElementById("resumeStatus");
-
-const liveTranscript = document.getElementById("liveTranscript");
-const manualQuestion = document.getElementById("manualQuestion");
-
-const responseBox = document.getElementById("responseBox");
-const startBtn = document.getElementById("startBtn");
-const stopBtn = document.getElementById("stopBtn");
-const sysBtn = document.getElementById("sysBtn");
-const clearBtn = document.getElementById("clearBtn");
-const resetBtn = document.getElementById("resetBtn");
-const audioStatus = document.getElementById("audioStatus");
-const sendBtn = document.getElementById("sendBtn");
-const sendStatus = document.getElementById("sendStatus");
-const bannerTop = document.getElementById("bannerTop");
-const modeSelect = document.getElementById("modeSelect");
-
-// === MIC MUTE CHANGE ===
-const micMuteBtn = document.getElementById("micMuteBtn");
-
-//--------------------------------------------------------------
-// SESSION + STATE
-//--------------------------------------------------------------
-let session = null;
-let isRunning = false;
-
-let hiddenInstructions = "";
-let lastCommittedText = "";
-let lastCommittedAt = 0;
-
-// === MIC MUTE CHANGE ===
-let micMuted = false;
-
-// SpeechRecognition (fastest live words)
-let recognition = null;
-let blockMicUntil = 0;
-let micInterimEntry = null;
-let lastMicResultAt = 0;
-let micWatchdog = null;
-
-// Mic fallback (MediaRecorder -> /transcribe) if SR doesn’t produce results
-let micStream = null;
-let micTrack = null;
-let micRecorder = null;
-let micSegmentChunks = [];
-let micSegmentTimer = null;
-let micQueue = [];
-let micAbort = null;
-let micInFlight = 0;
-
-// System audio
-let sysStream = null;
-let sysTrack = null;
-let sysRecorder = null;
-let sysSegmentChunks = [];
-let sysSegmentTimer = null;
-let sysQueue = [];
-let sysAbort = null;
-let sysInFlight = 0;
-
-let sysErrCount = 0;
-let sysErrBackoffUntil = 0;
-
-// DEDUPE STATE (separate mic vs system)
-let lastSysTail = "";
-let lastMicTail = "";
-let lastSysPrinted = "";
-let lastSysPrintedAt = 0;
-
-// final-level dedupe across pipelines
-let lastFinalText = "";
-let lastFinalAt = 0;
-
-// Transcript blocks
-let timeline = [];
-let lastSpeechAt = 0;
-let sentCursor = 0;
-
-// “pin to top” behavior
-let pinnedTop = true;
-
-// Credits
-let creditTimer = null;
-let lastCreditAt = 0;
-
-// Chat streaming
-let chatAbort = null;
-let chatStreamActive = false;
-let chatStreamSeq = 0;
-
-let chatHistory = [];
-let resumeTextMem = "";
-
-// HARD CLEAR TOKEN (ignore late transcribe responses)
-let transcriptEpoch = 0;
+/* ========================================================================== */
+/* app.js — END TO END (Replace your complete app.js with this file)           */
+/* Fixes:                                                                     */
+/* 1) Duplicate lines / repeated phrases (SR + fallback + overlap)             */
+/* 2) Role-safe transcript merging (interviewer vs candidate)                  */
+/* 3) Correct system overlap trimming (bugfix order)                           */
+/* 4) Strong final dedupe (punctuation/case-insensitive + overlap trim)        */
+/* ========================================================================== */
 
 /* -------------------------------------------------------------------------- */
-/* MARKDOWN RENDERING (Single renderer for responseBox)                        */
+/* BASIC TEXT HELPERS                                                          */
 /* -------------------------------------------------------------------------- */
-
-let aiRawBuffer = ""; // streamed text buffer (current response)
-
-function libsReady() {
-  return !!(window.marked && window.DOMPurify && window.hljs);
-}
-
-function setupMarkdownRenderer() {
-  if (!libsReady()) return;
-  // marked v12: keep it simple; highlight done after render using hljs.highlightElement
-  marked.setOptions({ gfm: true, breaks: true });
+function normalize(s) {
+  return (s || "").replace(/\s+/g, " ").trim();
 }
 
 function escapeHtml(s) {
@@ -126,19 +23,66 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
+/* -------------------------------------------------------------------------- */
+/* SIMPLE MARKDOWN (fallback)                                                   */
+/* -------------------------------------------------------------------------- */
+function fixSpacingOutsideCodeBlocks(text) {
+  if (!text) return "";
+  const parts = String(text).split("```");
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) continue;
+    parts[i] = parts[i]
+      .replace(/([,.;:!?])([A-Za-z0-9])/g, "$1 $2")
+      .replace(/([\)\]])([A-Za-z0-9])/g, "$1 $2")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/(\S)(\?|\!|\.)(\S)/g, "$1$2 $3");
+  }
+  return parts.join("```");
+}
+
+function renderMarkdownLite(md) {
+  if (!md) return "";
+  let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
+  safe = fixSpacingOutsideCodeBlocks(safe);
+  safe = escapeHtml(safe);
+  safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  safe = safe
+    .replace(/\r\n/g, "\n")
+    .replace(/\n\s*\n/g, "<br><br>")
+    .replace(/\n/g, "<br>");
+  return safe.trim();
+}
+
+/* -------------------------------------------------------------------------- */
+/* MARKDOWN RENDERING FOR responseBox (marked + DOMPurify if present)          */
+/* -------------------------------------------------------------------------- */
+let aiRawBuffer = "";
+
+function setupMarkdownRenderer() {
+  if (!window.marked || !window.hljs || !window.DOMPurify) return;
+
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+    highlight: (code, lang) => {
+      try {
+        if (lang && hljs.getLanguage(lang)) {
+          return hljs.highlight(code, { language: lang }).value;
+        }
+        return hljs.highlightAuto(code).value;
+      } catch {
+        return code;
+      }
+    }
+  });
+}
+
 function renderMarkdownSafe(mdText) {
   if (!window.marked || !window.DOMPurify) {
-    return `<pre>${escapeHtml(mdText)}</pre>`;
+    return renderMarkdownLite(mdText);
   }
   const html = marked.parse(mdText || "");
   return DOMPurify.sanitize(html);
-}
-
-function highlightAll(containerEl) {
-  if (!containerEl || !window.hljs) return;
-  containerEl.querySelectorAll("pre code").forEach((block) => {
-    try { hljs.highlightElement(block); } catch {}
-  });
 }
 
 function enhanceCodeBlocks(containerEl) {
@@ -173,14 +117,20 @@ function enhanceCodeBlocks(containerEl) {
   });
 }
 
-function renderStreamFast() {
-  // streaming: plain text (fast + stable)
+function appendStreamChunk(chunkText) {
+  aiRawBuffer += chunkText;
+  // streaming view: keep it fast & stable
   responseBox.textContent = aiRawBuffer;
 }
 
-function renderFinalPretty() {
+function finalizeRenderedResponse() {
   responseBox.innerHTML = renderMarkdownSafe(aiRawBuffer);
-  highlightAll(responseBox);
+
+  if (window.hljs) {
+    responseBox.querySelectorAll("pre code").forEach((block) => {
+      try { hljs.highlightElement(block); } catch {}
+    });
+  }
   enhanceCodeBlocks(responseBox);
 }
 
@@ -188,34 +138,108 @@ document.addEventListener("DOMContentLoaded", () => {
   setupMarkdownRenderer();
 });
 
-//--------------------------------------------------------------
-// STREAMING ASR (Realtime) — NEW
-//--------------------------------------------------------------
-// === SYS ASR FIX ===
-// Force system audio to always use legacy MediaRecorder → /transcribe pipeline.
-const USE_STREAMING_ASR_SYS = false;
+/* -------------------------------------------------------------------------- */
+/* DOM                                                                          */
+/* -------------------------------------------------------------------------- */
+const userInfo = document.getElementById("userInfo");
+const instructionsBox = document.getElementById("instructionsBox");
+const instrStatus = document.getElementById("instrStatus");
+const resumeInput = document.getElementById("resumeInput");
+const resumeStatus = document.getElementById("resumeStatus");
 
-// Keep mic fallback streaming as you had it (only used if SR missing/weak)
-const USE_STREAMING_ASR_MIC_FALLBACK = true;
+const liveTranscript = document.getElementById("liveTranscript");
+const manualQuestion = document.getElementById("manualQuestion");
 
-const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
-const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
+const responseBox = document.getElementById("responseBox");
+const startBtn = document.getElementById("startBtn");
+const stopBtn = document.getElementById("stopBtn");
+const sysBtn = document.getElementById("sysBtn");
+const clearBtn = document.getElementById("clearBtn");
+const resetBtn = document.getElementById("resetBtn");
+const audioStatus = document.getElementById("audioStatus");
+const sendBtn = document.getElementById("sendBtn");
+const sendStatus = document.getElementById("sendStatus");
+const bannerTop = document.getElementById("bannerTop");
+const modeSelect = document.getElementById("modeSelect");
+const micMuteBtn = document.getElementById("micMuteBtn");
 
-const ASR_SEND_EVERY_MS = 40;
-const ASR_TARGET_RATE = 24000;
+/* -------------------------------------------------------------------------- */
+/* SESSION + STATE                                                              */
+/* -------------------------------------------------------------------------- */
+let session = null;
+let isRunning = false;
 
-let realtimeSecretCache = null;
+let hiddenInstructions = "";
 
-// separate sessions for mic vs system
-let micAsr = null;
-let sysAsr = null;
+// MIC MUTE
+let micMuted = false;
 
-//--------------------------------------------------------------
-// CONSTANTS
-//--------------------------------------------------------------
+// SpeechRecognition (fast preview)
+let recognition = null;
+let blockMicUntil = 0;
+let micInterimEntry = null;
+let lastMicResultAt = 0;
+let micWatchdog = null;
+
+// Mic fallback (MediaRecorder -> /transcribe)
+let micStream = null;
+let micTrack = null;
+let micRecorder = null;
+let micSegmentChunks = [];
+let micSegmentTimer = null;
+let micQueue = [];
+let micAbort = null;
+let micInFlight = 0;
+
+// System audio
+let sysStream = null;
+let sysTrack = null;
+let sysRecorder = null;
+let sysSegmentChunks = [];
+let sysSegmentTimer = null;
+let sysQueue = [];
+let sysAbort = null;
+let sysInFlight = 0;
+
+let sysErrCount = 0;
+let sysErrBackoffUntil = 0;
+
+// DEDUPE STATE (tails)
+let lastSysTail = "";
+let lastMicTail = "";
+
+// System overlap memory
+let lastSysPrinted = "";
+let lastSysPrintedAt = 0;
+
+// Transcript blocks
+let timeline = [];
+let lastSpeechAt = 0;
+let sentCursor = 0;
+
+// “pin to top”
+let pinnedTop = true;
+
+// Credits
+let creditTimer = null;
+let lastCreditAt = 0;
+
+// Chat streaming
+let chatAbort = null;
+let chatStreamActive = false;
+let chatStreamSeq = 0;
+
+let chatHistory = [];
+let resumeTextMem = "";
+
+// HARD CLEAR TOKEN
+let transcriptEpoch = 0;
+
+/* -------------------------------------------------------------------------- */
+/* CONSTANTS                                                                    */
+/* -------------------------------------------------------------------------- */
 const PAUSE_NEWLINE_MS = 3000;
 
-// Mic fallback chunking (legacy)
 const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
 const MIC_MAX_CONCURRENT = 2;
@@ -234,13 +258,31 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-// Strong transcription prompt to reduce hallucinations/repeats
 const TRANSCRIBE_PROMPT =
   "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
 
-//--------------------------------------------------------------
-// MODE INSTRUCTIONS
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* STREAMING ASR (Realtime)                                                     */
+/* -------------------------------------------------------------------------- */
+// Force system audio to legacy MediaRecorder -> /transcribe
+const USE_STREAMING_ASR_SYS = false;
+// Allow mic streaming fallback when SR is weak
+const USE_STREAMING_ASR_MIC_FALLBACK = true;
+
+const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
+const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
+
+const ASR_SEND_EVERY_MS = 40;
+const ASR_TARGET_RATE = 24000;
+
+let realtimeSecretCache = null;
+
+let micAsr = null;
+let sysAsr = null;
+
+/* -------------------------------------------------------------------------- */
+/* MODE INSTRUCTIONS                                                            */
+/* -------------------------------------------------------------------------- */
 const MODE_INSTRUCTIONS = {
   general: "",
   interview: `
@@ -265,9 +307,9 @@ Highlight benefits/outcomes.
 `.trim()
 };
 
-//--------------------------------------------------------------
-// UI HELPERS
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* UI HELPERS                                                                   */
+/* -------------------------------------------------------------------------- */
 function showBanner(msg) {
   if (!bannerTop) return;
   bannerTop.textContent = msg;
@@ -280,22 +322,21 @@ function hideBanner() {
   bannerTop.classList.add("hidden");
   bannerTop.textContent = "";
 }
+
 function setStatus(el, text, cls = "") {
   if (!el) return;
   el.textContent = text;
   el.className = cls;
 }
-function normalize(s) {
-  return (s || "").replace(/\s+/g, " ").trim();
-}
+
 function authHeaders() {
   const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-//--------------------------------------------------------------
-// === MIC MUTE CHANGE === (UI + behavior)
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* MIC MUTE UI                                                                  */
+/* -------------------------------------------------------------------------- */
 function updateMicMuteUI() {
   if (!micMuteBtn) return;
 
@@ -310,7 +351,7 @@ function updateMicMuteUI() {
   }
 }
 
-// Only stop mic pipelines. DO NOT touch system audio.
+// Stop mic pipelines only (do not touch system)
 function stopMicPipelinesOnly() {
   try { recognition?.stop(); } catch {}
   recognition = null;
@@ -331,16 +372,14 @@ async function setMicMuted(on) {
 
   if (micMuted) {
     stopMicPipelinesOnly();
-    setStatus(audioStatus, "Mic muted (user/wire OFF). System audio continues.", "text-orange-600");
+    setStatus(audioStatus, "Mic muted (user OFF). System audio continues.", "text-orange-600");
     return;
   }
 
   const micOk = startMic();
   if (!micOk) {
     setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-    if (USE_STREAMING_ASR_MIC_FALLBACK) {
-      await enableMicStreamingFallback().catch(() => {});
-    }
+    if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
     if (!micAsr && !micStream) {
       setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
       await enableMicRecorderFallback().catch(() => {});
@@ -367,9 +406,9 @@ if (micMuteBtn) {
   updateMicMuteUI();
 }
 
-//--------------------------------------------------------------
-// MODE APPLY
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* MODE APPLY                                                                   */
+/* -------------------------------------------------------------------------- */
 function applyModeInstructions() {
   const mode = modeSelect?.value || "interview";
   hiddenInstructions = MODE_INSTRUCTIONS[mode] || "";
@@ -401,16 +440,14 @@ function getEffectiveInstructions() {
   return (localStorage.getItem("instructions") || "").trim();
 }
 
-//--------------------------------------------------------------
-// TRANSCRIPT RENDER (newest on top, pinned unless user scrolls)
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* TRANSCRIPT RENDER (newest on top, pinned unless user scrolls)               */
+/* -------------------------------------------------------------------------- */
 if (liveTranscript) {
   const TH = 40;
   liveTranscript.addEventListener(
     "scroll",
-    () => {
-      pinnedTop = liveTranscript.scrollTop <= TH;
-    },
+    () => { pinnedTop = liveTranscript.scrollTop <= TH; },
     { passive: true }
   );
 }
@@ -433,13 +470,10 @@ function getFreshBlocksText() {
     .trim();
 }
 
-//--------------------------------------------------------------
-// INTERVIEWER-ONLY EXTRACTION (HARD GATE)
-//--------------------------------------------------------------
 function getFreshInterviewerBlocksText() {
   return timeline
     .slice(sentCursor)
-    .filter(x => x.role === "interviewer")
+    .filter(x => x && x.role === "interviewer")
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -452,7 +486,6 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-// pause-aware append
 function removeInterimIfAny() {
   if (!micInterimEntry) return;
   const idx = timeline.indexOf(micInterimEntry);
@@ -460,31 +493,89 @@ function removeInterimIfAny() {
   micInterimEntry = null;
 }
 
-// HARD dedupe at final stage
-function addFinalSpeech(txt, role) {
-  const cleaned = normalize(txt);
-  if (!cleaned) return;
+/* -------------------------------------------------------------------------- */
+/* HARD FINAL DEDUPE + OVERLAP TRIM (role-safe)                                */
+/* -------------------------------------------------------------------------- */
+function canonKey(s) {
+  return normalize(String(s || ""))
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
+function trimOverlapWords(prevRaw, nextRaw) {
+  const p = canonKey(prevRaw);
+  const n = canonKey(nextRaw);
+  if (!p || !n) return nextRaw;
+
+  const pWords = p.split(" ");
+  const nextCanonWords = canonKey(nextRaw).split(" ");
+  const maxCheck = Math.min(14, pWords.length, nextCanonWords.length);
+
+  for (let k = maxCheck; k >= 3; k--) {
+    const pTail = pWords.slice(-k).join(" ");
+    const nHead = nextCanonWords.slice(0, k).join(" ");
+    if (pTail === nHead) {
+      const origWords = normalize(nextRaw).split(" ");
+      return origWords.slice(k).join(" ").trim();
+    }
+  }
+  return nextRaw;
+}
+
+// Per-role last commit
+const lastCommittedByRole = {
+  interviewer: { key: "", at: 0, raw: "" },
+  candidate:   { key: "", at: 0, raw: "" }
+};
+
+function resetRoleCommitState() {
+  lastCommittedByRole.interviewer = { key: "", at: 0, raw: "" };
+  lastCommittedByRole.candidate = { key: "", at: 0, raw: "" };
+}
+
+function addFinalSpeech(txt, role) {
+  const cleanedRaw = normalize(txt);
+  if (!cleanedRaw) return;
+
+  const r = role === "interviewer" ? "interviewer" : "candidate";
   const now = Date.now();
 
-  const sameText = cleaned.toLowerCase() === lastCommittedText.toLowerCase();
-  const tooSoon = now - lastCommittedAt < 2500;
+  const prev = lastCommittedByRole[r];
 
-  if (sameText && tooSoon) return;
+  // Overlap trim vs prior final (same role)
+  const trimmedRaw = prev.raw ? trimOverlapWords(prev.raw, cleanedRaw) : cleanedRaw;
+  const trimmedKey = canonKey(trimmedRaw);
+  if (!trimmedKey) return;
 
-  lastCommittedText = cleaned;
-  lastCommittedAt = now;
+  // Strong dedupe (punctuation/case-insensitive)
+  const tooSoon = now - (prev.at || 0) < 3000;
+  const sameKey = trimmedKey === (prev.key || "");
+
+  if (sameKey && tooSoon) return;
+
+  prev.key = trimmedKey;
+  prev.raw = trimmedRaw;
+  prev.at = now;
 
   removeInterimIfAny();
 
   const gap = now - (lastSpeechAt || 0);
 
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    timeline.push({ t: now, text: cleaned, role });
+    timeline.push({ t: now, text: trimmedRaw, role: r });
   } else {
     const last = timeline[timeline.length - 1];
-    last.text = normalize((last.text || "") + " " + cleaned);
-    last.t = now;
+
+    // Merge only if same role; else new block
+    if (last.role && last.role !== r) {
+      timeline.push({ t: now, text: trimmedRaw, role: r });
+    } else {
+      last.text = normalize((last.text || "") + " " + trimmedRaw);
+      last.t = now;
+      last.role = r;
+    }
   }
 
   lastSpeechAt = now;
@@ -506,9 +597,16 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
     timeline.push(entry);
   } else {
     entry = timeline[timeline.length - 1];
-    if (!entry.role) entry.role = role;
-    if (entry.text) entry.text = normalize(entry.text) + " ";
-    entry.t = now;
+
+    // Merge only if same role
+    if (entry.role && entry.role !== role) {
+      entry = { t: now, text: "", role };
+      timeline.push(entry);
+    } else {
+      if (entry.text) entry.text = normalize(entry.text) + " ";
+      entry.t = now;
+      entry.role = role;
+    }
   }
 
   lastSpeechAt = now;
@@ -524,9 +622,9 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
   }, msPerWord);
 }
 
-//--------------------------------------------------------------
-// QUESTION RELEVANCE HELPERS
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* QUESTION HELPERS                                                             */
+/* -------------------------------------------------------------------------- */
 function extractPriorQuestions() {
   const qs = [];
   for (const m of chatHistory.slice(-30)) {
@@ -551,9 +649,15 @@ function guessDomainBias(text) {
 
 function extractAnchorKeywords(text) {
   const s = (text || "").toLowerCase();
-  const stop = new Set(["the","a","an","and","or","but","to","of","in","on","for","with","is","are","was","were",
-    "about","explain","tell","me","please","your","my","current","project","can","could","this","that","it","as","at","by","from","into","over","how","what","why","when","where"]);
-  return s.replace(/[^a-z0-9\s]/g, " ").split(/\s+/).filter(w => w.length >= 4 && !stop.has(w)).slice(0, 8);
+  const stop = new Set([
+    "the","a","an","and","or","but","to","of","in","on","for","with","is","are","was","were",
+    "about","explain","tell","me","please","your","my","current","project","can","could","this","that","it","as","at","by","from","into","over","how","what","why","when","where"
+  ]);
+  return s
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 4 && !stop.has(w))
+    .slice(0, 8);
 }
 
 function isGenericProjectAsk(text) {
@@ -621,9 +725,9 @@ ${base}
 `.trim();
 }
 
-//--------------------------------------------------------------
-// PROFILE
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* PROFILE                                                                      */
+/* -------------------------------------------------------------------------- */
 async function loadUserProfile() {
   try {
     const res = await apiFetch("user/profile", {}, true);
@@ -644,9 +748,9 @@ async function loadUserProfile() {
   }
 }
 
-//--------------------------------------------------------------
-// TOKEN + API
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* TOKEN + API                                                                  */
+/* -------------------------------------------------------------------------- */
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
   if (!exp) return false;
@@ -701,9 +805,9 @@ async function apiFetch(path, opts = {}, needAuth = true) {
   return res;
 }
 
-//--------------------------------------------------------------
-// DEDUPE UTIL (tail-based)
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* DEDUPE UTIL (tail-based)                                                     */
+/* -------------------------------------------------------------------------- */
 function dedupeByTail(text, tailRef) {
   const t = normalize(text);
   if (!t) return "";
@@ -753,9 +857,9 @@ function looksLikeWhisperHallucination(t) {
   return noise.some(p => s.includes(p));
 }
 
-//--------------------------------------------------------------
-// STREAMING ASR HELPERS — NEW
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* STREAMING ASR HELPERS                                                        */
+/* -------------------------------------------------------------------------- */
 function base64FromBytes(u8) {
   let binary = "";
   const chunk = 0x8000;
@@ -840,13 +944,16 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
 
+  const role = (which === "sys") ? "interviewer" : "candidate";
+
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur };
+    const entry = { t: now, text: cur, role };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
     s.itemEntry[itemId].text = cur;
     s.itemEntry[itemId].t = now;
+    s.itemEntry[itemId].role = role;
   }
 
   lastSpeechAt = now;
@@ -944,16 +1051,10 @@ async function startStreamingAsr(which, mediaStream) {
   const queue = [];
 
   const state = {
-    ws,
-    ctx,
-    src,
-    proc,
-    gain,
-    queue,
+    ws, ctx, src, proc, gain, queue,
     sendTimer: null,
     itemText: {},
     itemEntry: {},
-    lastItemId: null,
     sawConfigError: false
   };
 
@@ -1041,9 +1142,9 @@ async function startStreamingAsr(which, mediaStream) {
   return true;
 }
 
-//--------------------------------------------------------------
-// MIC — SpeechRecognition (fast) + fallback (recorder)
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* MIC — SpeechRecognition + fallback                                           */
+/* -------------------------------------------------------------------------- */
 function micSrIsHealthy() {
   return (Date.now() - (lastMicResultAt || 0)) < 1800;
 }
@@ -1088,13 +1189,16 @@ function startMic() {
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
+
+      // IMPORTANT: keep SR as FINAL (candidate) as you had.
+      // If you want max accuracy, you can disable SR final commits and rely on OpenAI ASR.
       if (r.isFinal) addFinalSpeech(text, "candidate");
       else latestInterim = text;
     }
 
     if (latestInterim) {
       removeInterimIfAny();
-      micInterimEntry = { t: Date.now(), text: latestInterim };
+      micInterimEntry = { t: Date.now(), text: latestInterim, role: "candidate" };
       timeline.push(micInterimEntry);
       updateTranscript();
     }
@@ -1123,6 +1227,7 @@ function startMic() {
     if (micMuted) return;
 
     if (micSrIsHealthy()) {
+      // If SR healthy, stop fallbacks
       if (micRecorder || micStream) stopMicRecorderOnly();
       if (micAsr) stopAsrSession("mic");
       return;
@@ -1165,7 +1270,6 @@ async function enableMicStreamingFallback() {
   await startStreamingAsr("mic", micStream);
 }
 
-// ---- Mic fallback (MediaRecorder -> /transcribe) ----
 function stopMicRecorderOnly() {
   try { micAbort?.abort(); } catch {}
   micAbort = null;
@@ -1267,10 +1371,12 @@ function startMicSegmentRecorder() {
 function drainMicQueue() {
   if (!isRunning) return;
   if (micMuted) return;
+
   while (micInFlight < MIC_MAX_CONCURRENT && micQueue.length) {
     const blob = micQueue.shift();
     const myEpoch = transcriptEpoch;
     micInFlight++;
+
     transcribeMicBlob(blob, myEpoch)
       .catch(() => {})
       .finally(() => {
@@ -1298,6 +1404,11 @@ async function transcribeMicBlob(blob, myEpoch) {
 
   if (!res.ok) return;
 
+  // CRITICAL DUPLICATE FIX:
+  // If SR became healthy or streaming ASR is active, drop recorder results.
+  if (micSrIsHealthy()) return;
+  if (micAsr) return;
+
   const data = await res.json().catch(() => ({}));
   const raw = String(data.text || "");
   if (looksLikeWhisperHallucination(raw)) return;
@@ -1310,9 +1421,9 @@ async function transcribeMicBlob(blob, myEpoch) {
   if (cleaned) addFinalSpeech(cleaned, "candidate");
 }
 
-//--------------------------------------------------------------
-// SYSTEM AUDIO
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* SYSTEM AUDIO                                                                 */
+/* -------------------------------------------------------------------------- */
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
   sysAbort = null;
@@ -1371,7 +1482,6 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
-// Streaming system audio (kept, but disabled via flag)
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
@@ -1475,8 +1585,8 @@ function drainSysQueue() {
 function trimOverlap(prev, next) {
   if (!prev || !next) return next;
 
-  const p = prev.toLowerCase();
-  const n = next.toLowerCase();
+  const p = normalize(prev).toLowerCase();
+  const n = normalize(next).toLowerCase();
 
   const pWords = p.split(" ");
   const nWords = n.split(" ");
@@ -1491,7 +1601,6 @@ function trimOverlap(prev, next) {
       return nWords.slice(k).join(" ");
     }
   }
-
   return next;
 }
 
@@ -1537,23 +1646,25 @@ async function transcribeSysBlob(blob, myEpoch) {
     set value(v) { lastSysTail = v; }
   });
 
-  if (cleaned) {
-    const now = Date.now();
-    const text = normalize(cleaned);
+  if (!cleaned) return;
 
-    const trimmed = trimOverlap(lastSysPrinted, text);
-    if (!trimmed) return;
+  const now = Date.now();
+  const text = normalize(cleaned);
 
-    lastSysPrinted = text;
-    lastSysPrintedAt = now;
+  // FIX: compute trimmed BEFORE overwriting lastSysPrinted
+  const trimmed = trimOverlap(lastSysPrinted, text);
+  if (!trimmed) return;
 
-    addTypewriterSpeech(trimmed, SYS_TYPE_MS_PER_WORD, "interviewer");
-  }
+  // Maintain a growing reference so overlap trimming stays stable
+  lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
+  lastSysPrintedAt = now;
+
+  addTypewriterSpeech(trimmed, SYS_TYPE_MS_PER_WORD, "interviewer");
 }
 
-//--------------------------------------------------------------
-// CREDITS
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* CREDITS                                                                      */
+/* -------------------------------------------------------------------------- */
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
     method: "POST",
@@ -1593,20 +1704,14 @@ function startCreditTicking() {
   }, 500);
 }
 
-//--------------------------------------------------------------
-// CHAT STREAMING
-//--------------------------------------------------------------
-let sendQueue = [];
-let sendLocked = false;
-
+/* -------------------------------------------------------------------------- */
+/* CHAT STREAMING                                                               */
+/* -------------------------------------------------------------------------- */
 function abortChatStreamOnly(silent = true) {
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
 
-  if (silent) {
-    setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
-  }
-
+  if (silent) setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
   chatStreamActive = false;
 }
 
@@ -1625,7 +1730,7 @@ function compactHistoryForRequest() {
 }
 
 async function startChatStreaming(prompt, userTextForHistory) {
-  abortChatStreamOnly();
+  abortChatStreamOnly(true);
 
   chatAbort = new AbortController();
   chatStreamActive = true;
@@ -1634,7 +1739,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
   if (userTextForHistory) pushHistory("user", userTextForHistory);
 
   aiRawBuffer = "";
-  responseBox.textContent = "Receiving…";
+  responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
   setStatus(sendStatus, "Connecting…", "text-orange-600");
 
   const body = {
@@ -1648,15 +1753,16 @@ async function startChatStreaming(prompt, userTextForHistory) {
   let flushTimer = null;
   let sawFirstChunk = false;
 
+  const render = () => {
+    responseBox.innerHTML = renderMarkdownLite(raw);
+  };
+
   try {
     const res = await apiFetch(
       "chat/send",
       {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "text/plain"
-        },
+        headers: { "Content-Type": "application/json", Accept: "text/plain" },
         body: JSON.stringify(body),
         signal: chatAbort.signal
       },
@@ -1672,7 +1778,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
     flushTimer = setInterval(() => {
       if (mySeq !== chatStreamSeq) return;
       if (!sawFirstChunk) return;
-      renderStreamFast();
+      render();
     }, 30);
 
     while (true) {
@@ -1681,39 +1787,38 @@ async function startChatStreaming(prompt, userTextForHistory) {
 
       if (mySeq !== chatStreamSeq) return;
 
-      const chunkText = decoder.decode(value, { stream: true });
-      raw += chunkText;
-      aiRawBuffer = raw;
+      raw += decoder.decode(value, { stream: true });
 
       if (!sawFirstChunk) {
         sawFirstChunk = true;
-        responseBox.textContent = "";
+        responseBox.innerHTML = "";
         setStatus(sendStatus, "Receiving…", "text-orange-600");
       }
 
-      if (aiRawBuffer.length < 1800) renderStreamFast();
+      if (raw.length < 1800) render();
     }
 
     if (mySeq === chatStreamSeq) {
-      renderFinalPretty();
+      render();
       setStatus(sendStatus, "Done", "text-green-600");
-      pushHistory("assistant", aiRawBuffer);
+      pushHistory("assistant", raw);
     }
   } catch (e) {
     if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;
 
     console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
-    responseBox.innerHTML = renderMarkdownSafe("Failed. Check backend /chat/send streaming.");
+    responseBox.innerHTML =
+      `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
   } finally {
     if (flushTimer) clearInterval(flushTimer);
     if (mySeq === chatStreamSeq) chatStreamActive = false;
   }
 }
 
-//--------------------------------------------------------------
-// RESUME UPLOAD
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* RESUME UPLOAD                                                                */
+/* -------------------------------------------------------------------------- */
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
@@ -1742,13 +1847,10 @@ resumeInput?.addEventListener("change", async () => {
   }
 });
 
-//--------------------------------------------------------------
-// START / STOP
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* START / STOP                                                                 */
+/* -------------------------------------------------------------------------- */
 async function startAll() {
-  lastCommittedText = "";
-  lastCommittedAt = 0;
-
   hideBanner();
   if (isRunning) return;
 
@@ -1763,10 +1865,9 @@ async function startAll() {
 
   lastSysTail = "";
   lastMicTail = "";
-  lastFinalText = "";
-  lastFinalAt = 0;
   lastSysPrinted = "";
   lastSysPrintedAt = 0;
+  resetRoleCommitState();
 
   stopAsrSession("mic");
   stopAsrSession("sys");
@@ -1788,9 +1889,7 @@ async function startAll() {
     const micOk = startMic();
     if (!micOk) {
       setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-      if (USE_STREAMING_ASR_MIC_FALLBACK) {
-        await enableMicStreamingFallback().catch(() => {});
-      }
+      if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
       if (!micAsr && !micStream) {
         setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
         await enableMicRecorderFallback().catch(() => {});
@@ -1839,13 +1938,11 @@ function stopAll() {
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
-//--------------------------------------------------------------
-// HARD CLEAR
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* HARD CLEAR                                                                   */
+/* -------------------------------------------------------------------------- */
 function hardClearTranscript() {
   transcriptEpoch++;
-  lastCommittedText = "";
-  lastCommittedAt = 0;
 
   try { micAbort?.abort(); } catch {}
   try { sysAbort?.abort(); } catch {}
@@ -1857,10 +1954,9 @@ function hardClearTranscript() {
 
   lastSysTail = "";
   lastMicTail = "";
-  lastFinalText = "";
-  lastFinalAt = 0;
   lastSysPrinted = "";
   lastSysPrintedAt = 0;
+  resetRoleCommitState();
 
   if (micAsr) { micAsr.itemText = {}; micAsr.itemEntry = {}; }
   if (sysAsr) { sysAsr.itemText = {}; sysAsr.itemEntry = {}; }
@@ -1874,9 +1970,9 @@ function hardClearTranscript() {
   updateTranscript();
 }
 
-//--------------------------------------------------------------
-// SEND / CLEAR / RESET
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* SEND / CLEAR / RESET                                                        */
+/* -------------------------------------------------------------------------- */
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
@@ -1897,7 +1993,7 @@ sendBtn.onclick = async () => {
   updateTranscript();
 
   const draftQ = buildDraftQuestion(base);
-  responseBox.innerHTML = renderMarkdownSafe(`${draftQ}\n\n_Generating answer…_`);
+  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -1905,40 +2001,6 @@ sendBtn.onclick = async () => {
 
   await startChatStreaming(promptToSend, base);
 };
-
-async function processSendQueue() {
-  if (sendLocked) return;
-  if (!sendQueue.length) return;
-
-  sendLocked = true;
-
-  const combined = sendQueue.join("\n\n");
-  sendQueue = [];
-
-  blockMicUntil = Date.now() + 700;
-  removeInterimIfAny();
-
-  sentCursor = timeline.length;
-  pinnedTop = true;
-  updateTranscript();
-
-  const draftQ = buildDraftQuestion(combined);
-  responseBox.innerHTML = renderMarkdownSafe(`${draftQ}\n\n_Generating answer…_`);
-  setStatus(sendStatus, "Streaming…", "text-orange-600");
-
-  const mode = modeSelect?.value || "interview";
-  const promptToSend =
-    mode === "interview"
-      ? buildInterviewQuestionPrompt(combined)
-      : combined;
-
-  try {
-    await startChatStreaming(promptToSend, combined);
-  } finally {
-    sendLocked = false;
-    if (sendQueue.length) processSendQueue();
-  }
-}
 
 clearBtn.onclick = () => {
   hardClearTranscript();
@@ -1948,15 +2010,14 @@ clearBtn.onclick = () => {
 };
 
 resetBtn.onclick = async () => {
-  aiRawBuffer = "";
   responseBox.innerHTML = "";
   setStatus(sendStatus, "Response reset", "text-green-600");
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
 };
 
-//--------------------------------------------------------------
-// LOGOUT
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* LOGOUT                                                                       */
+/* -------------------------------------------------------------------------- */
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
   resumeTextMem = "";
@@ -1965,9 +2026,9 @@ document.getElementById("logoutBtn").onclick = () => {
   window.location.href = "/auth?tab=login";
 };
 
-//--------------------------------------------------------------
-// PAGE LOAD
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* PAGE LOAD                                                                    */
+/* -------------------------------------------------------------------------- */
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
@@ -1993,8 +2054,9 @@ window.addEventListener("load", async () => {
 
   lastSysTail = "";
   lastMicTail = "";
-  lastFinalText = "";
-  lastFinalAt = 0;
+  lastSysPrinted = "";
+  lastSysPrintedAt = 0;
+  resetRoleCommitState();
 
   stopAsrSession("mic");
   stopAsrSession("sys");
@@ -2014,9 +2076,9 @@ window.addEventListener("load", async () => {
   updateMicMuteUI();
 });
 
-//--------------------------------------------------------------
-// BUTTONS
-//--------------------------------------------------------------
+/* -------------------------------------------------------------------------- */
+/* BUTTONS                                                                      */
+/* -------------------------------------------------------------------------- */
 startBtn.onclick = startAll;
 stopBtn.onclick = stopAll;
 sysBtn.onclick = enableSystemAudio;
