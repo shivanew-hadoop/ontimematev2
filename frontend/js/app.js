@@ -625,6 +625,38 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* -------------------------------------------------------------------------- */
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
+let recentTopics = [];
+
+function updateTopicMemory(text) {
+  const low = text.toLowerCase();
+  const topics = [];
+
+  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
+  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
+  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
+  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
+
+  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
+}
+
+function normalizeSpokenText(s) {
+  const map = {
+    "kod": "code",
+    "coad": "code",
+    "carecter": "character",
+    "charactors": "characters",
+    "flacky": "flaky",
+    "analitics": "analytics",
+    "statics": "statistics"
+  };
+
+  let out = s.toLowerCase();
+  for (const k in map) {
+    out = out.replace(new RegExp("\\b" + k + "\\b", "gi"), map[k]);
+  }
+  return out;
+}
+
 function extractPriorQuestions() {
   const qs = [];
   for (const m of chatHistory.slice(-30)) {
@@ -665,17 +697,109 @@ function isGenericProjectAsk(text) {
   return s.includes("current project") || s.includes("explain your current project") || s.includes("explain about your current project");
 }
 
-function buildDraftQuestion(base) {
-  if (!base) return "Q: Can you walk me through your current project end-to-end (architecture, modules, APIs, data flow, and biggest challenges)?";
-  if (isGenericProjectAsk(base)) {
-    return "Q: Walk me through your current project end-to-end: architecture, key modules, APIs, data flow, and the hardest issue you solved (with impact).";
+function buildDraftQuestion(spoken) {
+  let s = normalizeSpokenText(normalize(spoken));
+  if (!s) return "Q: Can you explain your current project end-to-end?";
+
+  const low = s.toLowerCase();
+
+  // ------------------------------------------------------------------
+  // 1️⃣ Strong coding verb & pattern detection (NON-NEGOTIABLE)
+  // ------------------------------------------------------------------
+  const CODE_VERBS = [
+    "reverse","count","sort","find","search","merge","split","parse","convert",
+    "remove","replace","validate","check","compare","loop","iterate","filter",
+    "map","reduce","calculate","compute","encrypt","decrypt","hash"
+  ];
+
+  const CODE_NOUNS = [
+    "string","number","array","list","map","object","json","character","digits",
+    "vowels","palindrome","anagram","substring","file","csv","xml","api","response"
+  ];
+
+  const looksLikeCode =
+    CODE_VERBS.some(v => low.includes(v)) &&
+    CODE_NOUNS.some(n => low.includes(n));
+
+  // ------------------------------------------------------------------
+  // 2️⃣ Hard tech detection
+  // ------------------------------------------------------------------
+  const TECH = /(java|python|sql|selenium|playwright|cucumber|bdd|api|rest|spring|node|react|aws|azure)/i.exec(low)?.[0];
+
+  // ------------------------------------------------------------------
+  // 3️⃣ Conversation memory bias
+  // ------------------------------------------------------------------
+  const lastTopics = recentTopics.join(" ");
+  const domainBias = guessDomainBias((resumeTextMem || "") + " " + lastTopics);
+
+  // ------------------------------------------------------------------
+  // 4️⃣ If already a full question — normalize and pass
+  // ------------------------------------------------------------------
+  if (/^(how|what|why|can|explain|describe)\b/i.test(low) || s.endsWith("?")) {
+    return "Q: " + capitalizeQuestion(s);
   }
-  const kws = extractAnchorKeywords(base);
-  if (kws.length) {
-    return `Q: Can you explain ${kws[0]} in the context of what you just said, including how it works and how you used it in your project?`;
+
+  // ------------------------------------------------------------------
+  // 5️⃣ CODING QUESTION (absolute priority)
+  // ------------------------------------------------------------------
+  if (looksLikeCode) {
+    return `Q: Write ${TECH || "a"} program to ${s} and explain the logic and time complexity.`;
   }
-  return `Q: Can you explain what you meant by "${base}" and how it maps to your real project work?`;
+
+  // Single coding keyword (like: "palindrome", "anagram", "vowels")
+  if (CODE_NOUNS.some(n => low.includes(n))) {
+    return `Q: Write ${TECH || "a"} program related to ${s} and explain how it works.`;
+  }
+
+  // ------------------------------------------------------------------
+  // 6️⃣ Debugging
+  // ------------------------------------------------------------------
+  if (/error|issue|bug|failed|not working|exception|timeout|flaky/.test(low)) {
+    return `Q: How would you debug ${s} and what steps have you taken to fix similar issues in production?`;
+  }
+
+  // ------------------------------------------------------------------
+  // 7️⃣ Architecture / Design
+  // ------------------------------------------------------------------
+  if (/architecture|design|flow|microservice|system|pattern|framework/.test(low)) {
+    return `Q: Explain the ${s} you have worked with and why that design was chosen.`;
+  }
+
+  // ------------------------------------------------------------------
+  // 8️⃣ Data & Analytics
+  // ------------------------------------------------------------------
+  if (/data|sql|tableau|powerbi|kpi|metric|warehouse|etl/.test(low)) {
+    return `Q: How do you handle ${s} in a real analytics project and why it matters.`;
+  }
+
+  // ------------------------------------------------------------------
+  // 9️⃣ Experience
+  // ------------------------------------------------------------------
+  if (/project|experience|responsibility|role|team|stakeholder/.test(low)) {
+    return `Q: Describe ${s} from your real project and its business impact.`;
+  }
+
+  // ------------------------------------------------------------------
+  // 🔟 Tech keyword without clarity
+  // ------------------------------------------------------------------
+  if (TECH) {
+    return `Q: Explain ${s} in the context of ${TECH} and how you used it in production.`;
+  }
+
+  // ------------------------------------------------------------------
+  // Fallback (interview-grade)
+  // ------------------------------------------------------------------
+  return `Q: Can you explain ${s} with a real-world project example?`;
 }
+
+
+function capitalizeQuestion(q) {
+  q = q.replace(/\s+/g, " ").trim();
+  q = q.charAt(0).toUpperCase() + q.slice(1);
+  if (!q.endsWith("?")) q += "?";
+  return q;
+}
+
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
@@ -1992,6 +2116,7 @@ sendBtn.onclick = async () => {
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
+  updateTopicMemory(base);
   const question = buildDraftQuestion(base);
   if (!base) return;
 
