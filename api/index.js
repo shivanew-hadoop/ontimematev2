@@ -211,6 +211,66 @@ async function extractResumeText(file) {
   return file.buffer.toString("utf8");
 }
 
+// -------------------------------------------------------
+// QUESTION INTENT DETECTION (CRITICAL)
+// -------------------------------------------------------
+
+function isExplanationQuestion(q = "") {
+  const s = q.toLowerCase();
+  return (
+    s.startsWith("explain") ||
+    s.startsWith("what is") ||
+    s.startsWith("how does") ||
+    s.startsWith("why") ||
+    s.includes("architecture") ||
+    s.includes("design") ||
+    s.includes("lifecycle") ||
+    s.includes("class loader") ||
+    s.includes("internals")
+  );
+}
+
+function isCodeQuestion(q = "") {
+  const s = q.toLowerCase();
+
+  // ACTION verbs = user expects code
+  const codeVerbs = [
+    "write",
+    "implement",
+    "create",
+    "build",
+    "develop",
+    "program",
+    "show me code",
+    "give code",
+    "example program"
+  ];
+
+  // Strong code signals
+  const codeSignals = [
+    "syntax",
+    "sample code",
+    "code snippet",
+    "algorithm",
+    "function",
+    "method",
+    "class ",
+    "()",
+    "{}",
+    "for(",
+    "while(",
+    "if("
+  ];
+
+  // Explanation overrides code
+  if (isExplanationQuestion(s)) return false;
+
+  return (
+    codeVerbs.some(v => s.includes(v)) ||
+    codeSignals.some(v => s.includes(v))
+  );
+}
+
 /* -------------------------------------------------------------------------- */
 /* MAIN HANDLER                                                               */
 /* -------------------------------------------------------------------------- */
@@ -600,13 +660,44 @@ STRICTLY AVOID:
 Your goal is to sound like a real candidate answering live — clear, decisive, and experienced.
 `.trim();
 
+const CODE_FIRST_SYSTEM = `
+You are answering a coding interview question.
+
+MANDATORY OUTPUT ORDER:
+1. FULL working code first
+2. Inline comments for critical logic
+3. Example input and output
+4. Brief explanation after code
+
+STRICT RULES:
+- Never explain before showing code
+- No essay-style answers
+- Code must compile/run
+- Use realistic variable names
+
+FORMAT:
+- Use fenced code blocks
+- Explanation only after code
+`.trim();
 
 
-      messages.push({ role: "system", content: baseSystem });
 
-      if (instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
-      }
+      // messages.push({ role: "system", content: baseSystem });
+      const codeMode = isCodeQuestion(prompt);
+
+messages.push({
+  role: "system",
+  content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+});
+
+
+     if (!codeMode && instructions?.trim()) {
+  messages.push({
+    role: "system",
+    content: instructions.trim().slice(0, 4000)
+  });
+}
+
 
       if (resumeText?.trim()) {
         messages.push({

@@ -225,6 +225,21 @@ function showBanner(msg) {
   bannerTop.classList.remove("hidden");
   bannerTop.classList.add("bg-red-600");
 }
+//--------------------------------------------------------------
+// CODE-INTENT UI HINT (LIGHTWEIGHT)
+//--------------------------------------------------------------
+function looksLikeCodeIntent(text = "") {
+  const s = text.toLowerCase();
+  return (
+    s.includes("write") ||
+    s.includes("implement") ||
+    s.includes("program") ||
+    s.includes("give code") ||
+    s.includes("example program") ||
+    s.includes("code snippet")
+  );
+}
+
 function hideBanner() {
   if (!bannerTop) return;
   bannerTop.classList.add("hidden");
