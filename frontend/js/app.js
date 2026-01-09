@@ -142,7 +142,7 @@ let transcriptEpoch = 0;
 // === SYS ASR FIX ===
 // Realtime streaming ASR is what breaks "Mic OFF → no system transcript" in your environment.
 // Force system audio to always use legacy MediaRecorder → /transcribe pipeline.
-const USE_STREAMING_ASR_SYS = false;
+const USE_STREAMING_ASR_SYS = true;
 
 // Keep mic fallback streaming as you had it (only used if SR missing/weak)
 const USE_STREAMING_ASR_MIC_FALLBACK = true;
@@ -1543,16 +1543,14 @@ function abortChatStreamOnly(silent = true) {
   } catch {}
 
   chatAbort = null;
-  chatStreamActive = false;
 
-  // 🔥 CRITICAL: invalidate ALL in-flight streams immediately
-  chatStreamSeq++;
-
+  // Do NOT mark failure on abort
   if (silent) {
     setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
   }
-}
 
+  chatStreamActive = false;
+}
 
 
 function pushHistory(role, content) {
@@ -1831,48 +1829,38 @@ lastCommittedAt = 0;
 sendBtn.onclick = async () => {
   if (sendBtn.disabled) return;
 
-  // Stop any running stream immediately
+  // 1) Always take textbox immediately (your requirement)
+  const manual = normalize(manualQuestion?.value || "");
+
+  // 2) If textbox empty, fallback to transcript blocks (does not wait for system audio stop)
+  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+  const base = manual || freshInterviewer;
+  if (!base) return;
+
+  // Clear textbox immediately (UX like huddlemate)
+  if (manualQuestion) manualQuestion.value = "";
+
+  // Preempt current stream NOW
   abortChatStreamOnly(true);
 
-  // Capture prompt instantly (no waiting for audio stop)
-  const typedNow = normalize(manualQuestion?.value || "");
-  const interviewerNow = normalize(getFreshInterviewerBlocksText());
-  const fallbackNow = normalize(
-    getAllBlocksNewestFirst().slice(0, 2).join(" ")
-  );
-
-  const promptNow = typedNow || interviewerNow || fallbackNow;
-  if (!promptNow) return;
-
-  // Block mic noise from leaking
+  // Update transcript cursor (so next "fresh" is clean)
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // Mark transcript consumed
   sentCursor = timeline.length;
   pinnedTop = true;
   updateTranscript();
 
-  // Clear input immediately
-  if (manualQuestion) manualQuestion.value = "";
-
-  // Immediate UI feedback (no waiting)
-  responseBox.innerHTML = `
-    <b>Answer:</b><br>
-    <span class="opacity-70">Thinking…</span>
-  `;
-  setStatus(sendStatus, "Sending…", "text-orange-600");
+  const draftQ = buildDraftQuestion(base);
+  responseBox.innerHTML = renderMarkdown(`${draftQ}\n\n_Generating answer…_`);
+  setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
-  const finalPrompt =
-    mode === "interview"
-      ? buildInterviewQuestionPrompt(promptNow)
-      : promptNow;
+  const promptToSend = (mode === "interview") ? buildInterviewQuestionPrompt(base) : base;
 
-  startChatStreaming(finalPrompt, promptNow);
+  // Start streaming immediately (new wins)
+  await startChatStreaming(promptToSend, base);
 };
-
-
 
 
 async function processSendQueue() {
