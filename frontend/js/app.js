@@ -62,6 +62,8 @@ const modeSelect = document.getElementById("modeSelect");
 // === MIC MUTE CHANGE ===
 const micMuteBtn = document.getElementById("micMuteBtn");
 
+
+
 //--------------------------------------------------------------
 // SESSION + STATE
 //--------------------------------------------------------------
@@ -137,6 +139,103 @@ let resumeTextMem = "";
 
 // HARD CLEAR TOKEN (ignore late transcribe responses)
 let transcriptEpoch = 0;
+
+/* -------------------------------------------------------------------------- */
+/* MARKDOWN RENDERING (responseBox)                                            */
+/* -------------------------------------------------------------------------- */
+
+let aiRawBuffer = "";
+
+function setupMarkdownRenderer() {
+  if (!window.marked || !window.hljs || !window.DOMPurify) return;
+
+  marked.setOptions({
+    gfm: true,
+    breaks: true,
+    highlight: (code, lang) => {
+      try {
+        if (lang && hljs.getLanguage(lang)) {
+          return hljs.highlight(code, { language: lang }).value;
+        }
+        return hljs.highlightAuto(code).value;
+      } catch {
+        return code;
+      }
+    }
+  });
+}
+
+function escapeHtml(s) {
+  return String(s || "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function renderMarkdownSafe(mdText) {
+  if (!window.marked || !window.DOMPurify) {
+    return `<pre>${escapeHtml(mdText)}</pre>`;
+  }
+  const html = marked.parse(mdText || "");
+  return DOMPurify.sanitize(html);
+}
+
+function enhanceCodeBlocks(containerEl) {
+  if (!containerEl) return;
+  const pres = containerEl.querySelectorAll("pre");
+  pres.forEach((pre) => {
+    if (pre.querySelector(".code-actions")) return;
+
+    const toolbar = document.createElement("div");
+    toolbar.className = "code-actions";
+
+    const btn = document.createElement("button");
+    btn.className = "code-btn";
+    btn.type = "button";
+    btn.textContent = "Copy";
+
+    btn.addEventListener("click", async () => {
+      const codeEl = pre.querySelector("code");
+      const text = codeEl ? codeEl.innerText : pre.innerText;
+      try {
+        await navigator.clipboard.writeText(text);
+        btn.textContent = "Copied";
+        setTimeout(() => (btn.textContent = "Copy"), 900);
+      } catch {
+        btn.textContent = "Failed";
+        setTimeout(() => (btn.textContent = "Copy"), 900);
+      }
+    });
+
+    toolbar.appendChild(btn);
+    pre.appendChild(toolbar);
+  });
+}
+
+function appendStreamChunk(chunkText) {
+  aiRawBuffer += chunkText;
+  // streaming view: keep it fast and stable
+  responseBox.textContent = aiRawBuffer;
+}
+
+function finalizeRenderedResponse() {
+  responseBox.innerHTML = renderMarkdownSafe(aiRawBuffer);
+
+  if (window.hljs) {
+    responseBox.querySelectorAll("pre code").forEach((block) => {
+      try { hljs.highlightElement(block); } catch {}
+    });
+  }
+
+  enhanceCodeBlocks(responseBox);
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  setupMarkdownRenderer();
+});
+
 
 //--------------------------------------------------------------
 // STREAMING ASR (Realtime) — NEW

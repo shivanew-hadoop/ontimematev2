@@ -6,21 +6,93 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.tailwindcss.com"></script>
 
+  <!-- Code highlighting theme -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
+
   <style>
     body { background: #f7f7f7; }
 
-    /* AI response */
+    /* AI response container */
     #responseBox{
       flex: 1 1 0%;
       min-height: 0;
       overflow-y: auto;
       background: #fffef5;
       border: 1px solid #ddd;
-      padding: 12px;
+      border-radius: 10px;
+      padding: 14px;
       font-size: 14px;
-      line-height: 1.45;
-      white-space: pre-wrap;
+      line-height: 1.55;
+      white-space: normal; /* IMPORTANT: let markdown control wrapping */
+      color: #111827;
     }
+
+    /* Markdown typography inside AI response */
+    #responseBox p { margin: 10px 0; }
+    #responseBox ul, #responseBox ol { margin: 10px 0 10px 18px; }
+    #responseBox li { margin: 6px 0; }
+    #responseBox strong { font-weight: 700; }
+    #responseBox blockquote{
+      margin: 12px 0;
+      padding: 10px 12px;
+      border-left: 4px solid #e5e7eb;
+      background: #f9fafb;
+      border-radius: 8px;
+      color: #374151;
+    }
+
+    /* Inline code */
+    #responseBox code{
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+                   "Liberation Mono", "Courier New", monospace;
+      font-size: 13px;
+    }
+    #responseBox p code, #responseBox li code{
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+      padding: 1px 6px;
+      border-radius: 6px;
+      color: #111827;
+    }
+
+    /* Code blocks */
+    #responseBox pre{
+      position: relative;
+      margin: 12px 0;
+      padding: 14px 12px 12px 12px;
+      border-radius: 12px;
+      overflow: auto;
+      border: 1px solid #1118271a;
+    }
+    #responseBox pre code{
+      display: block;
+      padding: 0;           /* highlight.js styles handle background */
+      background: transparent;
+      white-space: pre;     /* keep code formatting */
+      line-height: 1.5;
+      font-size: 13px;
+    }
+
+    /* Copy button overlay */
+    .code-actions{
+      position: absolute;
+      top: 8px;
+      right: 8px;
+      display: flex;
+      gap: 8px;
+      z-index: 5;
+    }
+    .code-btn{
+      background: rgba(17,24,39,0.90);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.20);
+      padding: 6px 10px;
+      border-radius: 10px;
+      font-size: 12px;
+      cursor: pointer;
+      user-select: none;
+    }
+    .code-btn:hover{ background: rgba(17,24,39,0.98); }
 
     /* Edge-safe transcript sizing in flex */
     #liveTranscript{
@@ -98,7 +170,6 @@
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
 
-          <!-- NEW: Mic mute (only user/wire) -->
           <button id="micMuteBtn"
                   class="mt-2 w-full px-3 py-2 bg-gray-700 text-white text-sm rounded">
             Mic: ON
@@ -142,6 +213,11 @@
 
     </div>
   </div>
+
+  <!-- Markdown + Sanitizer + Code Highlight -->
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
 
   <script src="/js/app.js"></script>
 </body>
