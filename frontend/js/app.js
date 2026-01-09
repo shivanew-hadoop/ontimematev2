@@ -187,6 +187,8 @@ let micTrack = null;
 let micRecorder = null;
 let micSegmentChunks = [];
 let micSegmentTimer = null;
+let lastIntent = "";
+let lastTech = "";
 let micQueue = [];
 let micAbort = null;
 let micInFlight = 0;
@@ -643,12 +645,11 @@ function normalizeSpokenText(s) {
   const map = {
     "kod": "code",
     "coad": "code",
-    "site":"side",
     "carecter": "character",
     "charactors": "characters",
+    "flacky": "flaky",
     "analitics": "analytics",
-    "statics": "statistics",
-    "flacky": "flaky"
+    "statics": "statistics"
   };
 
   let out = s.toLowerCase();
@@ -657,7 +658,6 @@ function normalizeSpokenText(s) {
   }
   return out;
 }
-
 
 function extractPriorQuestions() {
   const qs = [];
@@ -704,10 +704,23 @@ function buildDraftQuestion(spoken) {
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
-  const role = resumeFocus || "general";
 
   // ------------------------------------------------
-  // 1) Preserve real questions
+  // 0️⃣  Detect technology words
+  // ------------------------------------------------
+  const techMatch = low.match(/\b(java|python|selenium|playwright|sql|api|spring|cucumber|bdd|node|react)\b/);
+  const tech = techMatch ? techMatch[1] : "";
+
+  // ------------------------------------------------
+  // 1️⃣  If user says only a tech (Python, Java…)
+  //      → apply to last task
+  // ------------------------------------------------
+  if (s.split(" ").length <= 2 && tech && lastIntent) {
+    s = lastIntent.replace(/\b(java|python|selenium|playwright|sql|api|spring|cucumber|bdd|node|react)\b/i, tech);
+  }
+
+  // ------------------------------------------------
+  // 2️⃣  Preserve real questions
   // ------------------------------------------------
   if (
     low.startsWith("how ") ||
@@ -721,65 +734,62 @@ function buildDraftQuestion(spoken) {
     low.startsWith("explain ") ||
     s.endsWith("?")
   ) {
+    lastIntent = s;
+    if (tech) lastTech = tech;
     return "Q: " + capitalizeQuestion(s);
   }
 
   // ------------------------------------------------
-  // 2) Commands → interview questions
+  // 3️⃣  Intent detection
   // ------------------------------------------------
-  if (low.match(/^(write|create|build|design|implement|reverse|count|test|optimize|generate)\b/)) {
-    if (role === "automation") {
-      return "Q: How would you " + s + " in a Selenium or automation framework?";
-    }
-    if (role === "data") {
-      return "Q: How would you " + s + " for data processing or analytics?";
-    }
+  const isTask = /^(write|create|build|design|implement|reverse|count|test|optimize|generate)\b/.test(low);
+  const isDebug = /(error|issue|bug|not working|failed|exception|timeout|flaky|broken)/.test(low);
+  const isDesign = /(framework|architecture|flow|structure|pattern|microservice|system|pom|page object)/.test(low);
+  const isExperience = /(project|responsibility|role|worked|experience|handled|led)/.test(low);
+  const isData = /(dataset|data|missing|null|etl|kpi|metric|warehouse|tableau|powerbi|sql)/.test(low);
+  const isCoding = /(code|string|array|loop|function|method|class|algorithm|reverse|count|sort)/.test(low);
+
+  // ------------------------------------------------
+  // 4️⃣  Question generation
+  // ------------------------------------------------
+
+  if (isDebug) {
+    lastIntent = s;
+    return "Q: How do you debug and fix " + s + " in your project?";
+  }
+
+  if (isTask || isCoding) {
+    lastIntent = s;
     return "Q: How would you " + s + " in a real project?";
   }
 
-  // ------------------------------------------------
-  // 3) Intent detection
-  // ------------------------------------------------
-  const isDebug = /(error|issue|bug|not working|failed|exception|timeout|flaky|broken)/i.test(low);
-  const isDesign = /(framework|architecture|flow|structure|pattern|microservice|system)/i.test(low);
-  const isExperience = /(project|responsibility|role|worked|experience|handled|led)/i.test(low);
-  const isData = /(dataset|data|missing|null|etl|kpi|metric|warehouse|tableau|powerbi|sql)/i.test(low);
-  const isCoding = /(code|string|array|loop|function|method|class|python|java|algorithm|reverse|count|sort)/i.test(low);
-
-  if (isDebug) {
-    if (role === "automation") return "Q: How do you debug and stabilize " + s + " in your automation framework?";
-    return "Q: How do you resolve " + s + " in your project?";
-  }
-
-  if (isCoding) {
-    if (role === "automation") return "Q: How would you implement " + s + " in your test automation framework?";
-    if (role === "data") return "Q: How would you implement " + s + " for data processing?";
-    return "Q: How would you implement " + s + " in your project?";
-  }
-
   if (isDesign) {
+    lastIntent = s;
     return "Q: Can you explain your " + s + " and why that design was chosen?";
   }
 
   if (isExperience) {
+    lastIntent = s;
     return "Q: Can you describe " + s + " from your project experience?";
   }
 
   if (isData) {
-    if (role === "automation") return "Q: How do you validate " + s + " in test automation or reporting?";
+    lastIntent = s;
     return "Q: How do you handle " + s + " in a real data analytics project?";
   }
 
   // ------------------------------------------------
-  // 4) Short topic phrases
+  // 5️⃣  Short phrases
   // ------------------------------------------------
   if (s.split(" ").length <= 7) {
+    lastIntent = s;
     return "Q: Can you explain " + s + " with a real project example?";
   }
 
   // ------------------------------------------------
-  // 5) Last fallback
+  // 6️⃣  Fallback
   // ------------------------------------------------
+  lastIntent = s;
   return "Q: How does " + s + " apply in your current or past project?";
 }
 
@@ -1958,29 +1968,13 @@ resumeInput?.addEventListener("change", async () => {
 
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
-    let resumeFocus = "";
-
-function inferResumeFocus() {
-  const t = (resumeTextMem || "").toLowerCase();
-
-  if (t.match(/selenium|playwright|cucumber|bdd|test automation|qa|sdet/)) {
-    resumeFocus = "automation";
-  } else if (t.match(/data analyst|sql|tableau|power bi|etl|warehouse|analytics/)) {
-    resumeFocus = "data";
-  } else if (t.match(/java|spring|api|microservice|backend|node/)) {
-    resumeFocus = "backend";
-  } else {
-    resumeFocus = "general";
-  }
-}
-
+    resumeTextMem = "";
     if (resumeStatus) resumeStatus.textContent = `Resume extract failed (${res.status}): ${errText.slice(0, 160)}`;
     return;
   }
 
   const data = await res.json().catch(() => ({}));
   resumeTextMem = String(data.text || "").trim();
-  inferResumeFocus();
 
   if (resumeStatus) {
     resumeStatus.textContent = resumeTextMem
