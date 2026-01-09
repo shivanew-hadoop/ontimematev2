@@ -625,6 +625,38 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* -------------------------------------------------------------------------- */
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
+let recentTopics = [];
+
+function updateTopicMemory(text) {
+  const low = text.toLowerCase();
+  const topics = [];
+
+  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
+  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
+  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
+  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
+
+  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
+}
+
+function normalizeSpokenText(s) {
+  const map = {
+    "kod": "code",
+    "coad": "code",
+    "carecter": "character",
+    "charactors": "characters",
+    "flacky": "flaky",
+    "analitics": "analytics",
+    "statics": "statistics"
+  };
+
+  let out = s.toLowerCase();
+  for (const k in map) {
+    out = out.replace(new RegExp("\\b" + k + "\\b", "gi"), map[k]);
+  }
+  return out;
+}
+
 function extractPriorQuestions() {
   const qs = [];
   for (const m of chatHistory.slice(-30)) {
@@ -666,7 +698,10 @@ function isGenericProjectAsk(text) {
 }
 
 function buildDraftQuestion(spoken) {
-  let s = normalize(spoken);
+  let s = normalizeSpokenText(normalize(spoken));
+   if (recentTopics.includes("code") && s.includes("count") && s.includes("character")) {
+    s = "code to count characters in a string";
+  }
   if (!s) return "Q: Can you walk me through your current project end-to-end?";
 
   const low = s.toLowerCase();
@@ -2059,6 +2094,7 @@ sendBtn.onclick = async () => {
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
+  updateTopicMemory(base);
   const question = buildDraftQuestion(base);
   if (!base) return;
 
