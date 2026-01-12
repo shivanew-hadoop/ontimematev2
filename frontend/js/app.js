@@ -285,6 +285,7 @@ const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
 
 const ASR_SEND_EVERY_MS = 40;
 const ASR_TARGET_RATE = 24000;
+const COMMIT_WORDS = 3;
 
 let realtimeSecretCache = null;
 
