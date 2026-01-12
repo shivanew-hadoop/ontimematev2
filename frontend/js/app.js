@@ -258,11 +258,19 @@ const SYS_ERR_BACKOFF_MS = 10000;
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
-const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
+const MIC_LANGS = ["en-IN"];
 let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
-  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit.";
+  "Transcribe only English as spoken with an Indian English accent. " +
+  "STRICTLY ignore and OMIT any Urdu, Arabic, Hindi, or other non-English words. " +
+  "If a word is not English, drop it completely. " +
+  "Use Indian English pronunciation and spelling. " +
+  "Do NOT Americanize words. " +
+  "Do NOT translate. " +
+  "Do NOT add new words. Do NOT repeat phrases. " +
+  "Keep punctuation minimal. If uncertain, omit.";
+
 
 /* -------------------------------------------------------------------------- */
 /* STREAMING ASR (Realtime)                                                     */
@@ -1107,10 +1115,14 @@ function sendAsrConfig(ws) {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
     input_audio_transcription: {
-      model: REALTIME_ASR_MODEL,
-      prompt: TRANSCRIBE_PROMPT,
-      language: "en"
-    },
+  model: REALTIME_ASR_MODEL,
+  language: "en-IN",
+  prompt: TRANSCRIBE_PROMPT + 
+    " Speaker has an Indian English accent. " +
+    "Prefer Indian pronunciation and spelling. " +
+    "Do not normalize to US English."
+},
+
     turn_detection: {
       type: "server_vad",
       threshold: 0.5,
@@ -1132,10 +1144,13 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
-            model: REALTIME_ASR_MODEL,
-            language: "en",
-            prompt: TRANSCRIBE_PROMPT
-          },
+  model: REALTIME_ASR_MODEL,
+  language: "en-IN",
+  prompt:
+    TRANSCRIBE_PROMPT +
+    " Speaker has an Indian English accent. " +
+    "Use Indian pronunciation and spelling."
+},
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
@@ -1296,7 +1311,8 @@ function startMic() {
   recognition.continuous = true;
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
-  recognition.lang = MIC_LANGS[micLangIndex] || "en-US";
+  recognition.lang = "en-IN";
+
 
   recognition.onstart = () => {
     setStatus(audioStatus, "Mic active (fast preview).", "text-green-600");
