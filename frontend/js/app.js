@@ -258,7 +258,7 @@ const SYS_ERR_BACKOFF_MS = 10000;
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
-const MIC_LANGS = ["en-IN"];
+const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
@@ -285,7 +285,6 @@ const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
 
 const ASR_SEND_EVERY_MS = 40;
 const ASR_TARGET_RATE = 24000;
-const COMMIT_WORDS = 3;
 
 let realtimeSecretCache = null;
 
