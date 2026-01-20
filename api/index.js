@@ -827,6 +827,12 @@ STRICT RULES:
       return res.end();
     }
 
+    if (path === "realtime/connect") {
+  return res.status(426).json({
+    error: "Use WebSocket for realtime connection"
+  });
+}
+
     /* ------------------------------------------------------- */
     /* CHAT RESET                                              */
     /* ------------------------------------------------------- */
