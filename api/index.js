@@ -809,51 +809,22 @@ STRICT RULES:
       // Keep prompt as-is (no extra prefix that might alter meaning)
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
-      /* ------------------------------------------------------- */
-/* FAST STARTER CALL — REAL FIRST TOKENS (~30)             */
-/* ------------------------------------------------------- */
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 900,
+        messages
+      });
 
-const starterStream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0.1,
-  max_tokens: 30,
-  messages: [
-    {
-      role: "system",
-      content: "Answer like a senior engineer. Be direct."
-    },
-    {
-      role: "user",
-      content: String(prompt).slice(0, 8000)
-    }
-  ]
-});
+      try {
+        for await (const chunk of stream) {
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
+        }
+      } catch {}
 
-for await (const chunk of starterStream) {
-  const t = chunk?.choices?.[0]?.delta?.content;
-  if (t) res.write(t);
-}
-
-/* ------------------------------------------------------- */
-/* FULL ANSWER CALL — APPEND REMAINING TOKENS (~500)       */
-/* ------------------------------------------------------- */
-
-const fullStream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0.2,
-  max_tokens: 500,
-  messages
-});
-
-for await (const chunk of fullStream) {
-  const t = chunk?.choices?.[0]?.delta?.content;
-  if (t) res.write(t);
-}
-
-return res.end();
-
+      return res.end();
     }
 
     /* ------------------------------------------------------- */
