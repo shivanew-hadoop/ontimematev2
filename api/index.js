@@ -690,7 +690,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — OPTIMIZED STREAMING WITH SSE                */
+    /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -698,15 +698,15 @@ export default async function handler(req, res) {
       const { prompt, instructions, resumeText, history } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // USE SERVER-SENT EVENTS FOR BETTER STREAMING
-      res.setHeader("Content-Type", "text/event-stream");
+      // STREAM-SAFE HEADERS
+      res.setHeader("Content-Type", "text/plain; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
-      res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
+      res.setHeader("Transfer-Encoding", "chunked");
       res.flushHeaders?.();
 
-      // SEND IMMEDIATE STATUS - UI sees this instantly
-      res.write("data: " + JSON.stringify({ status: "connecting" }) + "\n\n");
+      // Kick chunk so UI receives "first token" immediately
+      res.write(" ");
 
       const messages = [];
 
@@ -800,37 +800,24 @@ STRICT RULES:
       }
 
       for (const m of safeHistory(history)) messages.push(m);
+
+      // Keep prompt as-is (no extra prefix that might alter meaning)
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        stream: true,
+        temperature: 0.2,
+        max_tokens: 900,
+        messages
+      });
+
       try {
-        // START STREAM CREATION (this is the slow part)
-        const stream = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
-          stream: true,
-          temperature: 0.2,
-          max_tokens: 900,
-          messages
-        });
-
-        // Send status update - stream is ready
-        res.write("data: " + JSON.stringify({ status: "streaming" }) + "\n\n");
-
-        // Stream tokens as they arrive
         for await (const chunk of stream) {
-          const text = chunk?.choices?.[0]?.delta?.content || "";
-          if (text) {
-            res.write("data: " + JSON.stringify({ text }) + "\n\n");
-          }
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
         }
-
-        // Send completion signal
-        res.write("data: " + JSON.stringify({ status: "done" }) + "\n\n");
-      } catch (err) {
-        res.write("data: " + JSON.stringify({ 
-          status: "error", 
-          error: err?.message || "Stream failed" 
-        }) + "\n\n");
-      }
+      } catch {}
 
       return res.end();
     }

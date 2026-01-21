@@ -231,8 +231,6 @@ let lastCreditAt = 0;
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
-let chatWs = null;
-let chatWsReady = false;
 
 let chatHistory = [];
 let resumeTextMem = "";
@@ -1850,13 +1848,13 @@ function startCreditTicking() {
 /* -------------------------------------------------------------------------- */
 /* CHAT STREAMING                                                               */
 /* -------------------------------------------------------------------------- */
-// function abortChatStreamOnly(silent = true) {
-//   try { chatAbort?.abort(); } catch {}
-//   chatAbort = null;
+function abortChatStreamOnly(silent = true) {
+  try { chatAbort?.abort(); } catch {}
+  chatAbort = null;
 
-//   if (silent) setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
-//   chatStreamActive = false;
-// }
+  if (silent) setStatus(sendStatus, "Canceled (new request)", "text-orange-600");
+  chatStreamActive = false;
+}
 
 function pushHistory(role, content) {
   const c = normalize(content);
@@ -1872,34 +1870,92 @@ function compactHistoryForRequest() {
   }));
 }
 
-// ===================================================
-// REALTIME CHAT STREAMING (WebSocket ONLY)
-// ===================================================
 async function startChatStreaming(prompt, userTextForHistory) {
-  if (!chatWs || !chatWsReady) {
-    setStatus(sendStatus, "Realtime not connected", "text-red-600");
-    return;
-  }
+  abortChatStreamOnly(true);
 
-  // Store user message once (no duplication)
-  if (userTextForHistory) {
-    pushHistory("user", userTextForHistory);
-  }
+  chatAbort = new AbortController();
+  chatStreamActive = true;
+  const mySeq = ++chatStreamSeq;
 
-  // Reset streaming buffer
+  if (userTextForHistory) pushHistory("user", userTextForHistory);
+
   aiRawBuffer = "";
-  responseBox.textContent = "";
-  setStatus(sendStatus, "Streaming…", "text-orange-600");
+  responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
+  setStatus(sendStatus, "Connecting…", "text-orange-600");
 
-  // Send prompt to realtime backend
-  chatWs.send(
-    JSON.stringify({
-      type: "user_input",
-      text: prompt
-    })
-  );
+  const body = {
+    prompt,
+    history: compactHistoryForRequest(),
+    instructions: getEffectiveInstructions(),
+    resumeText: resumeTextMem || ""
+  };
+
+  let raw = "";
+  let flushTimer = null;
+  let sawFirstChunk = false;
+
+  const render = () => {
+    responseBox.innerHTML = renderMarkdownLite(raw);
+  };
+
+  try {
+    const res = await apiFetch(
+      "chat/send",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/plain" },
+        body: JSON.stringify(body),
+        signal: chatAbort.signal
+      },
+      false
+    );
+
+    if (!res.ok) throw new Error(await res.text());
+    if (!res.body) throw new Error("No stream body");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+
+    flushTimer = setInterval(() => {
+      if (mySeq !== chatStreamSeq) return;
+      if (!sawFirstChunk) return;
+      render();
+    }, 30);
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      if (mySeq !== chatStreamSeq) return;
+
+      raw += decoder.decode(value, { stream: true });
+
+      if (!sawFirstChunk) {
+        sawFirstChunk = true;
+        responseBox.innerHTML = "";
+        setStatus(sendStatus, "Receiving…", "text-orange-600");
+      }
+
+      if (raw.length < 1800) render();
+    }
+
+    if (mySeq === chatStreamSeq) {
+      render();
+      setStatus(sendStatus, "Done", "text-green-600");
+      pushHistory("assistant", raw);
+    }
+  } catch (e) {
+    if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;
+
+    console.error(e);
+    setStatus(sendStatus, "Failed", "text-red-600");
+    responseBox.innerHTML =
+      `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
+  } finally {
+    if (flushTimer) clearInterval(flushTimer);
+    if (mySeq === chatStreamSeq) chatStreamActive = false;
+  }
 }
-
 
 /* -------------------------------------------------------------------------- */
 /* RESUME UPLOAD                                                                */
@@ -1936,8 +1992,8 @@ resumeInput?.addEventListener("change", async () => {
 /* START / STOP                                                                 */
 /* -------------------------------------------------------------------------- */
 async function startAll() {
-//   const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-// await startStreamingAsr("mic", micStream);
+  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+await startStreamingAsr("mic", micStream);
   hideBanner();
   if (isRunning) return;
 
@@ -2115,15 +2171,6 @@ document.getElementById("logoutBtn").onclick = () => {
   stopAll();
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
-  if (chatWs) {
-    try { chatWs.close(); 
-      
-    } catch {
-
-    }
-    chatWs = null;
-    chatWsReady = false;
-  }
 };
 
 /* -------------------------------------------------------------------------- */
@@ -2131,68 +2178,12 @@ document.getElementById("logoutBtn").onclick = () => {
 /* -------------------------------------------------------------------------- */
 window.addEventListener("load", async () => {
   session = JSON.parse(localStorage.getItem("session") || "null");
-   if (!session) return (window.location.href = "/auth?tab=login");
+  if (!session) return (window.location.href = "/auth?tab=login");
 
   if (!session.refresh_token) {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
   }
-  // =========================
-// OPEN REALTIME CHAT SOCKET
-// =========================
-const WS_URL =
-  location.protocol === "https:"
-    ? `wss://${location.host}/api/realtime/ws`
-    : `ws://${location.host}/api/realtime/ws`;
-if (session?.access_token) {
-  chatWs = new WebSocket(
-    chatWs = new WebSocket(`${WS_URL}?token=${session.access_token}'
-  );
-
-  chatWs.onopen = () => {
-    chatWsReady = true;
-    console.log("Realtime chat connected");
-  };
-
-  chatWs.onmessage = (e) => {
-    let msg;
-    try {
-      msg = JSON.parse(e.data);
-    } catch {
-      return;
-    }
-
-    // STREAM TOKEN
-    if (msg.type === "token") {
-      appendStreamChunk(msg.value);
-    }
-
-    // STREAM COMPLETE
-    if (msg.type === "done") {
-      finalizeRenderedResponse();
-      setStatus(sendStatus, "Done", "text-green-600");
-      pushHistory("assistant", aiRawBuffer);
-    }
-
-    // OPTIONAL ERROR HANDLING
-    if (msg.type === "error") {
-      setStatus(sendStatus, "Realtime error", "text-red-600");
-      console.error(msg.message);
-    }
-  };
-
-  chatWs.onclose = () => {
-    chatWsReady = false;
-    chatWs = null;
-    console.warn("Realtime chat disconnected");
-  };
-
-  chatWs.onerror = (err) => {
-    console.error("Realtime WS error", err);
-  };
-}
-
- 
 
   chatHistory = [];
   resumeTextMem = "";
