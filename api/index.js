@@ -297,7 +297,7 @@ function isCodeQuestion(q = "") {
   const wantsExample = /\b(example|sample|demo)\b/.test(s);
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
 
-  // Explanation override ONLY when it’s purely theory (no "example/code/task")
+  // Explanation override ONLY when it's purely theory (no "example/code/task")
   const looksLikeExplain = isExplanationQuestion(s);
 
   let score = 0;
@@ -578,7 +578,7 @@ export default async function handler(req, res) {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      // basic credit gate (don’t start ASR if no credits)
+      // basic credit gate (don't start ASR if no credits)
       const { data: row } = await supabaseAdmin()
         .from("user_profiles")
         .select("credits")
@@ -690,7 +690,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
+    /* CHAT SEND — OPTIMIZED STREAMING WITH SSE                */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -698,19 +698,18 @@ export default async function handler(req, res) {
       const { prompt, instructions, resumeText, history } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // STREAM-SAFE HEADERS
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      // USE SERVER-SENT EVENTS FOR BETTER STREAMING
+      res.setHeader("Content-Type", "text/event-stream");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
-      res.setHeader("Transfer-Encoding", "chunked");
+      res.setHeader("X-Accel-Buffering", "no"); // Disable nginx buffering
       res.flushHeaders?.();
 
-      // Kick chunk so UI receives "first token" immediately
-      res.write(" ");
+      // SEND IMMEDIATE STATUS - UI sees this instantly
+      res.write("data: " + JSON.stringify({ status: "connecting" }) + "\n\n");
 
       const messages = [];
 
-      // IMPORTANT: baseSystem unchanged (your original)
       const baseSystem = `
 You are answering a REAL technical interview question.
 
@@ -719,11 +718,11 @@ Your response MUST sound like a senior professional speaking confidently in an i
 MANDATORY OPENING (NON-NEGOTIABLE):
 - The first sentence MUST clearly take a position.
 - Examples:
-  - "Yes, I’ve worked extensively with..."
-  - "I’ve primarily been responsible for..."
-  - "I’ve worked with both, but most of my experience is in..."
+  - "Yes, I've worked extensively with..."
+  - "I've primarily been responsible for..."
+  - "I've worked with both, but most of my experience is in..."
 - Do NOT start with phrases like:
-  "I believe", "I’ve had the opportunity", "In my experience", "Generally".
+  "I believe", "I've had the opportunity", "In my experience", "Generally".
 
 ANSWERING STYLE:
 - Speak in first person.
@@ -764,7 +763,6 @@ STRICTLY AVOID:
 Your goal is to sound like a real candidate answering live — clear, decisive, and experienced.
 `.trim();
 
-      // ADDED: code-first system prompt (only used when intent is code)
       const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
@@ -781,16 +779,13 @@ STRICT RULES:
 - Use fenced code blocks
 `.trim();
 
-      // ADDED: lightweight intent detection (no "java/python" dependency)
       const codeMode = isCodeQuestion(String(prompt || ""));
 
-      // ADDED: switch system message based on intent
       messages.push({
         role: "system",
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
-      // ADDED: keep your custom instructions for interview/explain mode only
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
@@ -805,34 +800,42 @@ STRICT RULES:
       }
 
       for (const m of safeHistory(history)) messages.push(m);
-
-      // Keep prompt as-is (no extra prefix that might alter meaning)
       messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
-      const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        stream: true,
-        temperature: 0.2,
-        max_tokens: 900,
-        messages
-      });
-
       try {
+        // START STREAM CREATION (this is the slow part)
+        const stream = await openai.chat.completions.create({
+          model: "gpt-4o-mini",
+          stream: true,
+          temperature: 0.2,
+          max_tokens: 900,
+          messages
+        });
+
+        // Send status update - stream is ready
+        res.write("data: " + JSON.stringify({ status: "streaming" }) + "\n\n");
+
+        // Stream tokens as they arrive
         for await (const chunk of stream) {
-          const t = chunk?.choices?.[0]?.delta?.content || "";
-          if (t) res.write(t);
+          const text = chunk?.choices?.[0]?.delta?.content || "";
+          if (text) {
+            res.write("data: " + JSON.stringify({ text }) + "\n\n");
+          }
         }
-      } catch {}
+
+        // Send completion signal
+        res.write("data: " + JSON.stringify({ status: "done" }) + "\n\n");
+      } catch (err) {
+        res.write("data: " + JSON.stringify({ 
+          status: "error", 
+          error: err?.message || "Stream failed" 
+        }) + "\n\n");
+      }
 
       return res.end();
     }
 
-    if (path === "realtime/connect") {
-  return res.status(426).json({
-    error: "Use WebSocket for realtime connection"
-  });
-}
-
+    
     /* ------------------------------------------------------- */
     /* CHAT RESET                                              */
     /* ------------------------------------------------------- */
@@ -858,59 +861,4 @@ STRICT RULES:
     /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
-
-      const { user_id, approved } = await readJson(req);
-
-      const { data } = await supabaseAdmin()
-        .from("user_profiles")
-        .update({ approved })
-        .eq("id", user_id)
-        .select()
-        .single();
-
-      return res.json({ ok: true, user: data });
-    }
-
-    /* ------------------------------------------------------- */
-    /* ADMIN — UPDATE CREDITS                                  */
-    /* ------------------------------------------------------- */
-    if (path === "admin/credits") {
-      const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401).json({ error: gate.error });
-
-      const { user_id, delta } = await readJson(req);
-
-      const sb = supabaseAdmin();
-      const { data: row } = await sb
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", user_id)
-        .single();
-
-      const newCredits = Math.max(0, Number(row.credits) + Number(delta));
-
-      const { data } = await sb
-        .from("user_profiles")
-        .update({ credits: newCredits })
-        .eq("id", user_id)
-        .select()
-        .single();
-
-      return res.json({ ok: true, credits: data.credits });
-    }
-
-    return res.status(404).json({ error: `No route: /api/${path}` });
-  } catch (err) {
-    const msg = String(err?.message || err);
-
-    // Convert the classic multipart failure into a cleaner error (helps debugging)
-    if (msg.toLowerCase().includes("unexpected end of form")) {
-      return res.status(400).json({
-        error: "Unexpected end of form (multipart stream was consumed or interrupted)."
-      });
-    }
-
-    return res.status(500).json({ error: msg });
-  }
-}
+      if (!gate.ok) return res.status(401
