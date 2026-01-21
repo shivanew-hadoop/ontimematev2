@@ -835,7 +835,6 @@ STRICT RULES:
       return res.end();
     }
 
-    
     /* ------------------------------------------------------- */
     /* CHAT RESET                                              */
     /* ------------------------------------------------------- */
@@ -861,4 +860,59 @@ STRICT RULES:
     /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
-      if (!gate.ok) return res.status(401
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      const { user_id, approved } = await readJson(req);
+
+      const { data } = await supabaseAdmin()
+        .from("user_profiles")
+        .update({ approved })
+        .eq("id", user_id)
+        .select()
+        .single();
+
+      return res.json({ ok: true, user: data });
+    }
+
+    /* ------------------------------------------------------- */
+    /* ADMIN — UPDATE CREDITS                                  */
+    /* ------------------------------------------------------- */
+    if (path === "admin/credits") {
+      const gate = requireAdmin(req);
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      const { user_id, delta } = await readJson(req);
+
+      const sb = supabaseAdmin();
+      const { data: row } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", user_id)
+        .single();
+
+      const newCredits = Math.max(0, Number(row.credits) + Number(delta));
+
+      const { data } = await sb
+        .from("user_profiles")
+        .update({ credits: newCredits })
+        .eq("id", user_id)
+        .select()
+        .single();
+
+      return res.json({ ok: true, credits: data.credits });
+    }
+
+    return res.status(404).json({ error: `No route: /api/${path}` });
+  } catch (err) {
+    const msg = String(err?.message || err);
+
+    // Convert the classic multipart failure into a cleaner error (helps debugging)
+    if (msg.toLowerCase().includes("unexpected end of form")) {
+      return res.status(400).json({
+        error: "Unexpected end of form (multipart stream was consumed or interrupted)."
+      });
+    }
+
+    return res.status(500).json({ error: msg });
+  }
+}
