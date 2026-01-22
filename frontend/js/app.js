@@ -2116,7 +2116,7 @@ function hardClearTranscript() {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
-sendBtn.onclick = async () => {
+async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
@@ -2128,6 +2128,7 @@ sendBtn.onclick = async () => {
 
   if (manualQuestion) manualQuestion.value = "";
 
+  // IMPORTANT: identical to click behavior
   abortChatStreamOnly(true);
 
   blockMicUntil = Date.now() + 700;
@@ -2142,36 +2143,28 @@ sendBtn.onclick = async () => {
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
- const promptToSend = (mode === "interview")
-  ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
-  : question;
+  const promptToSend =
+    mode === "interview"
+      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+      : question;
 
   await startChatStreaming(promptToSend, base);
-};
+}
 
+sendBtn.onclick = handleSend;
 /* -------------------------------------------------------------------------- */
 /* GLOBAL ENTER = SEND (page-wide)                                             */
 /* -------------------------------------------------------------------------- */
+/* -------------------------------------------------------------------------- */
+/* GLOBAL ENTER = SEND (MATCHES CLICK 1:1)                                     */
+/* -------------------------------------------------------------------------- */
 document.addEventListener("keydown", (e) => {
-  // Only Enter without Shift
   if (e.key !== "Enter" || e.shiftKey) return;
 
-  // Guards
-  if (!sendBtn || sendBtn.disabled) return;
-  if (!isRunning) return;
-  if (chatStreamActive) return;
-
-  // Allow Shift+Enter for newlines (handled above)
-  const t = e.target;
-  const isTextArea = t instanceof HTMLTextAreaElement;
-
-  if (isTextArea) {
-    e.preventDefault(); // prevent newline on Enter
-  }
-
   e.preventDefault();
-  sendBtn.click(); // exact same behavior as mouse click
+  handleSend(); // direct call, no extra guards
 });
+
 
 /* -------------------------------------------------------------------------- */
 /* ENTER KEY = SEND (manualQuestion)                                           */
