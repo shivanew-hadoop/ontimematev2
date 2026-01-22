@@ -1,45 +1,40 @@
 /* ==========================================================================
-   app.js (LOADER)
-   - Loads split modules in order:
-     1) app.core.js  (creates window.ANU_APP, state, util, dom, transcript, q, api)
-     2) app.audio.js (mic/sys audio + realtime ASR)
-     3) app.chat.js  (chat streaming + credits + resume + profile)
-   - Then runs ANU_APP.init()
-   ========================================================================== */
-
+ * app.js (LOADER)
+ * Loads split modules in order, then calls ANU_APP.init()
+ * ========================================================================== */
 (() => {
   "use strict";
 
-  function getBasePath() {
-    const cur = document.currentScript?.src || "";
-    // Example: https://site.com/js/app.js -> https://site.com/js/
-    return cur ? cur.slice(0, cur.lastIndexOf("/") + 1) : "/js/";
-  }
+  const cur = document.currentScript?.src || "";
+  const base = cur ? cur.substring(0, cur.lastIndexOf("/") + 1) : "/js/";
 
-  function loadScript(src) {
+  function load(src) {
     return new Promise((resolve, reject) => {
       const s = document.createElement("script");
       s.src = src;
-      s.defer = true;
-      s.onload = () => resolve();
+      s.async = false;
+      s.onload = resolve;
       s.onerror = () => reject(new Error("Failed to load: " + src));
       document.head.appendChild(s);
     });
   }
 
-  async function boot() {
-    const BASE = getBasePath();
+  (async () => {
+    try {
+      await load(base + "app.core.js");
+      await load(base + "app.audio.js");
+      await load(base + "app.chat.js");
 
-    await loadScript(BASE + "app.core.js");
-    await loadScript(BASE + "app.audio.js");
-    await loadScript(BASE + "app.chat.js");
-
-    if (!window.ANU_APP || typeof window.ANU_APP.init !== "function") {
-      console.error("ANU_APP.init() missing. Check module load order.");
-      return;
+      if (window.ANU_APP?.init) window.ANU_APP.init();
+      else throw new Error("ANU_APP.init() missing");
+    } catch (e) {
+      console.error(e);
+      const b = document.getElementById("bannerTop");
+      if (b) {
+        b.textContent = "App failed to load. Check console/network for missing JS files.";
+        b.classList.remove("hidden");
+        b.classList.add("bg-red-600");
+      }
     }
-    window.ANU_APP.init();
-  }
-
-  boot().catch((e) => console.error(e));
+  })();
 })();
