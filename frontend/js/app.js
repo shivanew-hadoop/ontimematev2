@@ -2151,19 +2151,33 @@ sendBtn.onclick = async () => {
 /* -------------------------------------------------------------------------- */
 /* ENTER KEY = SEND (manualQuestion)                                           */
 /* -------------------------------------------------------------------------- */
-if (manualQuestion) {
-  manualQuestion.addEventListener("keydown", (e) => {
-    // Enter = Send, Shift+Enter = newline
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
+/* -------------------------------------------------------------------------- */
+/* ENTER KEY = SEND (manualQuestion + liveTranscript)                          */
+/* -------------------------------------------------------------------------- */
+function handleEnterToSend(e) {
+  // Enter = Send, Shift+Enter = allow newline (where applicable)
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
 
-      // Respect existing disabled / running checks
-      if (sendBtn && !sendBtn.disabled) {
-        sendBtn.click(); // reuse existing send logic
-      }
+    if (sendBtn && !sendBtn.disabled) {
+      sendBtn.click(); // single source of truth
     }
-  });
+  }
 }
+
+// Manual typed question
+if (manualQuestion) {
+  manualQuestion.addEventListener("keydown", handleEnterToSend);
+}
+
+// Live transcript (read-only div, but still focusable in some browsers)
+if (liveTranscript) {
+  liveTranscript.addEventListener("keydown", handleEnterToSend);
+
+  // Ensure it can receive keyboard events when clicked
+  liveTranscript.setAttribute("tabindex", "0");
+}
+
 
 
 clearBtn.onclick = () => {
