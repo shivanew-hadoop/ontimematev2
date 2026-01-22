@@ -2148,6 +2148,31 @@ sendBtn.onclick = async () => {
 
   await startChatStreaming(promptToSend, base);
 };
+
+/* -------------------------------------------------------------------------- */
+/* GLOBAL ENTER = SEND (page-wide)                                             */
+/* -------------------------------------------------------------------------- */
+document.addEventListener("keydown", (e) => {
+  // Only Enter without Shift
+  if (e.key !== "Enter" || e.shiftKey) return;
+
+  // Guards
+  if (!sendBtn || sendBtn.disabled) return;
+  if (!isRunning) return;
+  if (chatStreamActive) return;
+
+  // Allow Shift+Enter for newlines (handled above)
+  const t = e.target;
+  const isTextArea = t instanceof HTMLTextAreaElement;
+
+  if (isTextArea) {
+    e.preventDefault(); // prevent newline on Enter
+  }
+
+  e.preventDefault();
+  sendBtn.click(); // exact same behavior as mouse click
+});
+
 /* -------------------------------------------------------------------------- */
 /* ENTER KEY = SEND (manualQuestion)                                           */
 /* -------------------------------------------------------------------------- */
@@ -2163,19 +2188,6 @@ function handleEnterToSend(e) {
       sendBtn.click(); // single source of truth
     }
   }
-}
-
-// Manual typed question
-if (manualQuestion) {
-  manualQuestion.addEventListener("keydown", handleEnterToSend);
-}
-
-// Live transcript (read-only div, but still focusable in some browsers)
-if (liveTranscript) {
-  liveTranscript.addEventListener("keydown", handleEnterToSend);
-
-  // Ensure it can receive keyboard events when clicked
-  liveTranscript.setAttribute("tabindex", "0");
 }
 
 
