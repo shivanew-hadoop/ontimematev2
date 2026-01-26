@@ -180,6 +180,8 @@ let blockMicUntil = 0;
 let micInterimEntry = null;
 let lastMicResultAt = 0;
 let micWatchdog = null;
+let lastQuickInterviewerAt = 0;
+
 
 // Mic fallback (MediaRecorder -> /transcribe)
 let micStream = null;
@@ -494,12 +496,18 @@ function getFreshInterviewerBlocksText() {
 function getQuickInterviewerSnapshot() {
   for (let i = timeline.length - 1; i >= 0; i--) {
     const b = timeline[i];
-    if (b?.role === "interviewer" && b.text && b.text.length > 8) {
-      return normalize(b.text);
+    if (
+      b?.role === "interviewer" &&
+      b.text &&
+      b.text.length > 8 &&
+      b.t > lastQuickInterviewerAt
+    ) {
+      return { text: normalize(b.text), at: b.t };
     }
   }
-  return "";
+  return null;
 }
+
 
 
 function updateTranscript() {
@@ -2131,13 +2139,24 @@ async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
-  const quick = getQuickInterviewerSnapshot();
-const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-const base = manual || quick || freshInterviewer;
+  const quickSnap = getQuickInterviewerSnapshot();
+  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+
+  let base = "";
+
+  if (manual) {
+    base = manual;
+  } else if (quickSnap) {
+    base = quickSnap.text;
+    lastQuickInterviewerAt = quickSnap.at; // 🔐 freshness gate
+  } else {
+    base = freshInterviewer;
+  }
+
+  if (!base) return; // ⛔ restores original “wait for new text” behavior
 
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
-  if (!base) return;
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -2152,7 +2171,9 @@ const base = manual || quick || freshInterviewer;
   updateTranscript();
 
   const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
+  responseBox.innerHTML = renderMarkdownLite(
+    `${draftQ}\n\n_Generating answer…_`
+  );
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -2163,6 +2184,7 @@ const base = manual || quick || freshInterviewer;
 
   await startChatStreaming(promptToSend, base);
 }
+
 
 sendBtn.onclick = handleSend;
 /* -------------------------------------------------------------------------- */
