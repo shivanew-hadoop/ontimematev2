@@ -491,6 +491,17 @@ function getFreshInterviewerBlocksText() {
     .trim();
 }
 
+function getQuickInterviewerSnapshot() {
+  for (let i = timeline.length - 1; i >= 0; i--) {
+    const b = timeline[i];
+    if (b?.role === "interviewer" && b.text && b.text.length > 8) {
+      return normalize(b.text);
+    }
+  }
+  return "";
+}
+
+
 function updateTranscript() {
   if (!liveTranscript) return;
   liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
@@ -2120,8 +2131,10 @@ async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-  const base = manual || freshInterviewer;
+  const quick = getQuickInterviewerSnapshot();
+const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+const base = manual || quick || freshInterviewer;
+
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
   if (!base) return;
