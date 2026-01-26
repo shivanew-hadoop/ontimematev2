@@ -822,20 +822,49 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
+  const priorQs = extractPriorQuestions();
+  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
+
   return `
-Q: ${base}
+You are answering a real interview question spoken by an interviewer.
 
-Answer this as if the interviewer is waiting.
+First, restate the interviewer’s question clearly in the format:
+Q: <question>
 
-Rules:
-- Answer in under 6 sentences.
-- Lead with the decision you took.
-- Mention tools only if directly relevant.
-- Explain only what changed because of your action.
-- Stop immediately once the answer is complete.
-`;
+Then answer it naturally, as a senior professional would explain verbally.
+
+ANSWERING STYLE (MANDATORY):
+- Sound confident, calm, and experienced.
+- Start with a direct explanation before going deeper.
+- Explain how and why, not textbook definitions.
+- Speak like a human in an interview, not like documentation.
+
+DEPTH RULES:
+- Provide enough detail to demonstrate real understanding.
+- If a tool, framework, or concept is mentioned, briefly explain how you used it.
+- If leadership or decision-making is implied, explain impact and outcomes.
+
+EXAMPLES:
+- Naturally weave real project experience into the explanation.
+- Do NOT label sections like "Quick Answer" or "Project Example".
+- Do NOT use numbered sections or templates.
+
+FORMATTING:
+- Use Markdown lightly.
+- Short paragraphs preferred.
+- Bullets ONLY if they genuinely improve clarity.
+- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
+
+CONTEXT:
+- Stay grounded in the interviewer’s question.
+- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
+- Avoid repeating previously asked questions:
+${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
+
+INTERVIEWER QUESTION:
+${base}
+`.trim();
 }
-
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
