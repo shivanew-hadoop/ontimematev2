@@ -819,46 +819,45 @@ function capitalizeQuestion(q) {
 
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
-  const raw = normalize(currentTextOnly);
-  if (!raw) return "";
+  const base = normalize(currentTextOnly);
+  if (!base) return "";
 
-  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + raw);
-
-  // If ASR text is conversational, convert it into a clean interview question
-  const inferredQuestion = `
-Can you explain how you handled ${domainBias || "this area"} in your project,
-specifically covering design decisions, validations, integrations, and edge cases?
-`.trim();
-
-  const finalQuestion =
-    raw.endsWith("?") || raw.toLowerCase().startsWith("can you")
-      ? raw
-      : inferredQuestion;
+  const experienceMode = isExperienceQuestion(base);
 
   return `
-You are answering a real interview question.
+You are answering a real technical interview question.
 
-Q: ${finalQuestion}
+Q: ${base}
 
-ANSWERING RULES (STRICT):
-- Answer from real experience.
-- Use past tense only.
-- Sound like you already implemented this in production.
-- No theory, no definitions.
+ANSWERING RULES:
+- Answer exactly what is asked.
+- Do NOT repeat the question in the answer.
+- No role or company narration.
 
-CONTENT:
-- Explain what you implemented.
-- Mention tools, configs, integrations, validations.
-- Focus on real execution and decisions.
-- No repetition of the question.
+STYLE:
+- Clear, direct, senior-level explanation.
+- First person only if experience is explicitly asked.
+- Otherwise, explain the concept directly.
+
+${experienceMode ? `
+EXPERIENCE MODE:
+- Describe what you implemented.
+- Mention tools, configs, and decisions.
+- No storytelling, no fluff.
+` : `
+EXPLANATION MODE:
+- Explain the concept or logic clearly.
+- No project narration.
+- No “I faced a challenge”.
+- No outcomes or metrics unless asked.
+`}
 
 FORMATTING:
 - Short paragraphs.
-- Bullet points allowed when listing multiple items.
-- Bold only tools, platforms, or metrics.
+- Bullets only if they add clarity.
+- Bold only real tools or keywords.
 `.trim();
 }
-
 
 function isExperienceQuestion(q = "") {
   const s = q.toLowerCase();
