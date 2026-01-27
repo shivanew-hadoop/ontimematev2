@@ -1078,59 +1078,25 @@ function stopAsrSession(which) {
 }
 
 function asrUpsertDelta(which, itemId, deltaText) {
-  const s = which === "mic" ? micAsr : sysAsr;
-  if (!s) return;
-
-  if (!s.itemText[itemId]) {
-    s.itemText[itemId] = "";
-  }
-
-  s.itemText[itemId] += String(deltaText || "");
-  const cur = normalize(s.itemText[itemId]);
-  if (!cur) return;
-
-  const now = Date.now();
-  const role = (which === "sys") ? "interviewer" : "candidate";
-
-  // 🔹 UI EARLY DISPLAY (NO FINALIZE)
-  if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur, role };
-    s.itemEntry[itemId] = entry;
-    timeline.push(entry);
-  } else {
-    s.itemEntry[itemId].text = cur;
-    s.itemEntry[itemId].t = now;
-  }
-
-  updateTranscript();
+  // INTENTIONALLY EMPTY
+  // We do NOT show live transcript.
+  // Deltas are unstable and ignored by design.
 }
+
 
 
 
 function asrFinalizeItem(which, itemId, transcript) {
-  const s = which === "mic" ? micAsr : sysAsr;
-  if (!s) return;
+  const final = normalize(transcript || "");
+  if (!final) return;
 
-  const entry = s.itemEntry[itemId];
-let draftText = "";
+  const role = (which === "sys") ? "interviewer" : "candidate";
 
-if (entry) {
-  draftText = entry.text || "";
-  const idx = timeline.indexOf(entry);
-  if (idx >= 0) timeline.splice(idx, 1);
+  // SINGLE SOURCE OF TRUTH:
+  // silence → one final block
+  addFinalSpeech(final, role);
 }
 
-delete s.itemEntry[itemId];
-delete s.itemText[itemId];
-delete s.itemStartedAt[itemId];
-
-const final = normalize(transcript || draftText);
-if (!final) return;
-
-const role = (which === "sys") ? "interviewer" : "candidate";
-addFinalSpeech(final, role);
-
-}
 
 function sendAsrConfig(ws) {
   const cfgA = {
