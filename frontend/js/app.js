@@ -293,6 +293,9 @@ let realtimeSecretCache = null;
 let micAsr = null;
 let sysAsr = null;
 
+const COMMIT_MIN_WORDS = 2;
+const COMMIT_MAX_MS = 2000;
+
 /* -------------------------------------------------------------------------- */
 /* MODE INSTRUCTIONS                                                            */
 /* -------------------------------------------------------------------------- */
@@ -1078,10 +1081,31 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
-  const now = Date.now();
-  if (!s.itemText[itemId]) s.itemText[itemId] = "";
-  s.itemText[itemId] += String(deltaText || "");
- const words = normalize(s.itemText[itemId]).split(" ");
+  // const now = Date.now();
+//   if (!s.itemText[itemId]) s.itemText[itemId] = "";
+//   s.itemText[itemId] += String(deltaText || "");
+//  const words = normalize(s.itemText[itemId]).split(" ");
+if (!s.itemText[itemId]) {
+  s.itemText[itemId] = "";
+  s.itemStartedAt[itemId] = Date.now();
+}
+
+s.itemText[itemId] += String(deltaText || "");
+
+const now = Date.now();
+const normalized = normalize(s.itemText[itemId]);
+const words = normalized ? normalized.split(" ") : [];
+const ageMs = now - (s.itemStartedAt[itemId] || now);
+
+// 🔑 COMMIT RULE:
+// - at least 2 words
+// - OR at least 2 seconds elapsed
+// whichever happens first
+if (words.length >= COMMIT_MIN_WORDS || ageMs >= COMMIT_MAX_MS) {
+  asrFinalizeItem(which, itemId, s.itemText[itemId]);
+  return;
+}
+
 if (words.length >= COMMIT_WORDS) {
   asrFinalizeItem(which, itemId, s.itemText[itemId]);
 }
@@ -1120,6 +1144,7 @@ if (entry) {
 
 delete s.itemEntry[itemId];
 delete s.itemText[itemId];
+delete s.itemStartedAt[itemId];
 
 const final = normalize(transcript || draftText);
 if (!final) return;
@@ -1208,12 +1233,13 @@ async function startStreamingAsr(which, mediaStream) {
   const queue = [];
 
   const state = {
-    ws, ctx, src, proc, gain, queue,
-    sendTimer: null,
-    itemText: {},
-    itemEntry: {},
-    sawConfigError: false
-  };
+  ws, ctx, src, proc, gain, queue,
+  sendTimer: null,
+  itemStartedAt: {},   // ⬅️ ADDED
+  itemText: {},
+  itemEntry: {},
+  sawConfigError: false
+};
 
   if (which === "mic") micAsr = state;
   else sysAsr = state;
