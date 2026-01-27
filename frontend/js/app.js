@@ -1081,53 +1081,40 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
 
-  // const now = Date.now();
-//   if (!s.itemText[itemId]) s.itemText[itemId] = "";
-//   s.itemText[itemId] += String(deltaText || "");
-//  const words = normalize(s.itemText[itemId]).split(" ");
-if (!s.itemText[itemId]) {
-  s.itemText[itemId] = "";
-  s.itemStartedAt[itemId] = Date.now();
-}
+  if (!s.itemText[itemId]) {
+    s.itemText[itemId] = "";
+    s.itemStartedAt[itemId] = Date.now();
+  }
 
-s.itemText[itemId] += String(deltaText || "");
+  s.itemText[itemId] += String(deltaText || "");
 
-const now = Date.now();
-const normalized = normalize(s.itemText[itemId]);
-const words = normalized ? normalized.split(" ") : [];
-const ageMs = now - (s.itemStartedAt[itemId] || now);
+  const now = Date.now();
+  const normalized = normalize(s.itemText[itemId]);
+  if (!normalized) return;
 
-// 🔑 COMMIT RULE:
-// - at least 2 words
-// - OR at least 2 seconds elapsed
-// whichever happens first
-if (words.length >= COMMIT_MIN_WORDS || ageMs >= COMMIT_MAX_MS) {
-  asrFinalizeItem(which, itemId, s.itemText[itemId]);
-  return;
-}
-
-if (words.length >= COMMIT_WORDS) {
-  asrFinalizeItem(which, itemId, s.itemText[itemId]);
-}
-
-  const cur = normalize(s.itemText[itemId]);
-  if (!cur) return;
-
+  const words = normalized.split(" ");
+  const ageMs = now - (s.itemStartedAt[itemId] || now);
   const role = (which === "sys") ? "interviewer" : "candidate";
 
+  // Ensure interim entry exists
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur, role };
+    const entry = { t: now, text: normalized, role };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
-    s.itemEntry[itemId].text = cur;
+    s.itemEntry[itemId].text = normalized;
     s.itemEntry[itemId].t = now;
-    s.itemEntry[itemId].role = role;
+  }
+
+  // 🔑 Commit rule: 2 words OR 2 seconds
+  if (words.length >= COMMIT_MIN_WORDS || ageMs >= COMMIT_MAX_MS) {
+    asrFinalizeItem(which, itemId, s.itemText[itemId]);
   }
 
   lastSpeechAt = now;
   updateTranscript();
 }
+
 
 function asrFinalizeItem(which, itemId, transcript) {
   const s = which === "mic" ? micAsr : sysAsr;
