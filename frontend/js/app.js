@@ -1083,37 +1083,28 @@ function asrUpsertDelta(which, itemId, deltaText) {
 
   if (!s.itemText[itemId]) {
     s.itemText[itemId] = "";
-    s.itemStartedAt[itemId] = Date.now();
   }
 
   s.itemText[itemId] += String(deltaText || "");
+  const cur = normalize(s.itemText[itemId]);
+  if (!cur) return;
 
   const now = Date.now();
-  const normalized = normalize(s.itemText[itemId]);
-  if (!normalized) return;
-
-  const words = normalized.split(" ");
-  const ageMs = now - (s.itemStartedAt[itemId] || now);
   const role = (which === "sys") ? "interviewer" : "candidate";
 
-  // Ensure interim entry exists
+  // 🔹 UI EARLY DISPLAY (NO FINALIZE)
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: normalized, role };
+    const entry = { t: now, text: cur, role };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
-    s.itemEntry[itemId].text = normalized;
+    s.itemEntry[itemId].text = cur;
     s.itemEntry[itemId].t = now;
   }
 
-  // 🔑 Commit rule: 2 words OR 2 seconds
-  if (words.length >= COMMIT_MIN_WORDS || ageMs >= COMMIT_MAX_MS) {
-    asrFinalizeItem(which, itemId, s.itemText[itemId]);
-  }
-
-  lastSpeechAt = now;
   updateTranscript();
 }
+
 
 
 function asrFinalizeItem(which, itemId, transcript) {
