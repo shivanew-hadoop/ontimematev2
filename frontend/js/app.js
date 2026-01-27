@@ -746,9 +746,14 @@ function isNewTopic(text) {
 
 function buildDraftQuestion(spoken) {
   // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
+  spoken = spoken
+  .split(/[?.]/)[0]        // take only the first semantic sentence
+  .trim();
+
   let s = normalizeSpokenText(normalize(spoken))
     .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
-    .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
+    .replace(/\b(you know|like|actually|basically|kind of|sort of|is it|right)\b/gi, " ")
+    .replace(/\b(can you|could you|would you|please|let us know)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
      if (isNewTopic(s)) {
@@ -805,7 +810,9 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  return capitalizeQuestion(
+  `Can you explain ${spoken} with a real project example`
+);
 }
 
 
@@ -822,60 +829,53 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
-  const experienceMode = isExperienceQuestion(base);
+  const priorQs = extractPriorQuestions();
+  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-You are answering a real technical interview question.
+You are answering a real technical interview question spoken by an interviewer.
+
+MANDATORY:
+- The question MUST appear at the top exactly once.
+- Answer must sound like real production work already done.
+- No role intro, no company narration, no generic theory.
+
+FORMAT (STRICT):
 
 Q: ${base}
 
-ANSWERING RULES:
-- Answer exactly what is asked.
-- Do NOT repeat the question in the answer.
-- No role or company narration.
+ANSWERING STYLE:
+- Start answering immediately.
+- First person, past tense.
+- Senior, execution-focused tone.
+- Use dense, real implementation keywords naturally.
+- No essay or teaching tone.
 
-STYLE:
-- Clear, direct, senior-level explanation.
-- First person only if experience is explicitly asked.
-- Otherwise, explain the concept directly.
+CONTENT REQUIREMENTS:
+- Clearly state the challenge faced.
+- Explain exactly what you implemented.
+- Mention tools, configs, selectors, retries, thresholds, pipelines.
+- Call out failures, edge cases, or instability handled.
+- Include measurable or observable outcomes when applicable.
 
-${experienceMode ? `
-EXPERIENCE MODE:
-- Describe what you implemented.
-- Mention tools, configs, and decisions.
-- No storytelling, no fluff.
-` : `
-EXPLANATION MODE:
-- Explain the concept or logic clearly.
-- No project narration.
-- No “I faced a challenge”.
-- No outcomes or metrics unless asked.
-`}
+AVOID COMPLETELY:
+- “In my current role…”
+- “I had the opportunity…”
+- Background explanations or definitions
+- Generic statements without implementation depth
 
 FORMATTING:
-- Short paragraphs.
-- Bullets only if they add clarity.
-- Bold only real tools or keywords.
+- Short paragraphs preferred.
+- Bullets only if they genuinely improve clarity.
+- Bold ONLY real tools, frameworks, configs, or metrics.
+
+CONTEXT BIAS:
+- Prefer domain relevance: ${domainBias || "software engineering"}.
+- Avoid repeating these previously asked questions:
+${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
 `.trim();
 }
 
-function isExperienceQuestion(q = "") {
-  const s = q.toLowerCase();
-
-  const experienceSignals = [
-    "your project",
-    "real project",
-    "real-world example",
-    "how did you handle",
-    "how did you manage",
-    "challenges you faced",
-    "issues you faced",
-    "in your experience",
-    "in your last project"
-  ];
-
-  return experienceSignals.some(x => s.includes(x));
-}
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
@@ -2146,12 +2146,24 @@ function hardClearTranscript() {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
+function looksCompleteQuestion(s) {
+  if (!s) return false;
+  if (s.length < 12) return false;
+  if (!/[?.]$/.test(s)) return false;
+  return true;
+}
 async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
   const quickSnap = getQuickInterviewerSnapshot();
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+  const freshInterviewer = normalize(
+  timeline
+    .filter(b => b.role === "interviewer")
+    .slice(-2)                    // last 1–2 interviewer turns only
+    .map(b => b.text)
+    .join(" ")
+);
 
   let base = "";
 
@@ -2165,7 +2177,7 @@ async function handleSend() {
   }
 
   if (!base) return; // ⛔ restores original “wait for new text” behavior
-
+if (!looksCompleteQuestion(base)) return;
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
 
