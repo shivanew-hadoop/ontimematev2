@@ -822,53 +822,60 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
-  const priorQs = extractPriorQuestions();
-  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
+  const experienceMode = isExperienceQuestion(base);
 
   return `
-You are answering a real technical interview question spoken by an interviewer.
-
-MANDATORY:
-- The question MUST appear at the top exactly once.
-- Answer must sound like real production work already done.
-- No role intro, no company narration, no generic theory.
-
-FORMAT (STRICT):
+You are answering a real technical interview question.
 
 Q: ${base}
 
-ANSWERING STYLE:
-- Start answering immediately.
-- First person, past tense.
-- Senior, execution-focused tone.
-- Use dense, real implementation keywords naturally.
-- No essay or teaching tone.
+ANSWERING RULES:
+- Answer exactly what is asked.
+- Do NOT repeat the question in the answer.
+- No role or company narration.
 
-CONTENT REQUIREMENTS:
-- Clearly state the challenge faced.
-- Explain exactly what you implemented.
-- Mention tools, configs, selectors, retries, thresholds, pipelines.
-- Call out failures, edge cases, or instability handled.
-- Include measurable or observable outcomes when applicable.
+STYLE:
+- Clear, direct, senior-level explanation.
+- First person only if experience is explicitly asked.
+- Otherwise, explain the concept directly.
 
-AVOID COMPLETELY:
-- “In my current role…”
-- “I had the opportunity…”
-- Background explanations or definitions
-- Generic statements without implementation depth
+${experienceMode ? `
+EXPERIENCE MODE:
+- Describe what you implemented.
+- Mention tools, configs, and decisions.
+- No storytelling, no fluff.
+` : `
+EXPLANATION MODE:
+- Explain the concept or logic clearly.
+- No project narration.
+- No “I faced a challenge”.
+- No outcomes or metrics unless asked.
+`}
 
 FORMATTING:
-- Short paragraphs preferred.
-- Bullets only if they genuinely improve clarity.
-- Bold ONLY real tools, frameworks, configs, or metrics.
-
-CONTEXT BIAS:
-- Prefer domain relevance: ${domainBias || "software engineering"}.
-- Avoid repeating these previously asked questions:
-${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
+- Short paragraphs.
+- Bullets only if they add clarity.
+- Bold only real tools or keywords.
 `.trim();
 }
 
+function isExperienceQuestion(q = "") {
+  const s = q.toLowerCase();
+
+  const experienceSignals = [
+    "your project",
+    "real project",
+    "real-world example",
+    "how did you handle",
+    "how did you manage",
+    "challenges you faced",
+    "issues you faced",
+    "in your experience",
+    "in your last project"
+  ];
+
+  return experienceSignals.some(x => s.includes(x));
+}
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
