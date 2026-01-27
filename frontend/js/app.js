@@ -202,47 +202,6 @@ let sysSegmentTimer = null;
 let sysQueue = [];
 let sysAbort = null;
 let sysInFlight = 0;
-/* -------------------------------------------------------------------------- */
-/* SYSTEM AUDIO RAW BUFFER (NO TRANSCRIPTION, NO UI)                           */
-/* -------------------------------------------------------------------------- */
-let sysAudioChunks = [];
-let sysAudioRecorder = null;
-let sysAudioStream = null;
-
-async function startSystemAudioBuffer() {
-  sysAudioChunks = [];
-
-  sysAudioStream = await navigator.mediaDevices.getDisplayMedia({
-    video: true,
-    audio: true
-  });
-
-  const track = sysAudioStream.getAudioTracks()[0];
-  if (!track) throw new Error("No system audio track detected");
-
-  const audioOnlyStream = new MediaStream([track]);
-
-  sysAudioRecorder = new MediaRecorder(audioOnlyStream, {
-    mimeType: "audio/webm;codecs=opus"
-  });
-
-  sysAudioRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size) {
-      sysAudioChunks.push(e.data);
-    }
-  };
-
-  sysAudioRecorder.start();
-}
-
-function stopSystemAudioBuffer() {
-  try { sysAudioRecorder?.stop(); } catch {}
-  try { sysAudioStream?.getTracks().forEach(t => t.stop()); } catch {}
-
-  sysAudioRecorder = null;
-  sysAudioStream = null;
-}
-
 
 let sysErrCount = 0;
 let sysErrBackoffUntil = 0;
@@ -333,9 +292,6 @@ let realtimeSecretCache = null;
 
 let micAsr = null;
 let sysAsr = null;
-
-const COMMIT_MIN_WORDS = 2;
-const COMMIT_MAX_MS = 2000;
 
 /* -------------------------------------------------------------------------- */
 /* MODE INSTRUCTIONS                                                            */
@@ -555,9 +511,9 @@ function getQuickInterviewerSnapshot() {
 
 
 function updateTranscript() {
-  // if (!liveTranscript) return;
-  // liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  // if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+  if (!liveTranscript) return;
+  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
+  if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
 function removeInterimIfAny() {
@@ -870,39 +826,29 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-You are answering a real interview question spoken by an interviewer.
+Answer the interviewer’s question exactly as asked.
 
-First, restate the interviewer’s question clearly in the format:
-Q: <question>
+Q: ${base}
 
-Then answer it naturally, as a senior professional would explain verbally.
+RULES:
+- Do NOT explain background or definitions
+- Do NOT narrate role or company
+- Do NOT generalize
 
-ANSWERING STYLE (MANDATORY):
-- Sound confident, calm, and experienced.
-- Start with a direct explanation before going deeper.
-- Explain how and why, not textbook definitions.
-- Speak like a human in an interview, not like documentation.
+RESPOND USING THIS STRUCTURE ONLY:
 
-DEPTH RULES:
-- Provide enough detail to demonstrate real understanding.
-- If a tool, framework, or concept is mentioned, briefly explain how you used it.
-- If leadership or decision-making is implied, explain impact and outcomes.
+Quick Answer (Interview Style)
+- Concrete challenge
+- Exact implementation
+- Tools/configs used
+- Failure or risk handled
+- Measurable outcome
 
-EXAMPLES:
-- Naturally weave real project experience into the explanation.
-- Do NOT label sections like "Quick Answer" or "Project Example".
-- Do NOT use numbered sections or templates.
-
-FORMATTING:
-- Use Markdown lightly.
-- Short paragraphs preferred.
-- Bullets ONLY if they genuinely improve clarity.
-- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
-
-CONTEXT:
-- Stay grounded in the interviewer’s question.
-- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
-- Avoid repeating previously asked questions:
+Real-Time Professional Implementation
+- How it was implemented in production
+- What broke or scaled
+- What settings, thresholds, or logic you changed
+- What result it produced
 ${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
 
 INTERVIEWER QUESTION:
@@ -1119,25 +1065,59 @@ function stopAsrSession(which) {
 }
 
 function asrUpsertDelta(which, itemId, deltaText) {
-  // INTENTIONALLY EMPTY
-  // We do NOT show live transcript.
-  // Deltas are unstable and ignored by design.
+  const s = which === "mic" ? micAsr : sysAsr;
+  if (!s) return;
+
+  const now = Date.now();
+  if (!s.itemText[itemId]) s.itemText[itemId] = "";
+  s.itemText[itemId] += String(deltaText || "");
+ const words = normalize(s.itemText[itemId]).split(" ");
+if (words.length >= COMMIT_WORDS) {
+  asrFinalizeItem(which, itemId, s.itemText[itemId]);
 }
 
+  const cur = normalize(s.itemText[itemId]);
+  if (!cur) return;
 
+  const role = (which === "sys") ? "interviewer" : "candidate";
 
+  if (!s.itemEntry[itemId]) {
+    const entry = { t: now, text: cur, role };
+    s.itemEntry[itemId] = entry;
+    timeline.push(entry);
+  } else {
+    s.itemEntry[itemId].text = cur;
+    s.itemEntry[itemId].t = now;
+    s.itemEntry[itemId].role = role;
+  }
+
+  lastSpeechAt = now;
+  updateTranscript();
+}
 
 function asrFinalizeItem(which, itemId, transcript) {
-  // const final = normalize(transcript || "");
-  // if (!final) return;
+  const s = which === "mic" ? micAsr : sysAsr;
+  if (!s) return;
 
-  // const role = (which === "sys") ? "interviewer" : "candidate";
+  const entry = s.itemEntry[itemId];
+let draftText = "";
 
-  // // SINGLE SOURCE OF TRUTH:
-  // // silence → one final block
-  // addFinalSpeech(final, role);
+if (entry) {
+  draftText = entry.text || "";
+  const idx = timeline.indexOf(entry);
+  if (idx >= 0) timeline.splice(idx, 1);
 }
 
+delete s.itemEntry[itemId];
+delete s.itemText[itemId];
+
+const final = normalize(transcript || draftText);
+if (!final) return;
+
+const role = (which === "sys") ? "interviewer" : "candidate";
+addFinalSpeech(final, role);
+
+}
 
 function sendAsrConfig(ws) {
   const cfgA = {
@@ -1218,13 +1198,12 @@ async function startStreamingAsr(which, mediaStream) {
   const queue = [];
 
   const state = {
-  ws, ctx, src, proc, gain, queue,
-  sendTimer: null,
-  itemStartedAt: {},   // ⬅️ ADDED
-  itemText: {},
-  itemEntry: {},
-  sawConfigError: false
-};
+    ws, ctx, src, proc, gain, queue,
+    sendTimer: null,
+    itemText: {},
+    itemEntry: {},
+    sawConfigError: false
+  };
 
   if (which === "mic") micAsr = state;
   else sysAsr = state;
@@ -2048,7 +2027,6 @@ await startStreamingAsr("mic", micStream);
   updateTranscript();
 
   isRunning = true;
-  await startSystemAudioBuffer();
 
   startBtn.disabled = true;
   stopBtn.disabled = false;
@@ -2090,7 +2068,6 @@ await startStreamingAsr("mic", micStream);
 
 function stopAll() {
   isRunning = false;
-  stopSystemAudioBuffer();
 
   stopMicOnly();
   stopMicRecorderOnly();
@@ -2149,39 +2126,53 @@ function hardClearTranscript() {
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
 async function handleSend() {
-  if (!sysAudioChunks.length) return;
+  if (sendBtn.disabled) return;
 
-  const blob = new Blob(sysAudioChunks, { type: "audio/webm" });
-  sysAudioChunks = []; // reset buffer immediately
+  const manual = normalize(manualQuestion?.value || "");
+  const quickSnap = getQuickInterviewerSnapshot();
+  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
 
-  responseBox.innerHTML = "Listening… framing question…";
+  let base = "";
 
-  // 1️⃣ Transcribe audio
-  const fd = new FormData();
-  fd.append("file", blob, "system.webm");
-
-  const tRes = await fetch("/api?path=transcribe", {
-    method: "POST",
-    body: fd
-  });
-
-  const tData = await tRes.json();
-  const spokenText = (tData.text || "").trim();
-  if (!spokenText) {
-    responseBox.innerHTML = "No speech detected.";
-    return;
+  if (manual) {
+    base = manual;
+  } else if (quickSnap) {
+    base = quickSnap.text;
+    lastQuickInterviewerAt = quickSnap.at; // 🔐 freshness gate
+  } else {
+    base = freshInterviewer;
   }
 
-  // 2️⃣ Frame question
-  const question = buildDraftQuestion(spokenText);
+  if (!base) return; // ⛔ restores original “wait for new text” behavior
 
-  // 3️⃣ Send to ChatGPT
-  responseBox.innerHTML = "Generating answer…";
+  updateTopicMemory(base);
+  const question = buildDraftQuestion(base);
 
-  await startChatStreaming(
-    buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")),
-    spokenText
+  if (manualQuestion) manualQuestion.value = "";
+
+  // IMPORTANT: identical to click behavior
+  abortChatStreamOnly(true);
+
+  blockMicUntil = Date.now() + 700;
+  removeInterimIfAny();
+
+  sentCursor = timeline.length;
+  pinnedTop = true;
+  updateTranscript();
+
+  const draftQ = question;
+  responseBox.innerHTML = renderMarkdownLite(
+    `${draftQ}\n\n_Generating answer…_`
   );
+  setStatus(sendStatus, "Queued…", "text-orange-600");
+
+  const mode = modeSelect?.value || "interview";
+  const promptToSend =
+    mode === "interview"
+      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+      : question;
+
+  await startChatStreaming(promptToSend, base);
 }
 
 
