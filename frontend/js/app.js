@@ -202,6 +202,47 @@ let sysSegmentTimer = null;
 let sysQueue = [];
 let sysAbort = null;
 let sysInFlight = 0;
+/* -------------------------------------------------------------------------- */
+/* SYSTEM AUDIO RAW BUFFER (NO TRANSCRIPTION, NO UI)                           */
+/* -------------------------------------------------------------------------- */
+let sysAudioChunks = [];
+let sysAudioRecorder = null;
+let sysAudioStream = null;
+
+async function startSystemAudioBuffer() {
+  sysAudioChunks = [];
+
+  sysAudioStream = await navigator.mediaDevices.getDisplayMedia({
+    video: true,
+    audio: true
+  });
+
+  const track = sysAudioStream.getAudioTracks()[0];
+  if (!track) throw new Error("No system audio track detected");
+
+  const audioOnlyStream = new MediaStream([track]);
+
+  sysAudioRecorder = new MediaRecorder(audioOnlyStream, {
+    mimeType: "audio/webm;codecs=opus"
+  });
+
+  sysAudioRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size) {
+      sysAudioChunks.push(e.data);
+    }
+  };
+
+  sysAudioRecorder.start();
+}
+
+function stopSystemAudioBuffer() {
+  try { sysAudioRecorder?.stop(); } catch {}
+  try { sysAudioStream?.getTracks().forEach(t => t.stop()); } catch {}
+
+  sysAudioRecorder = null;
+  sysAudioStream = null;
+}
+
 
 let sysErrCount = 0;
 let sysErrBackoffUntil = 0;
@@ -514,9 +555,9 @@ function getQuickInterviewerSnapshot() {
 
 
 function updateTranscript() {
-  if (!liveTranscript) return;
-  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+  // if (!liveTranscript) return;
+  // liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
+  // if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
 function removeInterimIfAny() {
@@ -1087,14 +1128,14 @@ function asrUpsertDelta(which, itemId, deltaText) {
 
 
 function asrFinalizeItem(which, itemId, transcript) {
-  const final = normalize(transcript || "");
-  if (!final) return;
+  // const final = normalize(transcript || "");
+  // if (!final) return;
 
-  const role = (which === "sys") ? "interviewer" : "candidate";
+  // const role = (which === "sys") ? "interviewer" : "candidate";
 
-  // SINGLE SOURCE OF TRUTH:
-  // silence → one final block
-  addFinalSpeech(final, role);
+  // // SINGLE SOURCE OF TRUTH:
+  // // silence → one final block
+  // addFinalSpeech(final, role);
 }
 
 
@@ -2007,6 +2048,7 @@ await startStreamingAsr("mic", micStream);
   updateTranscript();
 
   isRunning = true;
+  await startSystemAudioBuffer();
 
   startBtn.disabled = true;
   stopBtn.disabled = false;
@@ -2048,6 +2090,7 @@ await startStreamingAsr("mic", micStream);
 
 function stopAll() {
   isRunning = false;
+  stopSystemAudioBuffer();
 
   stopMicOnly();
   stopMicRecorderOnly();
@@ -2106,53 +2149,39 @@ function hardClearTranscript() {
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
 async function handleSend() {
-  if (sendBtn.disabled) return;
+  if (!sysAudioChunks.length) return;
 
-  const manual = normalize(manualQuestion?.value || "");
-  const quickSnap = getQuickInterviewerSnapshot();
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+  const blob = new Blob(sysAudioChunks, { type: "audio/webm" });
+  sysAudioChunks = []; // reset buffer immediately
 
-  let base = "";
+  responseBox.innerHTML = "Listening… framing question…";
 
-  if (manual) {
-    base = manual;
-  } else if (quickSnap) {
-    base = quickSnap.text;
-    lastQuickInterviewerAt = quickSnap.at; // 🔐 freshness gate
-  } else {
-    base = freshInterviewer;
+  // 1️⃣ Transcribe audio
+  const fd = new FormData();
+  fd.append("file", blob, "system.webm");
+
+  const tRes = await fetch("/api?path=transcribe", {
+    method: "POST",
+    body: fd
+  });
+
+  const tData = await tRes.json();
+  const spokenText = (tData.text || "").trim();
+  if (!spokenText) {
+    responseBox.innerHTML = "No speech detected.";
+    return;
   }
 
-  if (!base) return; // ⛔ restores original “wait for new text” behavior
+  // 2️⃣ Frame question
+  const question = buildDraftQuestion(spokenText);
 
-  updateTopicMemory(base);
-  const question = buildDraftQuestion(base);
+  // 3️⃣ Send to ChatGPT
+  responseBox.innerHTML = "Generating answer…";
 
-  if (manualQuestion) manualQuestion.value = "";
-
-  // IMPORTANT: identical to click behavior
-  abortChatStreamOnly(true);
-
-  blockMicUntil = Date.now() + 700;
-  removeInterimIfAny();
-
-  sentCursor = timeline.length;
-  pinnedTop = true;
-  updateTranscript();
-
-  const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(
-    `${draftQ}\n\n_Generating answer…_`
+  await startChatStreaming(
+    buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")),
+    spokenText
   );
-  setStatus(sendStatus, "Queued…", "text-orange-600");
-
-  const mode = modeSelect?.value || "interview";
-  const promptToSend =
-    mode === "interview"
-      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
-      : question;
-
-  await startChatStreaming(promptToSend, base);
 }
 
 
