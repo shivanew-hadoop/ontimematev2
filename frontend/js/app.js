@@ -826,35 +826,49 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-Answer the interviewer’s question exactly as asked.
+You are answering a real technical interview question spoken by an interviewer.
+
+MANDATORY:
+- The question MUST appear at the top exactly once.
+- Answer must sound like real production work already done.
+- No role intro, no company narration, no generic theory.
+
+FORMAT (STRICT):
 
 Q: ${base}
 
-RULES:
-- Do NOT explain background or definitions
-- Do NOT narrate role or company
-- Do NOT generalize
+ANSWERING STYLE:
+- Start answering immediately.
+- First person, past tense.
+- Senior, execution-focused tone.
+- Use dense, real implementation keywords naturally.
+- No essay or teaching tone.
 
-RESPOND USING THIS STRUCTURE ONLY:
+CONTENT REQUIREMENTS:
+- Clearly state the challenge faced.
+- Explain exactly what you implemented.
+- Mention tools, configs, selectors, retries, thresholds, pipelines.
+- Call out failures, edge cases, or instability handled.
+- Include measurable or observable outcomes when applicable.
 
-Quick Answer (Interview Style)
-- Concrete challenge
-- Exact implementation
-- Tools/configs used
-- Failure or risk handled
-- Measurable outcome
+AVOID COMPLETELY:
+- “In my current role…”
+- “I had the opportunity…”
+- Background explanations or definitions
+- Generic statements without implementation depth
 
-Real-Time Professional Implementation
-- How it was implemented in production
-- What broke or scaled
-- What settings, thresholds, or logic you changed
-- What result it produced
+FORMATTING:
+- Short paragraphs preferred.
+- Bullets only if they genuinely improve clarity.
+- Bold ONLY real tools, frameworks, configs, or metrics.
+
+CONTEXT BIAS:
+- Prefer domain relevance: ${domainBias || "software engineering"}.
+- Avoid repeating these previously asked questions:
 ${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
-
-INTERVIEWER QUESTION:
-${base}
 `.trim();
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
