@@ -746,9 +746,14 @@ function isNewTopic(text) {
 
 function buildDraftQuestion(spoken) {
   // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
+  spoken = spoken
+  .split(/[?.]/)[0]        // take only the first semantic sentence
+  .trim();
+
   let s = normalizeSpokenText(normalize(spoken))
     .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
-    .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
+    .replace(/\b(you know|like|actually|basically|kind of|sort of|is it|right)\b/gi, " ")
+    .replace(/\b(can you|could you|would you|please|let us know)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
      if (isNewTopic(s)) {
@@ -805,15 +810,11 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  return capitalizeQuestion(
+  `Can you explain ${spoken} with a real project example`
+);
 }
 
-function buildContextAwareQuestion(baseQuestion) {
-  if (!recentTopics.length) return baseQuestion;
-
-  const context = recentTopics.join(", ");
-  return `${baseQuestion} (in the context of ${context})`;
-}
 
 
 function capitalizeQuestion(q) {
@@ -851,7 +852,7 @@ ANSWERING STYLE:
 - No essay or teaching tone.
 
 CONTENT REQUIREMENTS:
-- Start directly with implementation details.
+- Clearly state the challenge faced.
 - Explain exactly what you implemented.
 - Mention tools, configs, selectors, retries, thresholds, pipelines.
 - Call out failures, edge cases, or instability handled.
@@ -2145,12 +2146,24 @@ function hardClearTranscript() {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
+function looksCompleteQuestion(s) {
+  if (!s) return false;
+  if (s.length < 12) return false;
+  if (!/[?.]$/.test(s)) return false;
+  return true;
+}
 async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
   const quickSnap = getQuickInterviewerSnapshot();
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
+  const freshInterviewer = normalize(
+  timeline
+    .filter(b => b.role === "interviewer")
+    .slice(-2)                    // last 1–2 interviewer turns only
+    .map(b => b.text)
+    .join(" ")
+);
 
   let base = "";
 
@@ -2164,10 +2177,9 @@ async function handleSend() {
   }
 
   if (!base) return; // ⛔ restores original “wait for new text” behavior
-
+if (!looksCompleteQuestion(base)) return;
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
-  question = buildContextAwareQuestion(question);
 
   if (manualQuestion) manualQuestion.value = "";
 
