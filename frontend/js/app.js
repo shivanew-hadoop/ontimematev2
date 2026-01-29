@@ -85,7 +85,7 @@ function renderMarkdownSafe(mdText) {
   return DOMPurify.sanitize(html);
 }
 
-const COMMIT_WORDS = 6;
+const COMMIT_WORDS = 2;
 const USE_BROWSER_SR = true;
 
 function enhanceCodeBlocks(containerEl) {
