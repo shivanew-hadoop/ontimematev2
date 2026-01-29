@@ -264,14 +264,13 @@ const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
-  "Transcribe only English as spoken with an Indian English accent. " +
-  "STRICTLY ignore and OMIT any Urdu, Arabic, Hindi, or other non-English words. " +
-  "If a word is not English, drop it completely. " +
-  "Use Indian English pronunciation and spelling. " +
-  "Do NOT Americanize words. " +
-  "Do NOT translate. " +
-  "Do NOT add new words. Do NOT repeat phrases. " +
-  "Keep punctuation minimal. If uncertain, omit.";
+  "Transcribe ONLY English words, regardless of accent (Indian, American, British). " +
+  "STRICTLY OMIT any non-English language words (Telugu, Hindi, Urdu, spanish,Arabic, etc.). " +
+  "If a word is not valid English, drop it completely. " +
+  "Do NOT translate. Do NOT infer meaning. " +
+  "Do NOT add filler words. Do NOT repeat phrases. " +
+  "Return plain English text only. " +
+  "If uncertain, omit the word.";
 
 
 /* -------------------------------------------------------------------------- */
@@ -1133,19 +1132,18 @@ addFinalSpeech(final, role);
 
 }
 
+// UPDATED — Accent-agnostic English only (Indian / US / UK allowed)
+// Hard language control is handled post-ASR, not here.
+
 function sendAsrConfig(ws) {
   const cfgA = {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
     input_audio_transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt: TRANSCRIBE_PROMPT + 
-    " Speaker has an Indian English accent. " +
-    "Prefer Indian pronunciation and spelling. " +
-    "Do not normalize to US English."
-},
-
+      model: REALTIME_ASR_MODEL,
+      language: "en", // ✅ allow all English accents
+      prompt: TRANSCRIBE_PROMPT
+    },
     turn_detection: {
       type: "server_vad",
       threshold: 0.5,
@@ -1158,6 +1156,9 @@ function sendAsrConfig(ws) {
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
 
+
+// UPDATED — Fallback session config (same behavior, no accent lock)
+
 function sendAsrConfigFallbackSessionUpdate(ws) {
   const cfgB = {
     type: "session.update",
@@ -1167,13 +1168,10 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt:
-    TRANSCRIBE_PROMPT +
-    " Speaker has an Indian English accent. " +
-    "Use Indian pronunciation and spelling."
-},
+            model: REALTIME_ASR_MODEL,
+            language: "en", // ✅ allow all English accents
+            prompt: TRANSCRIBE_PROMPT
+          },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
@@ -1188,6 +1186,7 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
+
 
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
