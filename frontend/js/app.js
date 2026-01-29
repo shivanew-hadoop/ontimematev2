@@ -85,7 +85,7 @@ function renderMarkdownSafe(mdText) {
   return DOMPurify.sanitize(html);
 }
 
-const COMMIT_WORDS = 2;
+const COMMIT_WORDS = 6;
 const USE_BROWSER_SR = true;
 
 function enhanceCodeBlocks(containerEl) {
@@ -611,8 +611,6 @@ function addFinalSpeech(txt, role) {
   }
 
   lastSpeechAt = now;
-lastFinalSpeechAt = now; // ✅ only final commits
-
   updateTranscript();
 }
 
@@ -623,8 +621,7 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
   removeInterimIfAny();
 
   const now = Date.now();
-  const gap = now - (lastFinalSpeechAt || 0);
-
+  const gap = now - (lastSpeechAt || 0);
 
   let entry;
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
@@ -644,7 +641,9 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
     }
   }
 
+ if (entry.text.split(" ").length === 1) {
   lastSpeechAt = now;
+}
 
   const words = cleaned.split(" ");
   let i = 0;
@@ -2266,9 +2265,6 @@ function buildContextAwareQuestion(baseQuestion) {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
-
-let lastFinalSpeechAt = 0;
-
 async function handleSend() {
   if (sendBtn.disabled) return;
 
@@ -2294,26 +2290,8 @@ if (!base) {
 
 
   updateTopicMemory(base);
-  // 🔐 CAPTURE ONLY NEW INTERVIEWER TEXT FIRST
-const freshOnly = normalize(getFreshInterviewerBlocksText());
-
-if (!freshOnly && !manual) {
-  setStatus(sendStatus, "No new interviewer question detected", "text-orange-600");
-  return;
-}
-
-// 🔒 MOVE CURSOR IMMEDIATELY
-sentCursor = timeline.length;
-
-// 🔄 Decide base strictly
-const baseText = manual || freshOnly;
-
-// Now safe to process
-updateTopicMemory(baseText);
-
-let question = buildDraftQuestion(baseText);
-question = buildContextAwareQuestion(question);
-
+  let question = buildDraftQuestion(base);
+  question = buildContextAwareQuestion(question);
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -2323,9 +2301,9 @@ question = buildContextAwareQuestion(question);
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  sentCursor = timeline.length;
-  pinnedTop = true;
-  updateTranscript();
+  // sentCursor = timeline.length;
+  // pinnedTop = true;
+  // updateTranscript();
 
   const draftQ = question;
   responseBox.innerHTML = renderMarkdownLite(
@@ -2340,6 +2318,9 @@ question = buildContextAwareQuestion(question);
       : question;
 
   await startChatStreaming(promptToSend, base);
+  setTimeout(() => {
+  sentCursor = timeline.length;
+}, 0);
 }
 
 
