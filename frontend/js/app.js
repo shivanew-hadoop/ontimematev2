@@ -611,6 +611,8 @@ function addFinalSpeech(txt, role) {
   }
 
   lastSpeechAt = now;
+lastFinalSpeechAt = now; // ✅ only final commits
+
   updateTranscript();
 }
 
@@ -621,7 +623,8 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
   removeInterimIfAny();
 
   const now = Date.now();
-  const gap = now - (lastSpeechAt || 0);
+  const gap = now - (lastFinalSpeechAt || 0);
+
 
   let entry;
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
@@ -2263,6 +2266,9 @@ function buildContextAwareQuestion(baseQuestion) {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
+
+let lastFinalSpeechAt = 0;
+
 async function handleSend() {
   if (sendBtn.disabled) return;
 
@@ -2288,8 +2294,26 @@ if (!base) {
 
 
   updateTopicMemory(base);
-  let question = buildDraftQuestion(base);
-  question = buildContextAwareQuestion(question);
+  // 🔐 CAPTURE ONLY NEW INTERVIEWER TEXT FIRST
+const freshOnly = normalize(getFreshInterviewerBlocksText());
+
+if (!freshOnly && !manual) {
+  setStatus(sendStatus, "No new interviewer question detected", "text-orange-600");
+  return;
+}
+
+// 🔒 MOVE CURSOR IMMEDIATELY
+sentCursor = timeline.length;
+
+// 🔄 Decide base strictly
+const baseText = manual || freshOnly;
+
+// Now safe to process
+updateTopicMemory(baseText);
+
+let question = buildDraftQuestion(baseText);
+question = buildContextAwareQuestion(question);
+
 
   if (manualQuestion) manualQuestion.value = "";
 
