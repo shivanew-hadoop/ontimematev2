@@ -516,14 +516,14 @@ function getQuickInterviewerSnapshot() {
     if (
       b?.role === "interviewer" &&
       b.text &&
-      b.text.length > 8 &&
-      b.t > lastQuickInterviewerAt
+      b.text.length > 8
     ) {
       return { text: normalize(b.text), at: b.t };
     }
   }
   return null;
 }
+
 
 
 
@@ -626,7 +626,7 @@ function addFinalSpeech(txt, role) {
     }
   }
 
-  lastSpeechAt = now;
+ 
   updateTranscript();
 }
 
@@ -1214,7 +1214,7 @@ if (words.length >= COMMIT_WORDS) {
     s.itemEntry[itemId].role = role;
   }
 
-  lastSpeechAt = now;
+  
   updateTranscript();
 }
 
@@ -2278,6 +2278,7 @@ function buildContextAwareQuestion(baseQuestion) {
 function freezeTranscriptAfterSend() {
   // Move cursor to absolute end — nothing before this can be reused
   sentCursor = timeline.length;
+  lastSpeechAt = 0;
 
   // Kill any interim leftovers
   removeInterimIfAny();
