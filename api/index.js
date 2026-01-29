@@ -707,6 +707,7 @@ export default async function handler(req, res) {
 
       // Kick chunk so UI receives "first token" immediately
       res.write(" ");
+      res.write("");
 
       const messages = [];
 

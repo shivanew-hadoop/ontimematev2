@@ -2012,6 +2012,11 @@ async function startChatStreaming(prompt, userTextForHistory) {
       if (raw.length < 1800) render();
     }
 
+    if (!raw || !raw.trim()) {
+  raw = "(No additional details provided.)";
+  render();
+}
+
     if (mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
@@ -2187,11 +2192,17 @@ function hardClearTranscript() {
 }
 
 function buildContextAwareQuestion(baseQuestion) {
+  // 🔒 CV metadata must NEVER get context appended
+  if (isCvMetadataQuestion(baseQuestion)) {
+    return baseQuestion;
+  }
+
   if (!recentTopics.length) return baseQuestion;
 
   const context = recentTopics.join(", ");
   return `${baseQuestion} (in the context of ${context})`;
 }
+
 
 
 /* -------------------------------------------------------------------------- */
