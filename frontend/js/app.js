@@ -730,49 +730,7 @@ const DOMAIN_KEYWORDS = {
   ]
 };
 
-// ---------------------------------------------------------
-// DOMAIN REGISTRY — extend keywords, not logic
-// ---------------------------------------------------------
-const DOMAIN_KEYWORDS = {
-  "data engineering": [
-    "etl", "pipeline", "spark", "hive", "airflow", "kafka",
-    "snowflake", "redshift", "bigquery", "databricks",
-    "data warehouse", "lakehouse", "ingestion", "batch", "streaming"
-  ],
 
-  "cloud infrastructure": [
-    "aws", "azure", "gcp", "route 53", "dns", "vpc", "subnet",
-    "ec2", "s3", "iam", "load balancer", "cloudwatch"
-  ],
-
-  "devops": [
-    "devops", "ci", "cd", "jenkins", "github actions",
-    "gitlab", "docker", "kubernetes", "helm", "terraform",
-    "ansible", "deployment", "build pipeline"
-  ],
-
-  "testing": [
-    "selenium", "cucumber", "bdd", "testng", "junit",
-    "playwright", "automation", "flaky", "test framework"
-  ],
-
-  "machine learning": [
-    "machine learning", "ml", "model", "training",
-    "feature engineering", "prediction", "regression",
-    "classification", "evaluation", "hyperparameter"
-  ],
-
-  "genai": [
-    "genai", "llm", "prompt", "prompt engineering",
-    "embedding", "vector", "rag", "openai",
-    "whisper", "chatgpt", "fine-tuning", "inference"
-  ],
-
-  "sap": [
-    "sap", "abap", "hana", "bw", "fico",
-    "mm", "sd", "pp", "sap data"
-  ]
-};
 
 // ---------------------------------------------------------
 // CONTEXT DERIVATION — deterministic, no forced context
