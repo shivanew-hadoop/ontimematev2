@@ -85,6 +85,9 @@ function renderMarkdownSafe(mdText) {
   return DOMPurify.sanitize(html);
 }
 
+const COMMIT_WORDS = 6;
+const USE_BROWSER_SR = true;
+
 function enhanceCodeBlocks(containerEl) {
   if (!containerEl) return;
   const pres = containerEl.querySelectorAll("pre");
@@ -2225,6 +2228,21 @@ function hardClearTranscript() {
 
   updateTranscript();
 }
+
+function isCvMetadataQuestion(text = "") {
+  const s = text.toLowerCase();
+  return (
+    s.includes("your name") ||
+    s.includes("name") ||
+    s.includes("email") ||
+    s.includes("phone") ||
+    s.includes("mobile") ||
+    s.includes("location") ||
+    s.includes("company name") ||
+    s.includes("current company")
+  );
+}
+
 
 function buildContextAwareQuestion(baseQuestion) {
   // CV metadata must never get context
