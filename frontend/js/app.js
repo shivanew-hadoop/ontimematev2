@@ -2263,7 +2263,11 @@ async function handleSend() {
     base = freshInterviewer;
   }
 
-  if (!base) return; // ⛔ restores original “wait for new text” behavior
+if (!base) {
+  setStatus(sendStatus, "No new question detected", "text-orange-600");
+  return;
+}
+
 
   updateTopicMemory(base);
   let question = buildDraftQuestion(base);
