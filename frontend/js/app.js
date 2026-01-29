@@ -1925,8 +1925,13 @@ async function transcribeSysBlob(blob, myEpoch) {
   const text = normalize(cleaned);
 
   // FIX: compute trimmed BEFORE overwriting lastSysPrinted
-  const trimmed = trimOverlap(lastSysPrinted, text);
-  if (!trimmed) return;
+ const lastFinal = lastCommittedByRole.interviewer?.raw || "";
+if (lastFinal && canonKey(text).includes(canonKey(lastFinal))) {
+  return;
+}
+
+const trimmed = trimOverlap(lastSysPrinted, text);
+if (!trimmed) return;
 
   // Maintain a growing reference so overlap trimming stays stable
   lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
