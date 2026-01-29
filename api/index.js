@@ -727,11 +727,11 @@ STYLE RULES:
 - Dense with real implementation keywords.
 
 CONTENT RULES:
-- State what broke or was challenging.
 - Explain exactly what you implemented.
+- Describe concrete actions taken in production.
 - Mention tools, configs, retries, thresholds, pipelines.
-- Call out edge cases or failures handled.
-- Include measurable outcomes when applicable.
+- Include outcomes only if directly relevant.
+
 
 HIGHLIGHTING:
 - Bold ONLY tools, frameworks, configs, or metrics.
