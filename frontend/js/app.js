@@ -251,7 +251,7 @@ let transcriptEpoch = 0;
 /* -------------------------------------------------------------------------- */
 /* CONSTANTS                                                                    */
 /* -------------------------------------------------------------------------- */
-const PAUSE_NEWLINE_MS = 3000;
+const PAUSE_NEWLINE_MS = 9000;
 
 setInterval(() => {
   if (!isRunning) return;
