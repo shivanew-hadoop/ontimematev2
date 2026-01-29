@@ -228,15 +228,7 @@ let sentCursor = 0;
 /* -------------------------------------------------------------------------- */
 /* PAUSE WATCHDOG — forces new line after silence                              */
 /* -------------------------------------------------------------------------- */
-setInterval(() => {
-  if (!isRunning) return;
 
-  const now = Date.now();
-  if (now - lastSpeechAt >= PAUSE_NEWLINE_MS) {
-    // Force next speech into a new block
-    lastSpeechAt = 0;
-  }
-}, 400);
 
 // “pin to top”
 let pinnedTop = true;
@@ -260,6 +252,16 @@ let transcriptEpoch = 0;
 /* CONSTANTS                                                                    */
 /* -------------------------------------------------------------------------- */
 const PAUSE_NEWLINE_MS = 3000;
+
+setInterval(() => {
+  if (!isRunning) return;
+
+  const now = Date.now();
+  if (now - lastSpeechAt >= PAUSE_NEWLINE_MS) {
+    // Force next speech into a new block
+    lastSpeechAt = 0;
+  }
+}, 400);
 
 const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
@@ -509,7 +511,7 @@ function getFreshInterviewerBlocksText() {
 }
 
 function getQuickInterviewerSnapshot() {
-  for (let i = timeline.length - 1; i >= 0; i--) {
+  for (let i = timeline.length - 1; i >= sentCursor; i--) {
     const b = timeline[i];
     if (
       b?.role === "interviewer" &&
@@ -522,6 +524,7 @@ function getQuickInterviewerSnapshot() {
   }
   return null;
 }
+
 
 
 
