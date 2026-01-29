@@ -750,6 +750,14 @@ MANDATORY OUTPUT ORDER:
 3. Example input and output
 4. Brief explanation after code
 
+IMPORTANT:
+- If the question is about CV metadata (name, company, role, designation,
+  experience years, dates, email, phone, location),
+  do NOT add project or experience context.
+- Answer factually and briefly.
+- Do NOT invent implementations, tools, metrics, or outcomes.
+
+
 STRICT RULES:
 - Never explain before showing code
 - No essay-style answers

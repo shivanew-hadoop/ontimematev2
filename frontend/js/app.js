@@ -329,6 +329,40 @@ function showBanner(msg) {
   bannerTop.classList.add("bg-red-600");
 }
 
+// -----------------------------
+// CV / IDENTITY GUARD
+// -----------------------------
+function isCvMetadataQuestion(text = "") {
+  const s = text.toLowerCase().trim();
+
+  const groups = {
+    identity: ["name", "full name"],
+    company: ["company", "employer", "organization"],
+    role: ["role", "designation", "title", "position"],
+    timeline: ["experience", "years", "duration", "joining", "start", "end"],
+    contact: ["email", "phone", "location", "city", "country", "linkedin"]
+  };
+
+  return Object.values(groups).some(words =>
+    words.some(w => s === w || s.includes(w))
+  );
+}
+
+
+// -----------------------------
+// LOGIC-ONLY INTENT
+// -----------------------------
+function wantsLogicOnly(q = "") {
+  const s = q.toLowerCase();
+  return (
+    s.includes("explain the logic") ||
+    s.includes("logic") ||
+    s.includes("how does it work") ||
+    s.includes("step by step")
+  );
+}
+
+
 function hideBanner() {
   if (!bannerTop) return;
   bannerTop.classList.add("hidden");
@@ -655,6 +689,8 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
 let recentTopics = [];
+let lastStrongSubject = null;
+
 
 function updateTopicMemory(text) {
   const low = text.toLowerCase();
@@ -666,6 +702,10 @@ function updateTopicMemory(text) {
   if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
 
   recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
+  if (text.match(/bdd|cucumber|annotation|selenium|testng|junit|rest assured/i)) {
+  lastStrongSubject = normalize(text);
+}
+
 }
 
 function normalizeSpokenText(s) {
@@ -755,6 +795,10 @@ function buildDraftQuestion(spoken) {
     activeTech = null;
   }
 
+ if (isCvMetadataQuestion(s)) {
+  return `Q: ${capitalizeQuestion(s)}`;
+}
+
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
@@ -804,7 +848,12 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  if (lastStrongSubject && s.length < 40) {
+  return `Q: Can you explain ${lastStrongSubject} ${s}?`;
+}
+
+return `Q: Can you explain ${s}?`;
+
 }
 
 
@@ -818,6 +867,7 @@ function capitalizeQuestion(q) {
 
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
+  const logicOnly = wantsLogicOnly(base);
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
@@ -837,11 +887,12 @@ FORMAT (STRICT):
 Q: ${base}
 
 ANSWERING STYLE:
+- ${logicOnly
+  ? "Explain the logic step by step. Do not describe projects."
+  : "Answer with real production experience only if relevant."}
 - Start answering immediately.
-- First person, past tense.
-- Senior, execution-focused tone.
-- Use dense, real implementation keywords naturally.
-- No essay or teaching tone.
+- Use first person.
+
 
 CONTENT REQUIREMENTS:
 - Start directly with implementation details.
