@@ -225,6 +225,19 @@ let timeline = [];
 let lastSpeechAt = 0;
 let sentCursor = 0;
 
+/* -------------------------------------------------------------------------- */
+/* PAUSE WATCHDOG — forces new line after silence                              */
+/* -------------------------------------------------------------------------- */
+setInterval(() => {
+  if (!isRunning) return;
+
+  const now = Date.now();
+  if (now - lastSpeechAt >= PAUSE_NEWLINE_MS) {
+    // Force next speech into a new block
+    lastSpeechAt = 0;
+  }
+}, 400);
+
 // “pin to top”
 let pinnedTop = true;
 
@@ -641,9 +654,7 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
     }
   }
 
- if (entry.text.split(" ").length === 1) {
   lastSpeechAt = now;
-}
 
   const words = cleaned.split(" ");
   let i = 0;
@@ -2261,6 +2272,18 @@ function buildContextAwareQuestion(baseQuestion) {
 }
 
 
+function freezeTranscriptAfterSend() {
+  // Move cursor to absolute end — nothing before this can be reused
+  sentCursor = timeline.length;
+
+  // Kill any interim leftovers
+  removeInterimIfAny();
+
+  // Explicitly clear manual input
+  if (manualQuestion) manualQuestion.value = "";
+}
+
+
 
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
@@ -2301,9 +2324,9 @@ if (!base) {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // sentCursor = timeline.length;
-  // pinnedTop = true;
-  // updateTranscript();
+freezeTranscriptAfterSend();
+pinnedTop = true;
+updateTranscript();
 
   const draftQ = question;
   responseBox.innerHTML = renderMarkdownLite(
@@ -2318,9 +2341,6 @@ if (!base) {
       : question;
 
   await startChatStreaming(promptToSend, base);
-  setTimeout(() => {
-  sentCursor = timeline.length;
-}, 0);
 }
 
 
