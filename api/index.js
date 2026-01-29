@@ -707,7 +707,6 @@ export default async function handler(req, res) {
 
       // Kick chunk so UI receives "first token" immediately
       res.write(" ");
-      res.write("");
 
       const messages = [];
 
@@ -750,14 +749,6 @@ MANDATORY OUTPUT ORDER:
 2. Inline comments for critical logic
 3. Example input and output
 4. Brief explanation after code
-
-IMPORTANT:
-- If the question is about CV metadata (name, company, role, designation,
-  experience years, dates, email, phone, location),
-  do NOT add project or experience context.
-- Answer factually and briefly.
-- Do NOT invent implementations, tools, metrics, or outcomes.
-
 
 STRICT RULES:
 - Never explain before showing code

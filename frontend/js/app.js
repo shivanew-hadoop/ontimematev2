@@ -329,40 +329,6 @@ function showBanner(msg) {
   bannerTop.classList.add("bg-red-600");
 }
 
-// -----------------------------
-// CV / IDENTITY GUARD
-// -----------------------------
-function isCvMetadataQuestion(text = "") {
-  const s = text.toLowerCase().trim();
-
-  const groups = {
-    identity: ["name", "full name"],
-    company: ["company", "employer", "organization"],
-    role: ["role", "designation", "title", "position"],
-    timeline: ["experience", "years", "duration", "joining", "start", "end"],
-    contact: ["email", "phone", "location", "city", "country", "linkedin"]
-  };
-
-  return Object.values(groups).some(words =>
-    words.some(w => s === w || s.includes(w))
-  );
-}
-
-
-// -----------------------------
-// LOGIC-ONLY INTENT
-// -----------------------------
-function wantsLogicOnly(q = "") {
-  const s = q.toLowerCase();
-  return (
-    s.includes("explain the logic") ||
-    s.includes("logic") ||
-    s.includes("how does it work") ||
-    s.includes("step by step")
-  );
-}
-
-
 function hideBanner() {
   if (!bannerTop) return;
   bannerTop.classList.add("hidden");
@@ -689,24 +655,151 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
 let recentTopics = [];
-let lastStrongSubject = null;
-
 
 function updateTopicMemory(text) {
   const low = text.toLowerCase();
   const topics = [];
 
-  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
-  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
-  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
-  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
+  // Data / Analytics
+  if (low.match(/sql|tableau|powerbi|dataset|analytics|kpi|warehouse|etl|pipeline|spark|hive/)) {
+    topics.push("data engineering");
+  }
 
-  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
-  if (text.match(/bdd|cucumber|annotation|selenium|testng|junit|rest assured/i)) {
-  lastStrongSubject = normalize(text);
+  // Programming
+  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) {
+    topics.push("programming");
+  }
+
+  // Testing (STRICT)
+  if (low.match(/selenium|playwright|bdd|cucumber|testng|junit|automation|flaky/)) {
+    topics.push("testing");
+  }
+
+  // 🚫 REMOVED: experience as a topic
+
+  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-2);
+
+  // Strong subject anchoring (unchanged)
+  if (low.match(/bdd|cucumber|annotation|selenium|testng|junit|rest assured/)) {
+    lastStrongSubject = normalize(text);
+  }
 }
 
+
+// ---------------------------------------------------------
+// DOMAIN REGISTRY — extend keywords, not logic
+// ---------------------------------------------------------
+const DOMAIN_KEYWORDS = {
+  "data engineering": [
+    "etl", "pipeline", "spark", "hive", "airflow", "kafka",
+    "snowflake", "redshift", "bigquery", "databricks",
+    "data warehouse", "lakehouse", "ingestion", "batch", "streaming"
+  ],
+
+  "cloud infrastructure": [
+    "aws", "azure", "gcp", "route 53", "dns", "vpc", "subnet",
+    "ec2", "s3", "iam", "load balancer", "cloudwatch"
+  ],
+
+  "devops": [
+    "devops", "ci", "cd", "jenkins", "github actions",
+    "gitlab", "docker", "kubernetes", "helm", "terraform",
+    "ansible", "deployment", "build pipeline"
+  ],
+
+  "testing": [
+    "selenium", "cucumber", "bdd", "testng", "junit",
+    "playwright", "automation", "flaky", "test framework"
+  ],
+
+  "machine learning": [
+    "machine learning", "ml", "model", "training",
+    "feature engineering", "prediction", "regression",
+    "classification", "evaluation", "hyperparameter"
+  ],
+
+  "genai": [
+    "genai", "llm", "prompt", "prompt engineering",
+    "embedding", "vector", "rag", "openai",
+    "whisper", "chatgpt", "fine-tuning", "inference"
+  ],
+
+  "sap": [
+    "sap", "abap", "hana", "bw", "fico",
+    "mm", "sd", "pp", "sap data"
+  ]
+};
+
+// ---------------------------------------------------------
+// DOMAIN REGISTRY — extend keywords, not logic
+// ---------------------------------------------------------
+const DOMAIN_KEYWORDS = {
+  "data engineering": [
+    "etl", "pipeline", "spark", "hive", "airflow", "kafka",
+    "snowflake", "redshift", "bigquery", "databricks",
+    "data warehouse", "lakehouse", "ingestion", "batch", "streaming"
+  ],
+
+  "cloud infrastructure": [
+    "aws", "azure", "gcp", "route 53", "dns", "vpc", "subnet",
+    "ec2", "s3", "iam", "load balancer", "cloudwatch"
+  ],
+
+  "devops": [
+    "devops", "ci", "cd", "jenkins", "github actions",
+    "gitlab", "docker", "kubernetes", "helm", "terraform",
+    "ansible", "deployment", "build pipeline"
+  ],
+
+  "testing": [
+    "selenium", "cucumber", "bdd", "testng", "junit",
+    "playwright", "automation", "flaky", "test framework"
+  ],
+
+  "machine learning": [
+    "machine learning", "ml", "model", "training",
+    "feature engineering", "prediction", "regression",
+    "classification", "evaluation", "hyperparameter"
+  ],
+
+  "genai": [
+    "genai", "llm", "prompt", "prompt engineering",
+    "embedding", "vector", "rag", "openai",
+    "whisper", "chatgpt", "fine-tuning", "inference"
+  ],
+
+  "sap": [
+    "sap", "abap", "hana", "bw", "fico",
+    "mm", "sd", "pp", "sap data"
+  ]
+};
+
+// ---------------------------------------------------------
+// CONTEXT DERIVATION — deterministic, no forced context
+// ---------------------------------------------------------
+function deriveContextFromQuestion(q = "") {
+  if (!q) return null;
+
+  const s = q.toLowerCase();
+
+  // 🚫 Never derive context for CV metadata or identity questions
+  if (typeof isCvMetadataQuestion === "function" && isCvMetadataQuestion(s)) {
+    return null;
+  }
+
+  // Find first strong domain match
+  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
+    for (const k of keywords) {
+      if (s.includes(k)) {
+        return domain;
+      }
+    }
+  }
+
+  // 🚨 No confident match → no context
+  return null;
 }
+
 
 function normalizeSpokenText(s) {
   const map = {
@@ -795,10 +888,6 @@ function buildDraftQuestion(spoken) {
     activeTech = null;
   }
 
- if (isCvMetadataQuestion(s)) {
-  return `Q: ${capitalizeQuestion(s)}`;
-}
-
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
@@ -848,12 +937,7 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  if (lastStrongSubject && s.length < 40) {
-  return `Q: Can you explain ${lastStrongSubject} ${s}?`;
-}
-
-return `Q: Can you explain ${s}?`;
-
+  return `Q: Can you explain ${s} with a real project example?`;
 }
 
 
@@ -867,7 +951,6 @@ function capitalizeQuestion(q) {
 
 
 function buildInterviewQuestionPrompt(currentTextOnly) {
-  const logicOnly = wantsLogicOnly(base);
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
@@ -887,12 +970,11 @@ FORMAT (STRICT):
 Q: ${base}
 
 ANSWERING STYLE:
-- ${logicOnly
-  ? "Explain the logic step by step. Do not describe projects."
-  : "Answer with real production experience only if relevant."}
 - Start answering immediately.
-- Use first person.
-
+- First person, past tense.
+- Senior, execution-focused tone.
+- Use dense, real implementation keywords naturally.
+- No essay or teaching tone.
 
 CONTENT REQUIREMENTS:
 - Start directly with implementation details.
@@ -2012,11 +2094,6 @@ async function startChatStreaming(prompt, userTextForHistory) {
       if (raw.length < 1800) render();
     }
 
-    if (!raw || !raw.trim()) {
-  raw = "(No additional details provided.)";
-  render();
-}
-
     if (mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
@@ -2192,15 +2269,17 @@ function hardClearTranscript() {
 }
 
 function buildContextAwareQuestion(baseQuestion) {
-  // 🔒 CV metadata must NEVER get context appended
+  // CV metadata must never get context
   if (isCvMetadataQuestion(baseQuestion)) {
     return baseQuestion;
   }
 
-  if (!recentTopics.length) return baseQuestion;
+  const derived = deriveContextFromQuestion(baseQuestion);
+  if (!derived) {
+    return baseQuestion;
+  }
 
-  const context = recentTopics.join(", ");
-  return `${baseQuestion} (in the context of ${context})`;
+  return `${baseQuestion} (in the context of ${derived})`;
 }
 
 
