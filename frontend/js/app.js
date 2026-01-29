@@ -626,7 +626,7 @@ function addFinalSpeech(txt, role) {
     }
   }
 
- 
+ lastSpeechAt = now;
   updateTranscript();
 }
 
