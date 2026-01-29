@@ -2302,13 +2302,16 @@ async function handleSend() {
   let base = "";
 
   if (manual) {
-    base = manual;
-  } else if (quickSnap) {
-    base = quickSnap.text;
-    lastQuickInterviewerAt = quickSnap.at; // 🔐 freshness gate
-  } else {
-    base = freshInterviewer;
-  }
+  base = manual;
+} else if (freshInterviewer) {
+  // ✅ take EVERYTHING spoken after last Send
+  base = freshInterviewer;
+} else if (quickSnap) {
+  // fallback only if no block group exists
+  base = quickSnap.text;
+  lastQuickInterviewerAt = quickSnap.at;
+}
+
 
 if (!base) {
   setStatus(sendStatus, "No new question detected", "text-orange-600");
