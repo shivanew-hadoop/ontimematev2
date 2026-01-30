@@ -190,6 +190,35 @@ function normalizeQ(q = "") {
     .replace(/\s+/g, " ")
     .trim();
 }
+function isDefinitionQuestion(q = "") {
+  const s = normalizeQ(q);
+
+  const definitionStarts = [
+    "what is",
+    "define",
+    "explain",
+    "describe",
+    "difference between",
+    "compare",
+    "why",
+    "advantages",
+    "disadvantages"
+  ];
+
+  const ownershipSignals = [
+    "how did you",
+    "what did you implement",
+    "your project",
+    "your experience",
+    "in your project"
+  ];
+
+  return (
+    definitionStarts.some(p => s.startsWith(p)) &&
+    !ownershipSignals.some(p => s.includes(p))
+  );
+}
+
 
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
@@ -709,6 +738,28 @@ export default async function handler(req, res) {
       res.write(" ");
 
       const messages = [];
+const DEFINITION_SYSTEM = `
+You are answering a technical interview definition question.
+
+ABSOLUTE CONSTRAINTS:
+- Do NOT give step-by-step implementation.
+- Do NOT list configs, retries, thresholds, or metrics.
+- Do NOT sound academic or textbook-like.
+
+CONTENT RULES:
+- Start with a clear definition in bold.
+- Keep the definition generic and correct.
+- Then connect it to real projects, clients, or systems from the resume context.
+- Mention tools or platforms ONLY to show exposure, not execution.
+
+STYLE:
+- Senior, professional, human language.
+- First-person allowed ONLY for experience framing.
+
+FORMAT:
+- First 1–2 lines: **bold definition**
+- Follow-up: short real-world explanation
+`.trim();
 
       const baseSystem = `
 You are answering a LIVE technical interview question.
@@ -757,12 +808,19 @@ STRICT RULES:
 - Use fenced code blocks
 `.trim();
 
-      const codeMode = isCodeQuestion(String(prompt || ""));
+      const p = String(prompt || "");
+const codeMode = isCodeQuestion(p);
+const definitionMode = isDefinitionQuestion(p);
 
-      messages.push({
-        role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-      });
+messages.push({
+  role: "system",
+  content: codeMode
+    ? CODE_FIRST_SYSTEM
+    : definitionMode
+    ? DEFINITION_SYSTEM
+    : baseSystem
+});
+
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
