@@ -674,6 +674,31 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
 let recentTopics = [];
+function isExperienceHeavyTopic(text = "", resumeText = "") {
+  const q = text.toLowerCase();
+  const cv = (resumeText || "").toLowerCase();
+
+  if (!q || !cv) return false;
+
+  // 1️⃣ Direct keyword overlap with resume
+  const qWords = q.split(/\s+/).filter(w => w.length > 3);
+
+  for (const w of qWords) {
+    if (cv.includes(w)) return true;
+  }
+
+  // 2️⃣ Domain-level match (strong signal)
+  for (const keywords of Object.values(DOMAIN_KEYWORDS)) {
+    const domainHit =
+      keywords.some(k => q.includes(k)) &&
+      keywords.some(k => cv.includes(k));
+
+    if (domainHit) return true;
+  }
+
+  return false;
+}
+
 
 function updateTopicMemory(text) {
   const low = text.toLowerCase();
@@ -914,7 +939,12 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  if (isExperienceHeavyTopic(s, resumeTextMem)) {
+  return `Q: How did you use ${s} in your projects, and what real implementation challenges did you handle?`;
+}
+
+return `Q: Can you explain ${s}?`;
+
 }
 
 
