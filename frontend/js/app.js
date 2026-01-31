@@ -878,34 +878,81 @@ function isNewTopic(text) {
   return false;
 }
 
+function condenseInterviewIntent(raw = "", resumeText = "") {
+  const text = raw.toLowerCase();
+
+  // stop words
+  const STOP = new Set([
+    "can","you","please","explain","tell","me","about","how","what","why",
+    "is","are","was","were","do","did","does","i","we","they","in","on",
+    "with","for","from","this","that","it","your","my","our","project"
+  ]);
+
+  // tokenize once
+  const words = text
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP.has(w));
+
+  if (!words.length) {
+    return { topic: "your recent project", type: "experience" };
+  }
+
+  // resume-aware boost
+  const resume = resumeText.toLowerCase();
+  const boosted = words.filter(w => resume.includes(w));
+
+  const topicWords = (boosted.length ? boosted : words).slice(0, 4);
+  const topic = topicWords.join(" ");
+
+  // intent detection (INLINE, no extra helpers)
+  const isDefinition =
+    raw.trim().toLowerCase().startsWith("what is") ||
+    raw.trim().toLowerCase().startsWith("explain");
+
+  const isExperience =
+    raw.toLowerCase().includes("project") ||
+    raw.toLowerCase().includes("experience") ||
+    raw.toLowerCase().includes("role");
+
+  return {
+    topic,
+    type: isDefinition ? "definition" : isExperience ? "experience" : "general"
+  };
+}
+
 function buildDraftQuestion(spoken) {
   // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
   let s = normalizeSpokenText(normalize(spoken))
-    .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
+    .replace(/[^\x00-\x7F]/g, " ")
     .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-     if (isNewTopic(s)) {
+
+  if (!s) {
+    return "Q: Can you explain your current project end-to-end?";
+  }
+
+  const low = s.toLowerCase();
+
+  // Reset intent on topic change
+  if (isNewTopic(s)) {
     activeIntent = null;
     activeTech = null;
   }
 
-  if (!s) return "Q: Can you explain your current project end-to-end?";
-
-  const low = s.toLowerCase();
-
-  // 2️⃣ Detect language
-  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd)/i.exec(low);
+  // 2️⃣ Detect language (lightweight, keep as-is)
+  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd|cucumber)/i.exec(low);
   if (techMatch) activeTech = techMatch[1].toLowerCase();
 
-  // 3️⃣ Coding signals
+  // 3️⃣ Coding signals (unchanged)
   const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge"];
   const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","api"];
 
   const hasVerb = CODE_VERBS.some(v => low.includes(v));
   const hasNoun = CODE_NOUNS.some(n => low.includes(n));
 
-  // 4️⃣ If user just said "java" or "python"
+  // 4️⃣ Continue previous coding flow
   if (!hasVerb && activeIntent === "code" && activeTech) {
     return `Q: Write ${activeTech} code for the previous problem and explain the logic.`;
   }
@@ -913,35 +960,54 @@ function buildDraftQuestion(spoken) {
   // 5️⃣ Lock coding intent
   if (hasVerb && hasNoun) {
     activeIntent = "code";
-    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic `;
+    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic.`;
   }
 
-  // 6️⃣ Debug
+  // 6️⃣ Debug intent
   if (/error|issue|not working|failed|bug|timeout/.test(low)) {
     activeIntent = "debug";
-    return `Q: How would you debug ${s} and what steps did you take in production?`;
+    return `Q: How would you debug this issue in production, and what steps did you take?`;
   }
 
-  // 7️⃣ Design
+  // 7️⃣ Design intent
   if (/architecture|design|flow|system|microservice|pattern/.test(low)) {
     activeIntent = "design";
-    return `Q: Explain the ${s} you designed and why this architecture was chosen.`;
+    return `Q: Can you explain the architecture you designed and why this approach was chosen?`;
   }
 
-  // 8️⃣ Theory
+  // 🔥 8️⃣ EXPERIENCE / THEORY — CONDENSE HERE (KEY FIX)
+  const STOP = new Set([
+    "can","you","please","explain","tell","me","about","how","what","why",
+    "is","are","was","were","do","did","does","i","we","they","in","on",
+    "with","for","from","this","that","it","your","my","our","project"
+  ]);
+
+  const words = low
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP.has(w));
+
+  const resume = (resumeTextMem || "").toLowerCase();
+  const boosted = words.filter(w => resume.includes(w));
+
+  const topicWords = (boosted.length ? boosted : words).slice(0, 4);
+  const topic = topicWords.join(" ") || "your recent project";
+
+  // 9️⃣ Theory intent
   if (/what is|explain|define|theory/.test(low)) {
     activeIntent = "theory";
-    return `Q: Can you explain ${s} with a real-world example?`;
+    return `Q: Can you explain ${topic} with a real-world example?`;
   }
 
-  // 9️⃣ Fallback using previous intent
-  if (activeIntent === "code") {
-    return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
-  }
-
+  // 🔟 Experience intent (FIXED — NO MORE ${s})
   if (isExperienceHeavyTopic(s, resumeTextMem)) {
-  return `Q: How did you use ${s} in your projects, and what real implementation challenges did you handle?`;
+    return `Q: Can you walk me through ${topic}, your role, and the real implementation challenges you handled?`;
+  }
+
+  // 1️⃣1️⃣ Safe fallback
+  return `Q: Can you explain ${topic}?`;
 }
+
 
 const topic = condenseToTopic(s, resumeTextMem);
 
