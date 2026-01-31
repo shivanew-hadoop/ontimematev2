@@ -943,7 +943,12 @@ function buildDraftQuestion(spoken) {
   return `Q: How did you use ${s} in your projects, and what real implementation challenges did you handle?`;
 }
 
-return `Q: Can you explain ${s}?`;
+const topic = condenseToTopic(s, resumeTextMem);
+
+return topic
+  ? `Q: Can you explain ${topic} with a real-world example?`
+  : `Q: Can you explain this with a real-world example?`;
+
 
 }
 
@@ -2320,6 +2325,53 @@ function freezeTranscriptAfterSend() {
 
   // Explicitly clear manual input
   if (manualQuestion) manualQuestion.value = "";
+}
+
+function condenseToTopic(raw = "", resumeText = "") {
+  const text = String(raw).toLowerCase();
+
+  // stop words (spoken fluff)
+  const STOP = new Set([
+    "can","you","please","explain","tell","me","about","how","what","why","when",
+    "where","did","do","does","is","are","was","were","we","they","i","in","on",
+    "with","for","from","this","that","it","as","at","by","into","over","your",
+    "my","their","our","current","project","experience","working","used","using"
+  ]);
+
+  // tokenize
+  let words = text
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length > 2 && !STOP.has(w));
+
+  if (!words.length) return "";
+
+  // preserve known multi-word technical phrases (OPTIONAL boost)
+  const PHRASES = [
+    "page object model",
+    "ci cd",
+    "bdd cucumber",
+    "metadata driven",
+    "data pipeline",
+    "etl pipeline",
+    "machine learning",
+    "openai api",
+    "snowflake performance"
+  ];
+
+  const foundPhrases = PHRASES.filter(p => text.includes(p));
+  if (foundPhrases.length) {
+    return foundPhrases.slice(0, 2).join(" ");
+  }
+
+  // resume-aware boost (REAL signal)
+  const resume = (resumeText || "").toLowerCase();
+  const boosted = words.filter(w => resume.includes(w));
+
+  const finalWords = (boosted.length ? boosted : words)
+    .slice(0, 4);
+
+  return finalWords.join(" ");
 }
 
 
