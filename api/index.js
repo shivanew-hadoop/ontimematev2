@@ -251,7 +251,23 @@ function isExplanationQuestion(q = "") {
     "deadlock",
     "solid",
     "oops",
-    "normalization"
+    "normalization",
+
+    // Data engineering / ETL orchestration (tends to be interview explanation, not coding)
+    "etl",
+    "pipeline",
+    "orchestration",
+    "data factory",
+    "azure data factory",
+    "adf",
+    "linked service",
+    "dataset",
+    "integration runtime",
+    "copy activity",
+    "trigger",
+    "monitoring",
+    "retry",
+    "error handling"
   ];
 
   return (
@@ -260,29 +276,71 @@ function isExplanationQuestion(q = "") {
   );
 }
 
+// Narrative / experience questions (answer with actions + reasoning, NOT code)
+function isExperienceNarrativeQuestion(q = "") {
+  const s = normalizeQ(q);
+  if (!s) return false;
+
+  const patterns = [
+    "in your project",
+    "in your role",
+    "your experience",
+    "what did you do",
+    "what all did you",
+    "what all you",
+    "actions you performed",
+    "steps you performed",
+    "responsibilities",
+    "day to day",
+    "end to end",
+    "walk me through",
+    "tell me about"
+  ];
+
+  if (patterns.some(p => s.includes(p))) return true;
+  if (/\bwhat\s+(all\s+)?(actions|steps|tasks|responsibilities)\b/.test(s)) return true;
+  if (/\b(actions|steps)\b.*\b(performed|handled|did)\b/.test(s)) return true;
+
+  return false;
+}
+
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // If user explicitly wants code, always treat as code
+  // Strong signals: the user pasted/asked code directly
+  if (looksLikeCodeText(q)) return true;
+
+  // If the user explicitly says "no code", keep it explanation.
+  const explicitNoCode = [
+    "no code",
+    "without code",
+    "explain only",
+    "high level",
+    "conceptually"
+  ];
+  if (explicitNoCode.some(x => s.includes(x))) return false;
+
+  // If user explicitly wants code, treat as code
+  // NOTE: "implementation" alone is too ambiguous in interviews, so we do NOT use it as a strong code trigger.
   const explicitCode = [
     "code",
-    "program",
-    "snippet",
-    "implementation",
+    "write code",
+    "give code",
+    "show code",
+    "code snippet",
     "source code",
     "write a function",
     "write a program",
-    "give me code",
-    "show me code"
+    "coding problem",
+    "leetcode",
+    "solve in",
+    "program in"
   ];
 
-  // Task verbs that strongly indicate coding even without "code" word
-  const taskVerbs = [
+  // Task verbs: split generic build verbs vs algorithmic/code verbs
+  const genericBuildVerbs = ["implement", "create", "build", "develop", "design"];
+  const codingVerbs = [
     "write",
-    "implement",
-    "create",
-    "build",
-    "develop",
     "program",
     "solve",
     "print",
@@ -301,6 +359,8 @@ function isCodeQuestion(q = "") {
 
   // Classic coding-problem keywords
   const algoKeywords = [
+    "two sum",
+    "target",
     "vowel",
     "vowels",
     "palindrome",
@@ -326,18 +386,25 @@ function isCodeQuestion(q = "") {
   const wantsExample = /\b(example|sample|demo)\b/.test(s);
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
 
+  // Narrative experience questions should NOT become code just because they mention a language.
+  const narrative = isExperienceNarrativeQuestion(s);
+  const explicitCodeAsk = explicitCode.some(x => s.includes(x)) || codeSignals.some(x => s.includes(x));
+  if (narrative && !explicitCodeAsk) return false;
+
   // Explanation override ONLY when it's purely theory (no "example/code/task")
   const looksLikeExplain = isExplanationQuestion(s);
 
   let score = 0;
 
-  if (explicitCode.some(x => s.includes(x))) score += 4;
+  if (explicitCode.some(x => s.includes(x))) score += 5;
   if (codeSignals.some(x => s.includes(x))) score += 4;
 
-  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
+  if (codingVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
+  if (genericBuildVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 1;
   if (algoKeywords.some(k => s.includes(k))) score += 2;
 
-  if (wantsExample) score += 1;
+  // "example" is weak — it should not flip an interview narrative question into code by itself
+  if (wantsExample) score += 0.5;
   if (mentionsLanguage) score += 1; // LOW weight on purpose
 
   // If it's strongly explanation AND score is weak, keep it explanation
@@ -758,7 +825,10 @@ STYLE:
 
 FORMAT:
 - First 1–2 lines: **bold definition**
-- Follow-up: short real-world explanation
+- Follow-up: 3–5 bullets (1–2 lines each) explaining how it is used in real systems
+
+NEVER:
+- Do NOT output code blocks for definition questions.
 `.trim();
 
       const baseSystem = `
@@ -789,8 +859,12 @@ HIGHLIGHTING:
 - Bold ONLY tools, frameworks, configs, or metrics.
 
 FORMATTING:
-- Short paragraphs preferred.
-- Bullets only if they improve clarity.
+- Prefer bullets.
+- 6–10 bullets, each 1–2 lines (action + why / impact).
+- Keep it interview-style: compact but not one-liners.
+
+CODE GUARD:
+- If the question is about tools/process (e.g., ADF/ETL/pipelines) and did NOT ask for code, do NOT output code.
 `.trim();
 
       const CODE_FIRST_SYSTEM = `
