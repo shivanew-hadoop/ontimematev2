@@ -713,42 +713,32 @@ export default async function handler(req, res) {
       const baseSystem = `
 You are a senior industry professional answering a LIVE technical interview.
 
-MANDATORY RESPONSE STRUCTURE (NON-NEGOTIABLE):
+YOU MUST OUTPUT IN THIS EXACT FORMAT — NO VARIATION ALLOWED.
 
-1. Quick Answer (Interview Style)
-- 4–8 bullet points ONLY
-- Past tense ONLY (did, built, fixed, implemented)
-- Real actions, not theory
+-------------------------
+Quick Answer (Interview Style)
+- Bullet points only
+- Past tense only
+- Real actions only
 - No definitions
-- No introductions
-- No conclusions
-- No questions
-- No future tense
-- No "generally", "typically", "in my experience"
+- No background
+- No company storytelling
 
-2. Real-Time Professional Implementation
-- Describe exactly how it was implemented in a real production project
-- Speak with ownership (I built, I refactored, I shipped)
-- Mention real constraints: deadlines, flaky systems, prod issues, scale
-- Tie decisions to outcomes (failures reduced, execution sped up, incidents avoided)
-- No textbook explanations
+-------------------------
+Real-Time Professional Implementation
+- One or two short paragraphs
+- What I built, fixed, shipped
+- Real constraints and outcomes
+- No explanations of tools
+- No theory
 
-GLOBAL HARD RULES:
-- NEVER explain what a tool is
-- NEVER start with theory
-- NEVER educate
-- NEVER define terms
-- NEVER sound academic
-
-STYLE ENFORCEMENT:
-- Senior
-- Direct
-- Execution-focused
-- Interview-ready
-- Zero fluff
-
-If the answer sounds like documentation or a blog post, it is WRONG.
+STRICT RULES:
+- The response MUST start with: "Quick Answer (Interview Style)"
+- If you explain what something is, you FAILED
+- If you sound like documentation, you FAILED
+- If you narrate history, you FAILED
 `.trim();
+
 
 
       const CODE_FIRST_SYSTEM = `
@@ -778,14 +768,14 @@ STRICT RULES:
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
 
-      if (resumeText?.trim()) {
-        messages.push({
-          role: "system",
-          content:
-            "Use this resume context when answering. Do not invent details.\n\n" +
-            resumeText.trim().slice(0, 12000)
-        });
-      }
+      // if (resumeText?.trim()) {
+      //   messages.push({
+      //     role: "system",
+      //     content:
+      //       "Use this resume context when answering. Do not invent details.\n\n" +
+      //       resumeText.trim().slice(0, 12000)
+      //   });
+      // }
 
       for (const m of safeHistory(history)) messages.push(m);
 
@@ -804,24 +794,34 @@ ${String(prompt).slice(0, 7000)}
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.2,
+        temperature: 0,
         max_tokens: 900,
         messages
       });
 
-      try {
+      let output = "";
+
+try {
   for await (const chunk of stream) {
     const t = chunk?.choices?.[0]?.delta?.content || "";
-    if (t) res.write(t);
+    if (t) {
+      output += t;
+      res.write(t);
+    }
   }
 } catch {}
 
-// 🔒 Anti-theory guardrail: stop model from drifting into explanations
+// HARD FAIL if structure missing
+if (!codeMode && !output.startsWith("Quick Answer (Interview Style)")) {
+  res.write("\n\n[RESPONSE REJECTED: NOT INTERVIEW-STYLE]");
+}
+
 if (!codeMode) {
   res.write("\n\n");
 }
 
 return res.end();
+
 
     }
 
