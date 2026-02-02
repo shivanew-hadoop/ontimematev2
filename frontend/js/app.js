@@ -85,6 +85,9 @@ function renderMarkdownSafe(mdText) {
   return DOMPurify.sanitize(html);
 }
 
+const COMMIT_WORDS = 6;
+const USE_BROWSER_SR = true;
+
 function enhanceCodeBlocks(containerEl) {
   if (!containerEl) return;
   const pres = containerEl.querySelectorAll("pre");
@@ -180,6 +183,8 @@ let blockMicUntil = 0;
 let micInterimEntry = null;
 let lastMicResultAt = 0;
 let micWatchdog = null;
+let lastQuickInterviewerAt = 0;
+
 
 // Mic fallback (MediaRecorder -> /transcribe)
 let micStream = null;
@@ -220,6 +225,11 @@ let timeline = [];
 let lastSpeechAt = 0;
 let sentCursor = 0;
 
+/* -------------------------------------------------------------------------- */
+/* PAUSE WATCHDOG — forces new line after silence                              */
+/* -------------------------------------------------------------------------- */
+
+
 // “pin to top”
 let pinnedTop = true;
 
@@ -243,6 +253,16 @@ let transcriptEpoch = 0;
 /* -------------------------------------------------------------------------- */
 const PAUSE_NEWLINE_MS = 3000;
 
+setInterval(() => {
+  if (!isRunning) return;
+
+  const now = Date.now();
+  if (now - lastSpeechAt >= PAUSE_NEWLINE_MS) {
+    // Force next speech into a new block
+    lastSpeechAt = 0;
+  }
+}, 400);
+
 const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
 const MIC_MAX_CONCURRENT = 2;
@@ -262,14 +282,13 @@ const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
-  "Transcribe only English as spoken with an Indian English accent. " +
-  "STRICTLY ignore and OMIT any Urdu, Arabic, Hindi, or other non-English words. " +
-  "If a word is not English, drop it completely. " +
-  "Use Indian English pronunciation and spelling. " +
-  "Do NOT Americanize words. " +
-  "Do NOT translate. " +
-  "Do NOT add new words. Do NOT repeat phrases. " +
-  "Keep punctuation minimal. If uncertain, omit.";
+  "Transcribe ONLY English words, regardless of accent (Indian, American, British). " +
+  "STRICTLY OMIT any non-English language words (Telugu, Hindi, Urdu, spanish,Arabic, etc.). " +
+  "If a word is not valid English, drop it completely. " +
+  "Do NOT translate. Do NOT infer meaning. " +
+  "Do NOT add filler words. Do NOT repeat phrases. " +
+  "Return plain English text only. " +
+  "If uncertain, omit the word.";
 
 
 /* -------------------------------------------------------------------------- */
@@ -491,6 +510,24 @@ function getFreshInterviewerBlocksText() {
     .trim();
 }
 
+function getQuickInterviewerSnapshot() {
+  for (let i = timeline.length - 1; i >= sentCursor; i--) {
+    const b = timeline[i];
+    if (
+      b?.role === "interviewer" &&
+      b.text &&
+      b.text.length > 8
+    ) {
+      return { text: normalize(b.text), at: b.t };
+    }
+  }
+  return null;
+}
+
+
+
+
+
 function updateTranscript() {
   if (!liveTranscript) return;
   liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
@@ -589,7 +626,7 @@ function addFinalSpeech(txt, role) {
     }
   }
 
-  lastSpeechAt = now;
+ lastSpeechAt = now;
   updateTranscript();
 }
 
@@ -637,18 +674,134 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
 let recentTopics = [];
+function isExperienceHeavyTopic(text = "", resumeText = "") {
+  const q = text.toLowerCase();
+  const cv = (resumeText || "").toLowerCase();
+
+  if (!q || !cv) return false;
+
+  // 1️⃣ Direct keyword overlap with resume
+  const qWords = q.split(/\s+/).filter(w => w.length > 3);
+
+  for (const w of qWords) {
+    if (cv.includes(w)) return true;
+  }
+
+  // 2️⃣ Domain-level match (strong signal)
+  for (const keywords of Object.values(DOMAIN_KEYWORDS)) {
+    const domainHit =
+      keywords.some(k => q.includes(k)) &&
+      keywords.some(k => cv.includes(k));
+
+    if (domainHit) return true;
+  }
+
+  return false;
+}
+
 
 function updateTopicMemory(text) {
   const low = text.toLowerCase();
   const topics = [];
 
-  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
-  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
-  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
-  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
+  // Data / Analytics
+  if (low.match(/sql|tableau|powerbi|dataset|analytics|kpi|warehouse|etl|pipeline|spark|hive/)) {
+    topics.push("data engineering");
+  }
 
-  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
+  // Programming
+  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) {
+    topics.push("programming");
+  }
+
+  // Testing (STRICT)
+  if (low.match(/selenium|playwright|bdd|cucumber|testng|junit|automation|flaky/)) {
+    topics.push("testing");
+  }
+
+  // 🚫 REMOVED: experience as a topic
+
+  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-2);
+
+  // Strong subject anchoring (unchanged)
+  if (low.match(/bdd|cucumber|annotation|selenium|testng|junit|rest assured/)) {
+    lastStrongSubject = normalize(text);
+  }
 }
+
+
+// ---------------------------------------------------------
+// DOMAIN REGISTRY — extend keywords, not logic
+// ---------------------------------------------------------
+const DOMAIN_KEYWORDS = {
+  "data engineering": [
+    "etl", "pipeline", "spark", "hive", "airflow", "kafka",
+    "snowflake", "redshift", "bigquery", "databricks",
+    "data warehouse", "lakehouse", "ingestion", "batch", "streaming"
+  ],
+
+  "cloud infrastructure": [
+    "aws", "azure", "gcp", "route 53", "dns", "vpc", "subnet",
+    "ec2", "s3", "iam", "load balancer", "cloudwatch"
+  ],
+
+  "devops": [
+    "devops", "ci", "cd", "jenkins", "github actions",
+    "gitlab", "docker", "kubernetes", "helm", "terraform",
+    "ansible", "deployment", "build pipeline"
+  ],
+
+  "testing": [
+    "selenium", "cucumber", "bdd", "testng", "junit",
+    "playwright", "automation", "flaky", "test framework"
+  ],
+
+  "machine learning": [
+    "machine learning", "ml", "model", "training",
+    "feature engineering", "prediction", "regression",
+    "classification", "evaluation", "hyperparameter"
+  ],
+
+  "genai": [
+    "genai", "llm", "prompt", "prompt engineering",
+    "embedding", "vector", "rag", "openai",
+    "whisper", "chatgpt", "fine-tuning", "inference"
+  ],
+
+  "sap": [
+    "sap", "abap", "hana", "bw", "fico",
+    "mm", "sd", "pp", "sap data"
+  ]
+};
+
+
+
+// ---------------------------------------------------------
+// CONTEXT DERIVATION — deterministic, no forced context
+// ---------------------------------------------------------
+function deriveContextFromQuestion(q = "") {
+  if (!q) return null;
+
+  const s = q.toLowerCase();
+
+  // 🚫 Never derive context for CV metadata or identity questions
+  if (typeof isCvMetadataQuestion === "function" && isCvMetadataQuestion(s)) {
+    return null;
+  }
+
+  // Find first strong domain match
+  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
+    for (const k of keywords) {
+      if (s.includes(k)) {
+        return domain;
+      }
+    }
+  }
+
+  // 🚨 No confident match → no context
+  return null;
+}
+
 
 function normalizeSpokenText(s) {
   const map = {
@@ -786,7 +939,12 @@ function buildDraftQuestion(spoken) {
     return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  if (isExperienceHeavyTopic(s, resumeTextMem)) {
+  return `Q: How did you use ${s} in your projects, and what real implementation challenges did you handle?`;
+}
+
+return `Q: Can you explain ${s}?`;
+
 }
 
 
@@ -807,45 +965,49 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-You are answering a real interview question spoken by an interviewer.
+You are answering a real technical interview question spoken by an interviewer.
 
-First, restate the interviewer’s question clearly in the format:
-Q: <question>
+MANDATORY:
+- The question MUST appear at the top exactly once.
+- Answer must sound like real production work already done.
+- No role intro, no company narration, no generic theory.
 
-Then answer it naturally, as a senior professional would explain verbally.
+FORMAT (STRICT):
 
-ANSWERING STYLE (MANDATORY):
-- Sound confident, calm, and experienced.
-- Start with a direct explanation before going deeper.
-- Explain how and why, not textbook definitions.
-- Speak like a human in an interview, not like documentation.
+Q: ${base}
 
-DEPTH RULES:
-- Provide enough detail to demonstrate real understanding.
-- If a tool, framework, or concept is mentioned, briefly explain how you used it.
-- If leadership or decision-making is implied, explain impact and outcomes.
+ANSWERING STYLE:
+- Start answering immediately.
+- First person, past tense.
+- Senior, execution-focused tone.
+- Use dense, real implementation keywords naturally.
+- No essay or teaching tone.
 
-EXAMPLES:
-- Naturally weave real project experience into the explanation.
-- Do NOT label sections like "Quick Answer" or "Project Example".
-- Do NOT use numbered sections or templates.
+CONTENT REQUIREMENTS:
+- Start directly with implementation details.
+- Explain exactly what you implemented.
+- Mention tools, configs, selectors, retries, thresholds, pipelines.
+- Call out failures, edge cases, or instability handled.
+- Include measurable or observable outcomes when applicable.
+
+AVOID COMPLETELY:
+- “In my current role…”
+- “I had the opportunity…”
+- Background explanations or definitions
+- Generic statements without implementation depth
 
 FORMATTING:
-- Use Markdown lightly.
 - Short paragraphs preferred.
-- Bullets ONLY if they genuinely improve clarity.
-- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
+- Bullets only if they genuinely improve clarity.
+- Bold ONLY real tools, frameworks, configs, or metrics.
 
-CONTEXT:
-- Stay grounded in the interviewer’s question.
-- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
-- Avoid repeating previously asked questions:
+CONTEXT BIAS:
+- Prefer domain relevance: ${domainBias || "software engineering"}.
+- Avoid repeating these previously asked questions:
 ${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
-
-INTERVIEWER QUESTION:
-${base}
 `.trim();
 }
+
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
@@ -1082,7 +1244,7 @@ if (words.length >= COMMIT_WORDS) {
     s.itemEntry[itemId].role = role;
   }
 
-  lastSpeechAt = now;
+  
   updateTranscript();
 }
 
@@ -1110,19 +1272,18 @@ addFinalSpeech(final, role);
 
 }
 
+// UPDATED — Accent-agnostic English only (Indian / US / UK allowed)
+// Hard language control is handled post-ASR, not here.
+
 function sendAsrConfig(ws) {
   const cfgA = {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
     input_audio_transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt: TRANSCRIBE_PROMPT + 
-    " Speaker has an Indian English accent. " +
-    "Prefer Indian pronunciation and spelling. " +
-    "Do not normalize to US English."
-},
-
+      model: REALTIME_ASR_MODEL,
+      language: "en", // ✅ allow all English accents
+      prompt: TRANSCRIBE_PROMPT
+    },
     turn_detection: {
       type: "server_vad",
       threshold: 0.5,
@@ -1135,6 +1296,9 @@ function sendAsrConfig(ws) {
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
 
+
+// UPDATED — Fallback session config (same behavior, no accent lock)
+
 function sendAsrConfigFallbackSessionUpdate(ws) {
   const cfgB = {
     type: "session.update",
@@ -1144,13 +1308,10 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt:
-    TRANSCRIBE_PROMPT +
-    " Speaker has an Indian English accent. " +
-    "Use Indian pronunciation and spelling."
-},
+            model: REALTIME_ASR_MODEL,
+            language: "en", // ✅ allow all English accents
+            prompt: TRANSCRIBE_PROMPT
+          },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
@@ -1165,6 +1326,7 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
+
 
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
@@ -1793,8 +1955,13 @@ async function transcribeSysBlob(blob, myEpoch) {
   const text = normalize(cleaned);
 
   // FIX: compute trimmed BEFORE overwriting lastSysPrinted
-  const trimmed = trimOverlap(lastSysPrinted, text);
-  if (!trimmed) return;
+ const lastFinal = lastCommittedByRole.interviewer?.raw || "";
+if (lastFinal && canonKey(text).includes(canonKey(lastFinal))) {
+  return;
+}
+
+const trimmed = trimOverlap(lastSysPrinted, text);
+if (!trimmed) return;
 
   // Maintain a growing reference so overlap trimming stays stable
   lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
@@ -2113,6 +2280,50 @@ function hardClearTranscript() {
   updateTranscript();
 }
 
+function isCvMetadataQuestion(text = "") {
+  const s = text.toLowerCase();
+  return (
+    s.includes("your name") ||
+    s.includes("name") ||
+    s.includes("email") ||
+    s.includes("phone") ||
+    s.includes("mobile") ||
+    s.includes("location") ||
+    s.includes("company name") ||
+    s.includes("current company")
+  );
+}
+
+
+function buildContextAwareQuestion(baseQuestion) {
+  // CV metadata must never get context
+  if (isCvMetadataQuestion(baseQuestion)) {
+    return baseQuestion;
+  }
+
+  const derived = deriveContextFromQuestion(baseQuestion);
+  if (!derived) {
+    return baseQuestion;
+  }
+
+  return `${baseQuestion} (in the context of ${derived})`;
+}
+
+
+function freezeTranscriptAfterSend() {
+  // Move cursor to absolute end — nothing before this can be reused
+  sentCursor = timeline.length;
+  lastSpeechAt = 0;
+
+  // Kill any interim leftovers
+  removeInterimIfAny();
+
+  // Explicitly clear manual input
+  if (manualQuestion) manualQuestion.value = "";
+}
+
+
+
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
@@ -2120,11 +2331,32 @@ async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
+  const quickSnap = getQuickInterviewerSnapshot();
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-  const base = manual || freshInterviewer;
+
+  let base = "";
+
+  if (manual) {
+  base = manual;
+} else if (freshInterviewer) {
+  // ✅ take EVERYTHING spoken after last Send
+  base = freshInterviewer;
+} else if (quickSnap) {
+  // fallback only if no block group exists
+  base = quickSnap.text;
+  lastQuickInterviewerAt = quickSnap.at;
+}
+
+
+if (!base) {
+  setStatus(sendStatus, "No new question detected", "text-orange-600");
+  return;
+}
+
+
   updateTopicMemory(base);
-  const question = buildDraftQuestion(base);
-  if (!base) return;
+  let question = buildDraftQuestion(base);
+  question = buildContextAwareQuestion(question);
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -2134,22 +2366,23 @@ async function handleSend() {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  sentCursor = timeline.length;
-  pinnedTop = true;
-  updateTranscript();
+freezeTranscriptAfterSend();
+pinnedTop = true;
+updateTranscript();
 
-  const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
+  // Do not echo the raw question in the answer box (prevents "question as-is" effect)
+  responseBox.innerHTML = renderMarkdownLite(`_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
-  const mode = modeSelect?.value || "interview";
-  const promptToSend =
-    mode === "interview"
-      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
-      : question;
+  // Send ONLY the cleaned question text.
+  // - Backend intent detection (code/definition/normal) relies on the question starting with "what is/explain/..." etc.
+  // - Avoid wrapping with extra meta-prompt that forces "Q:" or "I implemented" for every answer.
+  const cleanQuestion = question.replace(/^Q:\s*/i, "").trim();
+  const promptToSend = cleanQuestion || question;
 
   await startChatStreaming(promptToSend, base);
 }
+
 
 sendBtn.onclick = handleSend;
 /* -------------------------------------------------------------------------- */

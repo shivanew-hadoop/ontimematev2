@@ -190,6 +190,35 @@ function normalizeQ(q = "") {
     .replace(/\s+/g, " ")
     .trim();
 }
+function isDefinitionQuestion(q = "") {
+  const s = normalizeQ(q);
+
+  const definitionStarts = [
+    "what is",
+    "define",
+    "explain",
+    "describe",
+    "difference between",
+    "compare",
+    "why",
+    "advantages",
+    "disadvantages"
+  ];
+
+  const ownershipSignals = [
+    "how did you",
+    "what did you implement",
+    "your project",
+    "your experience",
+    "in your project"
+  ];
+
+  return (
+    definitionStarts.some(p => s.startsWith(p)) &&
+    !ownershipSignals.some(p => s.includes(p))
+  );
+}
+
 
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
@@ -298,7 +327,7 @@ function isCodeQuestion(q = "") {
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
 
   // Explanation override ONLY when it's purely theory (no "example/code/task")
-  // const looksLikeExplain = isExplanationQuestion(s);
+  const looksLikeExplain = isExplanationQuestion(s);
 
   let score = 0;
 
@@ -312,7 +341,7 @@ function isCodeQuestion(q = "") {
   if (mentionsLanguage) score += 1; // LOW weight on purpose
 
   // If it's strongly explanation AND score is weak, keep it explanation
-  // if (looksLikeExplain && score < 3) return false;
+  if (looksLikeExplain && score < 3) return false;
 
   // Threshold: >=3 => code-intent
   return score >= 3;
@@ -709,37 +738,60 @@ export default async function handler(req, res) {
       res.write(" ");
 
       const messages = [];
+const DEFINITION_SYSTEM = `
+You are answering a technical interview definition question.
 
-      const baseSystem = `
-You are a senior industry professional answering a LIVE technical interview.
+ABSOLUTE CONSTRAINTS:
+- Do NOT give step-by-step implementation.
+- Do NOT list configs, retries, thresholds, or metrics.
+- Do NOT sound academic or textbook-like.
 
-YOU MUST OUTPUT IN THIS EXACT FORMAT — NO VARIATION ALLOWED.
+CONTENT RULES:
+- Start with a clear definition in bold.
+- Keep the definition generic and correct.
+- Then connect it to real projects, clients, or systems from the resume context.
+- Mention tools or platforms ONLY to show exposure, not execution.
 
--------------------------
-Quick Answer (Interview Style)
-- Bullet points only
-- Past tense only
-- Real actions only
-- No definitions
-- No background
-- No company storytelling
+STYLE:
+- Senior, professional, human language.
+- First-person allowed ONLY for experience framing.
 
--------------------------
-Real-Time Professional Implementation
-- One or two short paragraphs
-- What I built, fixed, shipped
-- Real constraints and outcomes
-- No explanations of tools
-- No theory
-
-STRICT RULES:
-- The response MUST start with: "Quick Answer (Interview Style)"
-- If you explain what something is, you FAILED
-- If you sound like documentation, you FAILED
-- If you narrate history, you FAILED
+FORMAT:
+- First 1–2 lines: **bold definition**
+- Follow-up: short real-world explanation
 `.trim();
 
+      const baseSystem = `
+You are answering a LIVE technical interview question.
 
+You MUST respond like a senior engineer explaining real production work.
+
+MANDATORY:
+- The question will already be shown — do NOT repeat it.
+- Answer in first person, past tense.
+- Focus on execution, not theory.
+
+STYLE RULES:
+- Start answering immediately.
+- No role or company narration.
+- No teaching or documentation tone.
+- Dense with real implementation keywords.
+
+CONTENT RULES:
+- Do NOT start with "I implemented" unless the question explicitly asked for your implementation/experience.
+- If the question is conceptual, answer the process/decision points without forcing personal ownership.
+- If the question asked "how did you" / "in your project", describe concrete actions you took in production.
+- Mention tools, configs, retries, thresholds, pipelines only when they materially answer the question.
+- Include outcomes only if directly relevant.
+
+
+HIGHLIGHTING:
+- Bold ONLY tools, frameworks, configs, or metrics.
+
+FORMATTING:
+- Short paragraphs preferred.
+- Bullets only if they improve clarity.
+`.trim();
 
       const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
@@ -757,72 +809,54 @@ STRICT RULES:
 - Use fenced code blocks
 `.trim();
 
-      const codeMode = isCodeQuestion(String(prompt || ""));
+      const p = String(prompt || "");
+const codeMode = isCodeQuestion(p);
+const definitionMode = isDefinitionQuestion(p);
 
-      messages.push({
-        role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-      });
+messages.push({
+  role: "system",
+  content: codeMode
+    ? CODE_FIRST_SYSTEM
+    : definitionMode
+    ? DEFINITION_SYSTEM
+    : baseSystem
+});
+
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
 
-      // if (resumeText?.trim()) {
-      //   messages.push({
-      //     role: "system",
-      //     content:
-      //       "Use this resume context when answering. Do not invent details.\n\n" +
-      //       resumeText.trim().slice(0, 12000)
-      //   });
-      // }
+      if (resumeText?.trim()) {
+        messages.push({
+          role: "system",
+          content:
+            "Use this resume context when answering. Do not invent details.\n\n" +
+            resumeText.trim().slice(0, 12000)
+        });
+      }
 
       for (const m of safeHistory(history)) messages.push(m);
 
       // Keep prompt as-is (no extra prefix that might alter meaning)
-      messages.push({
-  role: "user",
-  content: `
-Answer this exactly like a senior engineer in a real interview.
-
-Question:
-${String(prompt).slice(0, 7000)}
-`.trim()
-});
-
+      messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
 
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0,
+        temperature: 0.2,
         max_tokens: 900,
         messages
       });
 
-      let output = "";
+      try {
+        for await (const chunk of stream) {
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
+        }
+      } catch {}
 
-try {
-  for await (const chunk of stream) {
-    const t = chunk?.choices?.[0]?.delta?.content || "";
-    if (t) {
-      output += t;
-      res.write(t);
-    }
-  }
-} catch {}
-
-// HARD FAIL if structure missing
-if (!codeMode && !output.startsWith("Quick Answer (Interview Style)")) {
-  res.write("\n\n[RESPONSE REJECTED: NOT INTERVIEW-STYLE]");
-}
-
-if (!codeMode) {
-  res.write("\n\n");
-}
-
-return res.end();
-
-
+      return res.end();
     }
 
     /* ------------------------------------------------------- */
