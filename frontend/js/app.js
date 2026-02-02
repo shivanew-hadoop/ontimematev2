@@ -40,10 +40,34 @@ function fixSpacingOutsideCodeBlocks(text) {
   return parts.join("```");
 }
 
+// Improves readability in the UI by adding a blank line before list items
+// (outside code blocks), so bullets/numbered points don't look glued together.
+function addBlankLineBeforeListItems(text) {
+  if (!text) return "";
+  const parts = String(text).split("```");
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) continue;
+    const lines = parts[i].replace(/\r\n/g, "\n").split("\n");
+    const out = [];
+    for (let j = 0; j < lines.length; j++) {
+      const line = lines[j];
+      const isList = /^\s*(?:[-*+]\s+|\d+\.\s+)/.test(line);
+      if (isList && out.length > 0) {
+        const prev = out[out.length - 1];
+        if (String(prev || "").trim() !== "") out.push("");
+      }
+      out.push(line);
+    }
+    parts[i] = out.join("\n");
+  }
+  return parts.join("```");
+}
+
 function renderMarkdownLite(md) {
   if (!md) return "";
   let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
   safe = fixSpacingOutsideCodeBlocks(safe);
+  safe = addBlankLineBeforeListItems(safe);
   safe = escapeHtml(safe);
   safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
   safe = safe
@@ -81,11 +105,14 @@ function renderMarkdownSafe(mdText) {
   if (!window.marked || !window.DOMPurify) {
     return renderMarkdownLite(mdText);
   }
-  const html = marked.parse(mdText || "");
+  const cleaned = addBlankLineBeforeListItems(fixSpacingOutsideCodeBlocks(mdText || ""));
+  const html = marked.parse(cleaned);
   return DOMPurify.sanitize(html);
 }
 
 const COMMIT_WORDS = 6;
+const HISTORY_MAX_FOR_REQUEST = 8;      // was 12
+const RESUME_SEND_MAX_CHARS = 6000;     // send only last ~6k chars per request
 const USE_BROWSER_SR = true;
 
 function enhanceCodeBlocks(containerEl) {
@@ -2031,7 +2058,7 @@ function pushHistory(role, content) {
 }
 
 function compactHistoryForRequest() {
-  return chatHistory.slice(-12).map(m => ({
+  return chatHistory.slice(-HISTORY_MAX_FOR_REQUEST).map(m => ({
     role: m.role,
     content: String(m.content || "").slice(0, 1600)
   }));
@@ -2054,7 +2081,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
     prompt,
     history: compactHistoryForRequest(),
     instructions: getEffectiveInstructions(),
-    resumeText: resumeTextMem || ""
+    // Speed: keep resume payload small; backend still gets enough context.
+    resumeText: (resumeTextMem || "").slice(-RESUME_SEND_MAX_CHARS)
   };
 
   let raw = "";
