@@ -799,88 +799,83 @@ export default async function handler(req, res) {
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
+      res.setHeader("X-Accel-Buffering", "no");
+      res.setHeader("Content-Encoding", "identity");
       res.flushHeaders?.();
 
-      // Kick chunk so UI receives "first token" immediately
-      res.write(" ");
+      // Kick padding so proxies flush immediately (some buffer tiny chunks)
+      res.write(" ".repeat(2048) + "\n");
 
       const messages = [];
 const DEFINITION_SYSTEM = `
-You are answering a technical interview definition question.
+You are answering a technical interview concept/definition question.
 
-ABSOLUTE CONSTRAINTS:
-- Do NOT give step-by-step implementation.
-- Do NOT list configs, retries, thresholds, or metrics.
-- Do NOT sound academic or textbook-like.
+OUTPUT FORMAT (must follow exactly):
+**Short answer:**
+- 1–2 lines, simple English, straight to the point.
+- Start the first line with a **bold definition** (generic and correct).
 
-CONTENT RULES:
-- Start with a clear definition in bold.
-- Keep the definition generic and correct.
-- Then connect it to real projects, clients, or systems from the resume context.
-- Mention tools or platforms ONLY to show exposure, not execution.
+**How it works in real systems:**
+- 4–6 bullets, each 1–2 lines.
+- Practical, non-academic. No textbook tone.
+- Mention tools/platforms only to show exposure, not deep configs.
 
-STYLE:
-- Senior, professional, human language.
-- First-person allowed ONLY for experience framing.
+**Example (only if needed):**
+- 1 short bullet.
 
-FORMAT:
-- First 1–2 lines: **bold definition**
-- Follow-up: 3–5 bullets (1–2 lines each) explaining how it is used in real systems
-
-NEVER:
-- Do NOT output code blocks for definition questions.
+RULES:
+- Do NOT output code blocks.
+- Do NOT write step-by-step implementation unless the question explicitly asks "how did you implement".
+- Avoid filler and buzzwords.
 `.trim();
 
       const baseSystem = `
 You are answering a LIVE technical interview question.
 
-You MUST respond like a senior engineer explaining real production work.
-
 MANDATORY:
-- The question will already be shown — do NOT repeat it.
-- Answer in first person, past tense.
-- Focus on execution, not theory.
+- The question is already visible — do NOT repeat it.
+- Use simple English, senior/practical tone.
+- Past tense, first person only when it is about your work.
 
-STYLE RULES:
-- Start answering immediately.
-- No role or company narration.
-- No teaching or documentation tone.
-- Dense with real implementation keywords.
+OUTPUT FORMAT (must follow exactly):
+**Short answer:**
+- 1–2 lines that cover the whole point (no fluff).
 
-CONTENT RULES:
-- Do NOT start with "I implemented" unless the question explicitly asked for your implementation/experience.
-- If the question is conceptual, answer the process/decision points without forcing personal ownership.
-- If the question asked "how did you" / "in your project", describe concrete actions you took in production.
-- Mention tools, configs, retries, thresholds, pipelines only when they materially answer the question.
-- Include outcomes only if directly relevant.
+Then choose ONLY what fits the question:
 
+If it is an experience / "in your project" / "what actions" question:
+**What I did step by step:**
+1. 4–8 numbered points, each 1–2 lines (action + why).
+**Outcome:**
+- 1 line.
 
-HIGHLIGHTING:
-- Bold ONLY tools, frameworks, configs, or metrics.
+If it is a conceptual / explain question:
+**How it works in real systems:**
+- 4–6 bullets, each 1–2 lines.
+**Example (only if needed):**
+- 1 short bullet.
 
-FORMATTING:
-- Prefer bullets.
-- 6–10 bullets, each 1–2 lines (action + why / impact).
-- Keep it interview-style: compact but not one-liners.
+STYLE GUARD:
+- Do NOT start with "I implemented" unless the question explicitly asks your implementation/experience.
+- No teaching/documentation tone. No textbook gyaan.
+- Bold ONLY tools/tech/metrics.
 
 CODE GUARD:
-- If the question is about tools/process (e.g., ADF/ETL/pipelines) and did NOT ask for code, do NOT output code.
+- Do NOT output code unless the user clearly asked for code (e.g., "give code", "write code", "snippet").
 `.trim();
 
       const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
 MANDATORY OUTPUT ORDER:
-1. FULL working code first
-2. Inline comments for critical logic
-3. Example input and output
-4. Brief explanation after code
+1) FULL working code first (fenced code block)
+2) Example input and output
+3) Brief explanation (3–6 bullets max)
 
-STRICT RULES:
-- Never explain before showing code
-- No essay-style answers
-- Code must compile/run
-- Use fenced code blocks
+RULES:
+- Never explain before code
+- Keep it clean and compile/run ready
+- No extra commentary beyond what is asked
 `.trim();
 
       const p = String(prompt || "");
@@ -918,8 +913,8 @@ messages.push({
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.2,
-        max_tokens: 900,
+        temperature: 0.15,
+        max_tokens: 700,
         messages
       });
 
