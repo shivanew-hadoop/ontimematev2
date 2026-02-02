@@ -2370,15 +2370,21 @@ freezeTranscriptAfterSend();
 pinnedTop = true;
 updateTranscript();
 
-  // Do not echo the raw question in the answer box (prevents "question as-is" effect)
-  responseBox.innerHTML = renderMarkdownLite(`_Generating answer…_`);
+  const draftQ = question;
+  responseBox.innerHTML = renderMarkdownLite(
+    `${draftQ}\n\n_Generating answer…_`
+  );
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
-  // Send ONLY the cleaned question text.
-  // - Backend intent detection (code/definition/normal) relies on the question starting with "what is/explain/..." etc.
-  // - Avoid wrapping with extra meta-prompt that forces "Q:" or "I implemented" for every answer.
-  const cleanQuestion = question.replace(/^Q:\s*/i, "").trim();
-  const promptToSend = cleanQuestion || question;
+  const mode = modeSelect?.value || "interview";
+
+  // LATENCY FIX:
+  // Send only the cleaned question to backend. Backend system prompts already enforce interview style.
+  // This reduces tokens dramatically and speeds up time-to-first-token.
+  const promptToSend =
+    mode === "interview"
+      ? question.replace(/^Q:\s*/i, "")
+      : question;
 
   await startChatStreaming(promptToSend, base);
 }
