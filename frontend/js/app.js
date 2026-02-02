@@ -85,9 +85,6 @@ function renderMarkdownSafe(mdText) {
   return DOMPurify.sanitize(html);
 }
 
-const COMMIT_WORDS = 6;
-const USE_BROWSER_SR = true;
-
 function enhanceCodeBlocks(containerEl) {
   if (!containerEl) return;
   const pres = containerEl.querySelectorAll("pre");
@@ -183,8 +180,6 @@ let blockMicUntil = 0;
 let micInterimEntry = null;
 let lastMicResultAt = 0;
 let micWatchdog = null;
-let lastQuickInterviewerAt = 0;
-
 
 // Mic fallback (MediaRecorder -> /transcribe)
 let micStream = null;
@@ -225,11 +220,6 @@ let timeline = [];
 let lastSpeechAt = 0;
 let sentCursor = 0;
 
-/* -------------------------------------------------------------------------- */
-/* PAUSE WATCHDOG — forces new line after silence                              */
-/* -------------------------------------------------------------------------- */
-
-
 // “pin to top”
 let pinnedTop = true;
 
@@ -253,16 +243,6 @@ let transcriptEpoch = 0;
 /* -------------------------------------------------------------------------- */
 const PAUSE_NEWLINE_MS = 3000;
 
-setInterval(() => {
-  if (!isRunning) return;
-
-  const now = Date.now();
-  if (now - lastSpeechAt >= PAUSE_NEWLINE_MS) {
-    // Force next speech into a new block
-    lastSpeechAt = 0;
-  }
-}, 400);
-
 const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
 const MIC_MAX_CONCURRENT = 2;
@@ -282,13 +262,14 @@ const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT =
-  "Transcribe ONLY English words, regardless of accent (Indian, American, British). " +
-  "STRICTLY OMIT any non-English language words (Telugu, Hindi, Urdu, spanish,Arabic, etc.). " +
-  "If a word is not valid English, drop it completely. " +
-  "Do NOT translate. Do NOT infer meaning. " +
-  "Do NOT add filler words. Do NOT repeat phrases. " +
-  "Return plain English text only. " +
-  "If uncertain, omit the word.";
+  "Transcribe only English as spoken with an Indian English accent. " +
+  "STRICTLY ignore and OMIT any Urdu, Arabic, Hindi, or other non-English words. " +
+  "If a word is not English, drop it completely. " +
+  "Use Indian English pronunciation and spelling. " +
+  "Do NOT Americanize words. " +
+  "Do NOT translate. " +
+  "Do NOT add new words. Do NOT repeat phrases. " +
+  "Keep punctuation minimal. If uncertain, omit.";
 
 
 /* -------------------------------------------------------------------------- */
@@ -510,24 +491,6 @@ function getFreshInterviewerBlocksText() {
     .trim();
 }
 
-function getQuickInterviewerSnapshot() {
-  for (let i = timeline.length - 1; i >= sentCursor; i--) {
-    const b = timeline[i];
-    if (
-      b?.role === "interviewer" &&
-      b.text &&
-      b.text.length > 8
-    ) {
-      return { text: normalize(b.text), at: b.t };
-    }
-  }
-  return null;
-}
-
-
-
-
-
 function updateTranscript() {
   if (!liveTranscript) return;
   liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
@@ -626,7 +589,7 @@ function addFinalSpeech(txt, role) {
     }
   }
 
- lastSpeechAt = now;
+  lastSpeechAt = now;
   updateTranscript();
 }
 
@@ -674,134 +637,18 @@ function addTypewriterSpeech(txt, msPerWord = SYS_TYPE_MS_PER_WORD, role = "inte
 /* QUESTION HELPERS                                                             */
 /* -------------------------------------------------------------------------- */
 let recentTopics = [];
-function isExperienceHeavyTopic(text = "", resumeText = "") {
-  const q = text.toLowerCase();
-  const cv = (resumeText || "").toLowerCase();
-
-  if (!q || !cv) return false;
-
-  // 1️⃣ Direct keyword overlap with resume
-  const qWords = q.split(/\s+/).filter(w => w.length > 3);
-
-  for (const w of qWords) {
-    if (cv.includes(w)) return true;
-  }
-
-  // 2️⃣ Domain-level match (strong signal)
-  for (const keywords of Object.values(DOMAIN_KEYWORDS)) {
-    const domainHit =
-      keywords.some(k => q.includes(k)) &&
-      keywords.some(k => cv.includes(k));
-
-    if (domainHit) return true;
-  }
-
-  return false;
-}
-
 
 function updateTopicMemory(text) {
   const low = text.toLowerCase();
   const topics = [];
 
-  // Data / Analytics
-  if (low.match(/sql|tableau|powerbi|dataset|analytics|kpi|warehouse|etl|pipeline|spark|hive/)) {
-    topics.push("data engineering");
-  }
+  if (low.match(/sql|tableau|powerbi|dataset|analytics|data|kpi|warehouse/)) topics.push("data");
+  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) topics.push("code");
+  if (low.match(/selenium|playwright|bdd|test|automation|flaky/)) topics.push("testing");
+  if (low.match(/role|responsibility|project|experience|team|stakeholder/)) topics.push("experience");
 
-  // Programming
-  if (low.match(/java|python|code|string|reverse|algorithm|loop|array|function|character/)) {
-    topics.push("programming");
-  }
-
-  // Testing (STRICT)
-  if (low.match(/selenium|playwright|bdd|cucumber|testng|junit|automation|flaky/)) {
-    topics.push("testing");
-  }
-
-  // 🚫 REMOVED: experience as a topic
-
-  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-2);
-
-  // Strong subject anchoring (unchanged)
-  if (low.match(/bdd|cucumber|annotation|selenium|testng|junit|rest assured/)) {
-    lastStrongSubject = normalize(text);
-  }
+  recentTopics = [...new Set([...recentTopics, ...topics])].slice(-3);
 }
-
-
-// ---------------------------------------------------------
-// DOMAIN REGISTRY — extend keywords, not logic
-// ---------------------------------------------------------
-const DOMAIN_KEYWORDS = {
-  "data engineering": [
-    "etl", "pipeline", "spark", "hive", "airflow", "kafka",
-    "snowflake", "redshift", "bigquery", "databricks",
-    "data warehouse", "lakehouse", "ingestion", "batch", "streaming"
-  ],
-
-  "cloud infrastructure": [
-    "aws", "azure", "gcp", "route 53", "dns", "vpc", "subnet",
-    "ec2", "s3", "iam", "load balancer", "cloudwatch"
-  ],
-
-  "devops": [
-    "devops", "ci", "cd", "jenkins", "github actions",
-    "gitlab", "docker", "kubernetes", "helm", "terraform",
-    "ansible", "deployment", "build pipeline"
-  ],
-
-  "testing": [
-    "selenium", "cucumber", "bdd", "testng", "junit",
-    "playwright", "automation", "flaky", "test framework"
-  ],
-
-  "machine learning": [
-    "machine learning", "ml", "model", "training",
-    "feature engineering", "prediction", "regression",
-    "classification", "evaluation", "hyperparameter"
-  ],
-
-  "genai": [
-    "genai", "llm", "prompt", "prompt engineering",
-    "embedding", "vector", "rag", "openai",
-    "whisper", "chatgpt", "fine-tuning", "inference"
-  ],
-
-  "sap": [
-    "sap", "abap", "hana", "bw", "fico",
-    "mm", "sd", "pp", "sap data"
-  ]
-};
-
-
-
-// ---------------------------------------------------------
-// CONTEXT DERIVATION — deterministic, no forced context
-// ---------------------------------------------------------
-function deriveContextFromQuestion(q = "") {
-  if (!q) return null;
-
-  const s = q.toLowerCase();
-
-  // 🚫 Never derive context for CV metadata or identity questions
-  if (typeof isCvMetadataQuestion === "function" && isCvMetadataQuestion(s)) {
-    return null;
-  }
-
-  // Find first strong domain match
-  for (const [domain, keywords] of Object.entries(DOMAIN_KEYWORDS)) {
-    for (const k of keywords) {
-      if (s.includes(k)) {
-        return domain;
-      }
-    }
-  }
-
-  // 🚨 No confident match → no context
-  return null;
-}
-
 
 function normalizeSpokenText(s) {
   const map = {
@@ -878,81 +725,34 @@ function isNewTopic(text) {
   return false;
 }
 
-function condenseInterviewIntent(raw = "", resumeText = "") {
-  const text = raw.toLowerCase();
-
-  // stop words
-  const STOP = new Set([
-    "can","you","please","explain","tell","me","about","how","what","why",
-    "is","are","was","were","do","did","does","i","we","they","in","on",
-    "with","for","from","this","that","it","your","my","our","project"
-  ]);
-
-  // tokenize once
-  const words = text
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP.has(w));
-
-  if (!words.length) {
-    return { topic: "your recent project", type: "experience" };
-  }
-
-  // resume-aware boost
-  const resume = resumeText.toLowerCase();
-  const boosted = words.filter(w => resume.includes(w));
-
-  const topicWords = (boosted.length ? boosted : words).slice(0, 4);
-  const topic = topicWords.join(" ");
-
-  // intent detection (INLINE, no extra helpers)
-  const isDefinition =
-    raw.trim().toLowerCase().startsWith("what is") ||
-    raw.trim().toLowerCase().startsWith("explain");
-
-  const isExperience =
-    raw.toLowerCase().includes("project") ||
-    raw.toLowerCase().includes("experience") ||
-    raw.toLowerCase().includes("role");
-
-  return {
-    topic,
-    type: isDefinition ? "definition" : isExperience ? "experience" : "general"
-  };
-}
-
 function buildDraftQuestion(spoken) {
   // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
   let s = normalizeSpokenText(normalize(spoken))
-    .replace(/[^\x00-\x7F]/g, " ")
+    .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
     .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-
-  if (!s) {
-    return "Q: Can you explain your current project end-to-end?";
-  }
-
-  const low = s.toLowerCase();
-
-  // Reset intent on topic change
-  if (isNewTopic(s)) {
+     if (isNewTopic(s)) {
     activeIntent = null;
     activeTech = null;
   }
 
-  // 2️⃣ Detect language (lightweight, keep as-is)
-  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd|cucumber)/i.exec(low);
+  if (!s) return "Q: Can you explain your current project end-to-end?";
+
+  const low = s.toLowerCase();
+
+  // 2️⃣ Detect language
+  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd)/i.exec(low);
   if (techMatch) activeTech = techMatch[1].toLowerCase();
 
-  // 3️⃣ Coding signals (unchanged)
+  // 3️⃣ Coding signals
   const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge"];
   const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","api"];
 
   const hasVerb = CODE_VERBS.some(v => low.includes(v));
   const hasNoun = CODE_NOUNS.some(n => low.includes(n));
 
-  // 4️⃣ Continue previous coding flow
+  // 4️⃣ If user just said "java" or "python"
   if (!hasVerb && activeIntent === "code" && activeTech) {
     return `Q: Write ${activeTech} code for the previous problem and explain the logic.`;
   }
@@ -960,62 +760,33 @@ function buildDraftQuestion(spoken) {
   // 5️⃣ Lock coding intent
   if (hasVerb && hasNoun) {
     activeIntent = "code";
-    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic.`;
+    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic `;
   }
 
-  // 6️⃣ Debug intent
+  // 6️⃣ Debug
   if (/error|issue|not working|failed|bug|timeout/.test(low)) {
     activeIntent = "debug";
-    return `Q: How would you debug this issue in production, and what steps did you take?`;
+    return `Q: How would you debug ${s} and what steps did you take in production?`;
   }
 
-  // 7️⃣ Design intent
+  // 7️⃣ Design
   if (/architecture|design|flow|system|microservice|pattern/.test(low)) {
     activeIntent = "design";
-    return `Q: Can you explain the architecture you designed and why this approach was chosen?`;
+    return `Q: Explain the ${s} you designed and why this architecture was chosen.`;
   }
 
-  // 🔥 8️⃣ EXPERIENCE / THEORY — CONDENSE HERE (KEY FIX)
-  const STOP = new Set([
-    "can","you","please","explain","tell","me","about","how","what","why",
-    "is","are","was","were","do","did","does","i","we","they","in","on",
-    "with","for","from","this","that","it","your","my","our","project"
-  ]);
-
-  const words = low
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP.has(w));
-
-  const resume = (resumeTextMem || "").toLowerCase();
-  const boosted = words.filter(w => resume.includes(w));
-
-  const topicWords = (boosted.length ? boosted : words).slice(0, 4);
-  const topic = topicWords.join(" ") || "your recent project";
-
-  // 9️⃣ Theory intent
+  // 8️⃣ Theory
   if (/what is|explain|define|theory/.test(low)) {
     activeIntent = "theory";
-    return `Q: Can you explain ${topic} with a real-world example?`;
+    return `Q: Can you explain ${s} with a real-world example?`;
   }
 
-  // 🔟 Experience intent (FIXED — NO MORE ${s})
-  if (isExperienceHeavyTopic(s, resumeTextMem)) {
-    return `Q: Can you walk me through ${topic}, your role, and the real implementation challenges you handled?`;
+  // 9️⃣ Fallback using previous intent
+  if (activeIntent === "code") {
+    return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
   }
 
-  // 1️⃣1️⃣ Safe fallback
-  return `Q: Can you explain ${topic}?`;
-}
-
-
-const topic = condenseToTopic(s, resumeTextMem);
-
-return topic
-  ? `Q: Can you explain ${topic} with a real-world example?`
-  : `Q: Can you explain this with a real-world example?`;
-
-
+  return `Q: Can you explain ${s} with a real project example?`;
 }
 
 
@@ -1036,49 +807,45 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
   return `
-You are answering a real technical interview question spoken by an interviewer.
+You are answering a real interview question spoken by an interviewer.
 
-MANDATORY:
-- The question MUST appear at the top exactly once.
-- Answer must sound like real production work already done.
-- No role intro, no company narration, no generic theory.
+First, restate the interviewer’s question clearly in the format:
+Q: <question>
 
-FORMAT (STRICT):
+Then answer it naturally, as a senior professional would explain verbally.
 
-Q: ${base}
+ANSWERING STYLE (MANDATORY):
+- Sound confident, calm, and experienced.
+- Start with a direct explanation before going deeper.
+- Explain how and why, not textbook definitions.
+- Speak like a human in an interview, not like documentation.
 
-ANSWERING STYLE:
-- Start answering immediately.
-- First person, past tense.
-- Senior, execution-focused tone.
-- Use dense, real implementation keywords naturally.
-- No essay or teaching tone.
+DEPTH RULES:
+- Provide enough detail to demonstrate real understanding.
+- If a tool, framework, or concept is mentioned, briefly explain how you used it.
+- If leadership or decision-making is implied, explain impact and outcomes.
 
-CONTENT REQUIREMENTS:
-- Start directly with implementation details.
-- Explain exactly what you implemented.
-- Mention tools, configs, selectors, retries, thresholds, pipelines.
-- Call out failures, edge cases, or instability handled.
-- Include measurable or observable outcomes when applicable.
-
-AVOID COMPLETELY:
-- “In my current role…”
-- “I had the opportunity…”
-- Background explanations or definitions
-- Generic statements without implementation depth
+EXAMPLES:
+- Naturally weave real project experience into the explanation.
+- Do NOT label sections like "Quick Answer" or "Project Example".
+- Do NOT use numbered sections or templates.
 
 FORMATTING:
+- Use Markdown lightly.
 - Short paragraphs preferred.
-- Bullets only if they genuinely improve clarity.
-- Bold ONLY real tools, frameworks, configs, or metrics.
+- Bullets ONLY if they genuinely improve clarity.
+- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
 
-CONTEXT BIAS:
-- Prefer domain relevance: ${domainBias || "software engineering"}.
-- Avoid repeating these previously asked questions:
+CONTEXT:
+- Stay grounded in the interviewer’s question.
+- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
+- Avoid repeating previously asked questions:
 ${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
+
+INTERVIEWER QUESTION:
+${base}
 `.trim();
 }
-
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
@@ -1315,7 +1082,7 @@ if (words.length >= COMMIT_WORDS) {
     s.itemEntry[itemId].role = role;
   }
 
-  
+  lastSpeechAt = now;
   updateTranscript();
 }
 
@@ -1343,18 +1110,19 @@ addFinalSpeech(final, role);
 
 }
 
-// UPDATED — Accent-agnostic English only (Indian / US / UK allowed)
-// Hard language control is handled post-ASR, not here.
-
 function sendAsrConfig(ws) {
   const cfgA = {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
     input_audio_transcription: {
-      model: REALTIME_ASR_MODEL,
-      language: "en", // ✅ allow all English accents
-      prompt: TRANSCRIBE_PROMPT
-    },
+  model: REALTIME_ASR_MODEL,
+  language: "en-IN",
+  prompt: TRANSCRIBE_PROMPT + 
+    " Speaker has an Indian English accent. " +
+    "Prefer Indian pronunciation and spelling. " +
+    "Do not normalize to US English."
+},
+
     turn_detection: {
       type: "server_vad",
       threshold: 0.5,
@@ -1367,9 +1135,6 @@ function sendAsrConfig(ws) {
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
 
-
-// UPDATED — Fallback session config (same behavior, no accent lock)
-
 function sendAsrConfigFallbackSessionUpdate(ws) {
   const cfgB = {
     type: "session.update",
@@ -1379,10 +1144,13 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
-            model: REALTIME_ASR_MODEL,
-            language: "en", // ✅ allow all English accents
-            prompt: TRANSCRIBE_PROMPT
-          },
+  model: REALTIME_ASR_MODEL,
+  language: "en-IN",
+  prompt:
+    TRANSCRIBE_PROMPT +
+    " Speaker has an Indian English accent. " +
+    "Use Indian pronunciation and spelling."
+},
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
@@ -1397,7 +1165,6 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
-
 
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
@@ -2026,13 +1793,8 @@ async function transcribeSysBlob(blob, myEpoch) {
   const text = normalize(cleaned);
 
   // FIX: compute trimmed BEFORE overwriting lastSysPrinted
- const lastFinal = lastCommittedByRole.interviewer?.raw || "";
-if (lastFinal && canonKey(text).includes(canonKey(lastFinal))) {
-  return;
-}
-
-const trimmed = trimOverlap(lastSysPrinted, text);
-if (!trimmed) return;
+  const trimmed = trimOverlap(lastSysPrinted, text);
+  if (!trimmed) return;
 
   // Maintain a growing reference so overlap trimming stays stable
   lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
@@ -2351,97 +2113,6 @@ function hardClearTranscript() {
   updateTranscript();
 }
 
-function isCvMetadataQuestion(text = "") {
-  const s = text.toLowerCase();
-  return (
-    s.includes("your name") ||
-    s.includes("name") ||
-    s.includes("email") ||
-    s.includes("phone") ||
-    s.includes("mobile") ||
-    s.includes("location") ||
-    s.includes("company name") ||
-    s.includes("current company")
-  );
-}
-
-
-function buildContextAwareQuestion(baseQuestion) {
-  // CV metadata must never get context
-  if (isCvMetadataQuestion(baseQuestion)) {
-    return baseQuestion;
-  }
-
-  const derived = deriveContextFromQuestion(baseQuestion);
-  if (!derived) {
-    return baseQuestion;
-  }
-
-  return `${baseQuestion} (in the context of ${derived})`;
-}
-
-
-function freezeTranscriptAfterSend() {
-  // Move cursor to absolute end — nothing before this can be reused
-  sentCursor = timeline.length;
-  lastSpeechAt = 0;
-
-  // Kill any interim leftovers
-  removeInterimIfAny();
-
-  // Explicitly clear manual input
-  if (manualQuestion) manualQuestion.value = "";
-}
-
-function condenseToTopic(raw = "", resumeText = "") {
-  const text = String(raw).toLowerCase();
-
-  // stop words (spoken fluff)
-  const STOP = new Set([
-    "can","you","please","explain","tell","me","about","how","what","why","when",
-    "where","did","do","does","is","are","was","were","we","they","i","in","on",
-    "with","for","from","this","that","it","as","at","by","into","over","your",
-    "my","their","our","current","project","experience","working","used","using"
-  ]);
-
-  // tokenize
-  let words = text
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(w => w.length > 2 && !STOP.has(w));
-
-  if (!words.length) return "";
-
-  // preserve known multi-word technical phrases (OPTIONAL boost)
-  const PHRASES = [
-    "page object model",
-    "ci cd",
-    "bdd cucumber",
-    "metadata driven",
-    "data pipeline",
-    "etl pipeline",
-    "machine learning",
-    "openai api",
-    "snowflake performance"
-  ];
-
-  const foundPhrases = PHRASES.filter(p => text.includes(p));
-  if (foundPhrases.length) {
-    return foundPhrases.slice(0, 2).join(" ");
-  }
-
-  // resume-aware boost (REAL signal)
-  const resume = (resumeText || "").toLowerCase();
-  const boosted = words.filter(w => resume.includes(w));
-
-  const finalWords = (boosted.length ? boosted : words)
-    .slice(0, 4);
-
-  return finalWords.join(" ");
-}
-
-
-
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
@@ -2449,32 +2120,11 @@ async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
-  const quickSnap = getQuickInterviewerSnapshot();
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-
-  let base = "";
-
-  if (manual) {
-  base = manual;
-} else if (freshInterviewer) {
-  // ✅ take EVERYTHING spoken after last Send
-  base = freshInterviewer;
-} else if (quickSnap) {
-  // fallback only if no block group exists
-  base = quickSnap.text;
-  lastQuickInterviewerAt = quickSnap.at;
-}
-
-
-if (!base) {
-  setStatus(sendStatus, "No new question detected", "text-orange-600");
-  return;
-}
-
-
+  const base = manual || freshInterviewer;
   updateTopicMemory(base);
-  let question = buildDraftQuestion(base);
-  question = buildContextAwareQuestion(question);
+  const question = buildDraftQuestion(base);
+  if (!base) return;
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -2484,14 +2134,12 @@ if (!base) {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-freezeTranscriptAfterSend();
-pinnedTop = true;
-updateTranscript();
+  sentCursor = timeline.length;
+  pinnedTop = true;
+  updateTranscript();
 
   const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(
-    `${draftQ}\n\n_Generating answer…_`
-  );
+  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -2502,7 +2150,6 @@ updateTranscript();
 
   await startChatStreaming(promptToSend, base);
 }
-
 
 sendBtn.onclick = handleSend;
 /* -------------------------------------------------------------------------- */
