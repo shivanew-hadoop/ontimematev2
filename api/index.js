@@ -150,7 +150,7 @@ async function getUserFromBearer(req) {
 function safeHistory(history) {
   if (!Array.isArray(history)) return [];
   const out = [];
-  for (const m of history.slice(-12)) {
+  for (const m of history.slice(-18)) {
     const role = m?.role;
     const content = typeof m?.content === "string" ? m.content : "";
     if ((role === "user" || role === "assistant") && content.trim()) {
@@ -190,35 +190,6 @@ function normalizeQ(q = "") {
     .replace(/\s+/g, " ")
     .trim();
 }
-function isDefinitionQuestion(q = "") {
-  const s = normalizeQ(q);
-
-  const definitionStarts = [
-    "what is",
-    "define",
-    "explain",
-    "describe",
-    "difference between",
-    "compare",
-    "why",
-    "advantages",
-    "disadvantages"
-  ];
-
-  const ownershipSignals = [
-    "how did you",
-    "what did you implement",
-    "your project",
-    "your experience",
-    "in your project"
-  ];
-
-  return (
-    definitionStarts.some(p => s.startsWith(p)) &&
-    !ownershipSignals.some(p => s.includes(p))
-  );
-}
-
 
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
@@ -251,23 +222,7 @@ function isExplanationQuestion(q = "") {
     "deadlock",
     "solid",
     "oops",
-    "normalization",
-
-    // Data engineering / ETL orchestration (tends to be interview explanation, not coding)
-    "etl",
-    "pipeline",
-    "orchestration",
-    "data factory",
-    "azure data factory",
-    "adf",
-    "linked service",
-    "dataset",
-    "integration runtime",
-    "copy activity",
-    "trigger",
-    "monitoring",
-    "retry",
-    "error handling"
+    "normalization"
   ];
 
   return (
@@ -276,71 +231,29 @@ function isExplanationQuestion(q = "") {
   );
 }
 
-// Narrative / experience questions (answer with actions + reasoning, NOT code)
-function isExperienceNarrativeQuestion(q = "") {
-  const s = normalizeQ(q);
-  if (!s) return false;
-
-  const patterns = [
-    "in your project",
-    "in your role",
-    "your experience",
-    "what did you do",
-    "what all did you",
-    "what all you",
-    "actions you performed",
-    "steps you performed",
-    "responsibilities",
-    "day to day",
-    "end to end",
-    "walk me through",
-    "tell me about"
-  ];
-
-  if (patterns.some(p => s.includes(p))) return true;
-  if (/\bwhat\s+(all\s+)?(actions|steps|tasks|responsibilities)\b/.test(s)) return true;
-  if (/\b(actions|steps)\b.*\b(performed|handled|did)\b/.test(s)) return true;
-
-  return false;
-}
-
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // Strong signals: the user pasted/asked code directly
-  if (looksLikeCodeText(q)) return true;
-
-  // If the user explicitly says "no code", keep it explanation.
-  const explicitNoCode = [
-    "no code",
-    "without code",
-    "explain only",
-    "high level",
-    "conceptually"
-  ];
-  if (explicitNoCode.some(x => s.includes(x))) return false;
-
-  // If user explicitly wants code, treat as code
-  // NOTE: "implementation" alone is too ambiguous in interviews, so we do NOT use it as a strong code trigger.
+  // If user explicitly wants code, always treat as code
   const explicitCode = [
     "code",
-    "write code",
-    "give code",
-    "show code",
-    "code snippet",
+    "program",
+    "snippet",
+    "implementation",
     "source code",
     "write a function",
     "write a program",
-    "coding problem",
-    "leetcode",
-    "solve in",
-    "program in"
+    "give me code",
+    "show me code"
   ];
 
-  // Task verbs: split generic build verbs vs algorithmic/code verbs
-  const genericBuildVerbs = ["implement", "create", "build", "develop", "design"];
-  const codingVerbs = [
+  // Task verbs that strongly indicate coding even without "code" word
+  const taskVerbs = [
     "write",
+    "implement",
+    "create",
+    "build",
+    "develop",
     "program",
     "solve",
     "print",
@@ -359,8 +272,6 @@ function isCodeQuestion(q = "") {
 
   // Classic coding-problem keywords
   const algoKeywords = [
-    "two sum",
-    "target",
     "vowel",
     "vowels",
     "palindrome",
@@ -386,29 +297,22 @@ function isCodeQuestion(q = "") {
   const wantsExample = /\b(example|sample|demo)\b/.test(s);
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
 
-  // Narrative experience questions should NOT become code just because they mention a language.
-  const narrative = isExperienceNarrativeQuestion(s);
-  const explicitCodeAsk = explicitCode.some(x => s.includes(x)) || codeSignals.some(x => s.includes(x));
-  if (narrative && !explicitCodeAsk) return false;
-
   // Explanation override ONLY when it's purely theory (no "example/code/task")
-  const looksLikeExplain = isExplanationQuestion(s);
+  // const looksLikeExplain = isExplanationQuestion(s);
 
   let score = 0;
 
-  if (explicitCode.some(x => s.includes(x))) score += 5;
+  if (explicitCode.some(x => s.includes(x))) score += 4;
   if (codeSignals.some(x => s.includes(x))) score += 4;
 
-  if (codingVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
-  if (genericBuildVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 1;
+  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
   if (algoKeywords.some(k => s.includes(k))) score += 2;
 
-  // "example" is weak — it should not flip an interview narrative question into code by itself
-  if (wantsExample) score += 0.5;
+  if (wantsExample) score += 1;
   if (mentionsLanguage) score += 1; // LOW weight on purpose
 
   // If it's strongly explanation AND score is weak, keep it explanation
-  if (looksLikeExplain && score < 3) return false;
+  // if (looksLikeExplain && score < 3) return false;
 
   // Threshold: >=3 => code-intent
   return score >= 3;
@@ -795,102 +699,59 @@ export default async function handler(req, res) {
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
       // STREAM-SAFE HEADERS
-      res.setHeader("Content-Type", "text/plain; charset=utf-8");
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
-      res.setHeader("X-Accel-Buffering", "no");
-      res.setHeader("Content-Encoding", "identity");
       res.flushHeaders?.();
 
-      // Kick padding so proxies flush immediately (some buffer tiny chunks)
-      res.write(" ".repeat(2048) + "\n");
+      // Kick chunk so UI receives "first token" immediately
+      res.write("\u200B"); // zero-width kick for streaming without visible leading space
 
       const messages = [];
-const DEFINITION_SYSTEM = `
-You are answering a technical interview concept/definition question.
 
-OUTPUT FORMAT (must follow exactly):
-**Short answer:**
-- 1–2 lines, simple English, straight to the point.
-- Start the first line with a **bold definition** (generic and correct).
+            const baseSystem = `
+You are answering live interview questions.
 
-**How it works in real systems:**
-- 4–6 bullets, each 1–2 lines.
-- Practical, non-academic. No textbook tone.
-- Mention tools/platforms only to show exposure, not deep configs.
+OUTPUT (match ChatGPT-style formatting):
+- Start with 1–2 sharp lines that directly answer.
+- Then add brief details (max 6 bullets OR 2 short paragraphs).
+- Add an example only if it helps.
+- Use clean GitHub-flavored Markdown with blank lines.
+- Do NOT repeat the question. Do NOT write "Q:" or "Question:".
 
-**Example (only if needed):**
-- 1 short bullet.
+CONTEXT / MEMORY:
+- Use the last ~8–9 Q&As from history ONLY when the current question is a follow-up.
+- If it's a new topic, ignore history and answer only the current prompt.
 
-RULES:
-- Do NOT output code blocks.
-- Do NOT write step-by-step implementation unless the question explicitly asks "how did you implement".
-- Avoid filler and buzzwords.
+TONE:
+- Senior, practical, outcome-focused.
+- Simple English. No fluff, no textbook explanations.
 `.trim();
 
-      const baseSystem = `
-You are answering a LIVE technical interview question.
-
-MANDATORY:
-- The question is already visible — do NOT repeat it.
-- Use simple English, senior/practical tone.
-- Past tense, first person only when it is about your work.
-
-OUTPUT FORMAT (must follow exactly):
-**Short answer:**
-- 1–2 lines that cover the whole point (no fluff).
-
-Then choose ONLY what fits the question:
-
-If it is an experience / "in your project" / "what actions" question:
-**What I did step by step:**
-1. 4–8 numbered points, each 1–2 lines (action + why).
-**Outcome:**
-- 1 line.
-
-If it is a conceptual / explain question:
-**How it works in real systems:**
-- 4–6 bullets, each 1–2 lines.
-**Example (only if needed):**
-- 1 short bullet.
-
-STYLE GUARD:
-- Do NOT start with "I implemented" unless the question explicitly asks your implementation/experience.
-- No teaching/documentation tone. No textbook gyaan.
-- Bold ONLY tools/tech/metrics.
-
-CODE GUARD:
-- Do NOT output code unless the user clearly asked for code (e.g., "give code", "write code", "snippet").
-`.trim();
-
-      const CODE_FIRST_SYSTEM = `
+const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
 MANDATORY OUTPUT ORDER:
-1) FULL working code first (fenced code block)
-2) Example input and output
-3) Brief explanation (3–6 bullets max)
+1. FULL working code first
+2. Inline comments for critical logic
+3. Example input and output
+4. Brief explanation after code
 
-RULES:
-- Never explain before code
-- Keep it clean and compile/run ready
-- No extra commentary beyond what is asked
+STRICT RULES:
+- Never explain before showing code
+- Do NOT repeat the question
+- No essay-style answers
+- Code must compile/run
+- Use fenced code blocks (GitHub Markdown)
 `.trim();
 
-      const p = String(prompt || "");
-const codeMode = isCodeQuestion(p);
-const definitionMode = isDefinitionQuestion(p);
+      const codeMode = isCodeQuestion(String(prompt || ""));
 
-messages.push({
-  role: "system",
-  content: codeMode
-    ? CODE_FIRST_SYSTEM
-    : definitionMode
-    ? DEFINITION_SYSTEM
-    : baseSystem
-});
-
+      messages.push({
+        role: "system",
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+      });
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
@@ -908,24 +769,34 @@ messages.push({
       for (const m of safeHistory(history)) messages.push(m);
 
       // Keep prompt as-is (no extra prefix that might alter meaning)
-      messages.push({ role: "user", content: String(prompt).slice(0, 8000) });
+      // Send only the raw prompt to reduce the chance of the model echoing it.
+messages.push({
+  role: "user",
+  content: String(prompt).slice(0, 7000).trim()
+});
 
-      const stream = await openai.chat.completions.create({
+const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.15,
-        max_tokens: 700,
+        temperature: 0.2,
+        max_tokens: 900,
         messages
       });
 
       try {
-        for await (const chunk of stream) {
-          const t = chunk?.choices?.[0]?.delta?.content || "";
-          if (t) res.write(t);
-        }
-      } catch {}
+  for await (const chunk of stream) {
+    const t = chunk?.choices?.[0]?.delta?.content || "";
+    if (t) res.write(t);
+  }
+} catch {}
 
-      return res.end();
+// 🔒 Anti-theory guardrail: stop model from drifting into explanations
+if (!codeMode) {
+  res.write("\n\n");
+}
+
+return res.end();
+
     }
 
     /* ------------------------------------------------------- */
