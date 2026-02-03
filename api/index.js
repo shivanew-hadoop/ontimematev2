@@ -7,6 +7,7 @@ import { requireAdmin } from "../_utils/adminAuth.js";
 // NEW — STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
+import crypto from "crypto";
 
 /**
  * CRITICAL:
@@ -23,6 +24,9 @@ export const config = {
 };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+// In-memory cache (per warm lambda) to avoid re-summarizing the same resume
+const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
 
 /* -------------------------------------------------------------------------- */
 /* HELPERS                                                                    */
@@ -52,6 +56,59 @@ function readJson(req) {
     });
     req.on("error", reject);
   });
+}
+
+
+function sha256(s = "") {
+  return crypto.createHash("sha256").update(String(s)).digest("hex");
+}
+
+// Resume summary: summarize once, reuse many times (cuts tokens + latency)
+async function getResumeSummary(resumeTextRaw = "") {
+  const resumeText = String(resumeTextRaw || "").trim();
+  if (!resumeText) return "";
+
+  // If already short, keep it (hard cap)
+  if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
+
+  const key = sha256(resumeText);
+  const cached = RESUME_SUMMARY_CACHE.get(key);
+  if (cached) return cached;
+
+  const summaryPrompt = `
+Create a SHORT interview-ready resume summary from the content.
+Rules:
+- Output ONLY in Markdown.
+- Sections MUST be exactly:
+  **Role Snapshot:** (1 line)
+  **Core Skills:** (8–12 comma-separated keywords)
+  **Key Projects:** (3 bullets; each starts with **project keyword**)
+  **Impact:** (3 bullets with numbers if present; never invent)
+- Keep under 1200 characters.
+- If a detail is missing, skip it. Do NOT assume.
+Resume:
+${resumeText.slice(0, 20000)}
+`.trim();
+
+  try {
+    const r = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0,
+      max_tokens: 260,
+      messages: [
+        { role: "system", content: "Extract facts only. Do not add assumptions." },
+        { role: "user", content: summaryPrompt }
+      ]
+    });
+
+    const summary = String(r?.choices?.[0]?.message?.content || "").trim();
+    const finalSummary = summary || resumeText.slice(0, 2500);
+    RESUME_SUMMARY_CACHE.set(key, finalSummary);
+    return finalSummary;
+  } catch {
+    // If summarization fails, fall back to a short slice.
+    return resumeText.slice(0, 2500);
+  }
 }
 
 /**
@@ -183,6 +240,70 @@ function looksLikeCodeText(s = "") {
 // -------------------------------------------------------
 // QUESTION INTENT DETECTION (FIXED / PRACTICAL)
 // -------------------------------------------------------
+
+
+
+// -------------------------------------------------------
+// FOLLOW-UP DETECTION + CONTEXT PACK (ADDED)
+// - Improves continuity across 8–9 Q&As without extra model calls
+// -------------------------------------------------------
+
+function isFollowUpPrompt(q = "") {
+  const s = normalizeQ(q);
+  if (!s) return false;
+
+  // short questions with references are usually follow-ups
+  const followTokens = [
+    "then",
+    "so",
+    "but",
+    "that",
+    "this",
+    "it",
+    "same",
+    "why",
+    "how come",
+    "as you said",
+    "you said",
+    "earlier",
+    "previous",
+    "follow up",
+    "based on that"
+  ];
+
+  const hasRef = followTokens.some(t => s.includes(t));
+  const isShort = s.length <= 160;
+
+  return hasRef || isShort;
+}
+
+function buildContextPack(hist = []) {
+  // Build up to last 9 Q&A pairs as a compact system note.
+  const pairs = [];
+  let lastUser = null;
+
+  for (const m of hist) {
+    if (m.role === "user") {
+      lastUser = m.content;
+    } else if (m.role === "assistant" && lastUser) {
+      pairs.push({ q: lastUser, a: m.content });
+      lastUser = null;
+    }
+  }
+
+  const tail = pairs.slice(-9);
+  if (!tail.length) return "";
+
+  const lines = ["CONTEXT (use only if the current question is a follow-up):"];
+  tail.forEach((p, i) => {
+    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 240);
+    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 260);
+    lines.push(`${i + 1}) Q: ${q}`);
+    lines.push(`   A: ${a}`);
+  });
+
+  return lines.join("\n");
+}
 
 function normalizeQ(q = "") {
   return String(q || "")
@@ -711,22 +832,39 @@ export default async function handler(req, res) {
       const messages = [];
 
             const baseSystem = `
-You are answering live interview questions.
+You are answering live interview questions for a senior engineer.
 
-OUTPUT (match ChatGPT-style formatting):
-- Start with 1–2 sharp lines that directly answer.
-- Then add brief details (max 6 bullets OR 2 short paragraphs).
-- Add an example only if it helps.
-- Use clean GitHub-flavored Markdown with blank lines.
+NON-NEGOTIABLE OUTPUT (exact order, exact headings):
+1) First line: 1–2 crisp lines that directly answer.
+2) **Key differences**
+   - 4–7 bullets.
+   - Each bullet MUST start with a **bold keyword** (the axis of difference).
+3) **Example keywords:** (one line)
+4) **Examples:** (next line; 1–3 short bullets or 2 short lines)
+5) **When I used what:** (only if it adds real value; 1–3 bullets)
+
+TRUTH / CORRECTION RULES:
+- If the question contains a wrong assumption, you MUST correct it.
+- Start with **Correction:** and then give the corrected answer.
+- Never “agree to be polite”. If it’s wrong, say it’s wrong and move on.
+
+SCOPE CONTROL:
+- Answer ONLY what is asked.
+- Use related items (Kafka/Mongo/etc.) ONLY inside **Examples** (not as the main answer).
+
+FORMATTING RULES:
+- Use GitHub-flavored Markdown.
+- Always keep the headings on their own lines with a blank line between sections.
+- Bold important keywords relevant to the question (not random words).
 - Do NOT repeat the question. Do NOT write "Q:" or "Question:".
 
-CONTEXT / MEMORY:
-- Use the last ~8–9 Q&As from history ONLY when the current question is a follow-up.
-- If it's a new topic, ignore history and answer only the current prompt.
+FOLLOW-UP / MEMORY:
+- If the user asks a follow-up, connect to prior Q&A from the provided context.
+- If it’s a new topic, ignore history and answer only the current prompt.
 
 TONE:
 - Senior, practical, outcome-focused.
-- Simple English. No fluff, no textbook explanations.
+- Simple English. No fluff, no textbook gyaan.
 `.trim();
 
 const CODE_FIRST_SYSTEM = `
@@ -766,7 +904,15 @@ STRICT RULES:
         });
       }
 
-      for (const m of safeHistory(history)) messages.push(m);
+      const hist = safeHistory(history);
+
+      // Add a compact context pack ONLY for follow-up questions (improves continuity)
+      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+        const ctx = buildContextPack(hist);
+        if (ctx) messages.push({ role: "system", content: ctx });
+      }
+
+      for (const m of hist) messages.push(m);
 
       // Keep prompt as-is (no extra prefix that might alter meaning)
       // Send only the raw prompt to reduce the chance of the model echoing it.
@@ -778,7 +924,7 @@ messages.push({
 const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.2,
+        temperature: 0.1,
         max_tokens: 900,
         messages
       });
