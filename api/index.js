@@ -831,32 +831,21 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-//             const baseSystem = `
-// You are answering live interview questions.
+            const baseSystem = `
+You are answering live interview questions.
 
-// STRICT RULES:
-// - Answer DIRECTLY. No introductions. No "Absolutely", "Certainly".
-// - 3–5 short sentences max.
-// - Speak like a senior engineer explaining to another engineer.
-// - Practical, experience-based. No theory dumps.
-// - Use tools/frameworks ONLY if relevant.
-// - Indian professional tone. Human, not polished AI.
+STRICT RULES:
+- Answer DIRECTLY. No introductions. No "Absolutely", "Certainly".
+- 3–5 short sentences max.
+- Speak like a senior engineer explaining to another engineer.
+- Practical, experience-based. No theory dumps.
+- Use tools/frameworks ONLY if relevant.
+- Indian professional tone. Human, not polished AI.
 
-// FORMAT:
-// - Paragraphs only (no headings unless asked).
-// - Each paragraph max 2 lines.
-// - Stop immediately once the answer is complete.
-// `.trim();
-
-const INTERVIEW_FAST_SYSTEM = `
-You are a senior engineer answering interview questions.
-
-NON-NEGOTIABLE:
-- Start directly with the answer.
-- Max 3–4 short sentences.
-- No storytelling. No polish.
-- Practical, experience-based.
-- Stop immediately when done.
+FORMAT:
+- Paragraphs only (no headings unless asked).
+- Each paragraph max 2 lines.
+- Stop immediately once the answer is complete.
 `.trim();
 
 
@@ -882,46 +871,36 @@ If any extra text is generated, stop immediately.
 
 
       const forceCode =
-  /\b(consecutive|dataset|date column|flag|three days|window|group|ids)\b/i.test(prompt);
+  /\b(java)\b/i.test(prompt) &&
+  /\b(count|find|occurrence|program|stream)\b/i.test(prompt);
 
 const codeMode = forceCode || isCodeQuestion(prompt);
 
 
+      messages.push({
+        role: "system",
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+      });
 
-     messages.push({
+      messages.push({
   role: "system",
-  content: codeMode ? CODE_FIRST_SYSTEM : INTERVIEW_FAST_SYSTEM
+  content:
+    "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
 });
-
-
-//       messages.push({
-//   role: "system",
-//   content:
-//     "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
-// });
 
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
 
-      // if (resumeText?.trim()) {
-      //   messages.push({
-      //     role: "system",
-      //     content:
-      //       "Use this resume context when answering. Do not invent details.\n\n" +
-      //       resumeText.trim().slice(0, 12000)
-      //   });
-      // }
-
-      if (!codeMode && /experience|project|worked|role/i.test(prompt)) {
-  messages.push({
-    role: "system",
-    content:
-      "Use resume ONLY for facts. Do not narrate.\n\n" +
-      resumeText.trim().slice(0, 6000)
-  });
-}
+      if (resumeText?.trim()) {
+        messages.push({
+          role: "system",
+          content:
+            "Use this resume context when answering. Do not invent details.\n\n" +
+            resumeText.trim().slice(0, 12000)
+        });
+      }
 
       const hist = safeHistory(history);
 
@@ -931,12 +910,7 @@ const codeMode = forceCode || isCodeQuestion(prompt);
         if (ctx) messages.push({ role: "system", content: ctx });
       }
 
-      if (!codeMode) {
-  for (const m of hist) {
-    if (m.role === "user") messages.push(m);
-  }
-}
-
+      for (const m of hist) messages.push(m);
 
       // Keep prompt as-is (no extra prefix that might alter meaning)
       // Send only the raw prompt to reduce the chance of the model echoing it.
@@ -949,34 +923,24 @@ const stream = await openai.chat.completions.create({
   model: "gpt-4o-mini",
   stream: true,
   temperature: 0,                 // tighter, no narration
-  max_tokens: codeMode ? 900 : 180,
-frequency_penalty: 0.6,
-presence_penalty: 0.4,
-
+  max_tokens: codeMode ? 900 : 250, // 👈 HARD CAP FOR CODE
   messages
 });
 
 
-let lineCount = 0;
-const MAX_LINES = codeMode ? Infinity : 4; // interview vs code
-
-try {
+      try {
   for await (const chunk of stream) {
     const t = chunk?.choices?.[0]?.delta?.content || "";
-    if (!t) continue;
-
-    if (!codeMode) {
-      lineCount += (t.match(/\n/g) || []).length;
-      if (lineCount >= MAX_LINES) break; // 🔒 stop printing immediately
-    }
-
-    res.write(t);
+    if (t) res.write(t);
   }
 } catch {}
 
-res.end();
-return;
+// 🔒 Anti-theory guardrail: stop model from drifting into explanations
+// if (!codeMode) {
+//   res.write("\n\n");
+// }
 
+return res.end();
 
     }
 
