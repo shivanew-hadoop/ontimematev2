@@ -832,64 +832,62 @@ export default async function handler(req, res) {
       const messages = [];
 
             const baseSystem = `
-You are answering live interview questions for a senior engineer.
+You are answering live interview questions.
 
-NON-NEGOTIABLE OUTPUT (exact order, exact headings):
-1) First line: 1–2 crisp lines that directly answer.
-2) **Key differences**
-   - 4–7 bullets.
-   - Each bullet MUST start with a **bold keyword** (the axis of difference).
-3) **Example keywords:** (one line)
-4) **Examples:** (next line; 1–3 short bullets or 2 short lines)
-5) **When I used what:** (only if it adds real value; 1–3 bullets)
+STRICT RULES:
+- Answer DIRECTLY. No introductions. No "Absolutely", "Certainly".
+- 3–5 short sentences max.
+- Speak like a senior engineer explaining to another engineer.
+- Practical, experience-based. No theory dumps.
+- Use tools/frameworks ONLY if relevant.
+- Indian professional tone. Human, not polished AI.
 
-TRUTH / CORRECTION RULES:
-- If the question contains a wrong assumption, you MUST correct it.
-- Start with **Correction:** and then give the corrected answer.
-- Never “agree to be polite”. If it’s wrong, say it’s wrong and move on.
-
-SCOPE CONTROL:
-- Answer ONLY what is asked.
-- Use related items (Kafka/Mongo/etc.) ONLY inside **Examples** (not as the main answer).
-
-FORMATTING RULES:
-- Use GitHub-flavored Markdown.
-- Always keep the headings on their own lines with a blank line between sections.
-- Bold important keywords relevant to the question (not random words).
-- Do NOT repeat the question. Do NOT write "Q:" or "Question:".
-
-FOLLOW-UP / MEMORY:
-- If the user asks a follow-up, connect to prior Q&A from the provided context.
-- If it’s a new topic, ignore history and answer only the current prompt.
-
-TONE:
-- Senior, practical, outcome-focused.
-- Simple English. No fluff, no textbook gyaan.
+FORMAT:
+- Paragraphs only (no headings unless asked).
+- Each paragraph max 2 lines.
+- Stop immediately once the answer is complete.
 `.trim();
+
 
 const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
-MANDATORY OUTPUT ORDER:
-1. FULL working code first
-2. Inline comments for critical logic
-3. Example input and output
-4. Brief explanation after code
+OUTPUT RULES (STRICT):
+- Start IMMEDIATELY with code. No intro lines.
+- No words like "Absolutely", "Certainly", "In my project".
+- No theory before code.
+Inline comments for critical logic
+- After code, ONLY:
+  - 1 line: concepts used
+  - 1 line: where I used it (real project)
 
-STRICT RULES:
-- Never explain before showing code
-- Do NOT repeat the question
-- No essay-style answers
-- Code must compile/run
-- Use fenced code blocks (GitHub Markdown)
+FORMAT:
+1) Code (fenced)
+2) Concepts:
+3) Used in:
+
+If any extra text is generated, stop immediately.
 `.trim();
 
-      const codeMode = isCodeQuestion(String(prompt || ""));
+
+      const forceCode =
+  /\b(java)\b/i.test(prompt) &&
+  /\b(count|find|occurrence|program|stream)\b/i.test(prompt);
+
+const codeMode = forceCode || isCodeQuestion(prompt);
+
 
       messages.push({
         role: "system",
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
+
+      messages.push({
+  role: "system",
+  content:
+    "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
+});
+
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
@@ -922,12 +920,13 @@ messages.push({
 });
 
 const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        stream: true,
-        temperature: 0.1,
-        max_tokens: 900,
-        messages
-      });
+  model: "gpt-4o-mini",
+  stream: true,
+  temperature: 0,                 // tighter, no narration
+  max_tokens: codeMode ? 350 : 220, // 👈 HARD CAP FOR CODE
+  messages
+});
+
 
       try {
   for await (const chunk of stream) {
@@ -937,9 +936,9 @@ const stream = await openai.chat.completions.create({
 } catch {}
 
 // 🔒 Anti-theory guardrail: stop model from drifting into explanations
-if (!codeMode) {
-  res.write("\n\n");
-}
+// if (!codeMode) {
+//   res.write("\n\n");
+// }
 
 return res.end();
 
