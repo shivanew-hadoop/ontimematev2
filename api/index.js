@@ -934,7 +934,7 @@ const stream = await openai.chat.completions.create({
   model: "gpt-4o-mini",
   stream: true,
   temperature: 0,                 // tighter, no narration
-  max_tokens: codeMode ? 900 : 350, // 👈 HARD CAP FOR CODE
+  max_tokens: codeMode ? 900 : 550, // 👈 HARD CAP FOR CODE
   messages
 });
 
