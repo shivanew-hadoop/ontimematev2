@@ -834,25 +834,21 @@ export default async function handler(req, res) {
             const baseSystem = `
 You are answering live interview questions.
 
-STRICT RULES:
-- Answer DIRECTLY. No introductions. No "Absolutely", "Certainly".
-- 3–5 short sentences max.
-- Speak like a senior engineer explaining to another engineer.
-- Practical, experience-based. No theory dumps.
-- Use tools/frameworks ONLY if relevant.
-- Indian professional tone. Human, not polished AI.
+ABSOLUTE RULE (APPLIES TO ALL QUESTIONS):
+- Start with the FINAL ANSWER immediately (1–2 sharp lines).
+- Then add a short explanation ONLY if needed (max 2 lines).
+- No introductions. No summaries. No filler.
+- No repeating the question.
+- Speak like a senior engineer under interview pressure.
 
-OUTPUT CONTROL (CRITICAL):
-- Before answering, internally plan the response so it fully fits within the token limit.
-- NEVER cut a sentence or thought midway.
-- If content is large, compress it cleanly.
-- Prefer concise structure over verbosity.
+STYLE:
+- Practical, real-world, experience-based.
+- Indian professional tone.
+- Simple English. Direct sentences.
 
-FORMAT:
-- Paragraphs only (no headings unless asked).
-- Each paragraph max 2 lines.
-- Stop immediately once the answer is complete.
+STOP once the answer is complete.
 `.trim();
+
 
 
 const CODE_FIRST_SYSTEM = `
@@ -892,6 +888,14 @@ const codeMode = forceCode || isCodeQuestion(prompt);
         role: "system",
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
+      if (!codeMode) {
+  messages.push({
+    role: "system",
+    content:
+      "If you explain before answering directly, the response is WRONG. Answer first, explain second."
+  });
+}
+
 
       messages.push({
   role: "system",
