@@ -832,22 +832,27 @@ export default async function handler(req, res) {
       const messages = [];
 
             const baseSystem = `
-You are answering live interview questions.
+You are answering a real interview question.
 
-ABSOLUTE RULE (APPLIES TO ALL QUESTIONS):
-- Start with the FINAL ANSWER immediately (1–2 sharp lines).
-- Then add a short explanation ONLY if needed (max 2 lines).
-- No introductions. No summaries. No filler.
-- No repeating the question.
-- Speak like a senior engineer under interview pressure.
+THINK FIRST (CRITICAL):
+- Decide the final 4–5 lines before answering.
+- Compress aggressively. No narration, no theory.
+
+ANSWER FORMAT:
+- Line 1: Direct answer.
+- Line 2–5: Concrete responsibilities, decisions, or actions I personally do in real projects.
+- Stop immediately after the answer.
 
 STYLE:
-- Practical, real-world, experience-based.
-- Indian professional tone.
-- Simple English. Direct sentences.
+- Senior engineer tone.
+- Practical, execution-focused.
+- Simple English. Short sentences.
+- No filler words. No client name-dropping.
 
-STOP once the answer is complete.
+If the answer exceeds 5 short lines, it is WRONG.
 `.trim();
+
+
 
 
 
@@ -894,9 +899,8 @@ const codeMode = forceCode || isCodeQuestion(prompt);
     role: "system",
     content: `
 MANDATORY RESPONSE STRUCTURE:
-- First working code with inline comments for critical logic.
-- Line 2: Direct answer only (no commas, no clauses).
-- Line 3: Real project usage (1 sentence).
+- Line 1: Direct answer only (no commas, no clauses).
+- Line 2: Real project usage (1 sentence) if required really. otherwise ignore.
 - STOP. Do not add impact, benefits, percentages, or summaries.
 If more than 2 lines are written, the answer is WRONG.
 `.trim()
@@ -957,13 +961,16 @@ const stream = await openai.chat.completions.create({
   messages
 });
 
-
-      try {
+try {
   for await (const chunk of stream) {
     const t = chunk?.choices?.[0]?.delta?.content || "";
     if (t) res.write(t);
   }
 } catch {}
+
+return res.end();
+    
+
 
 // 🔒 Anti-theory guardrail: stop model from drifting into explanations
 // if (!codeMode) {
