@@ -888,6 +888,20 @@ const codeMode = forceCode || isCodeQuestion(prompt);
         role: "system",
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
+
+      if (!codeMode) {
+  messages.push({
+    role: "system",
+    content: `
+MANDATORY RESPONSE STRUCTURE:
+- Line 1: Direct answer only (no commas, no clauses).
+- Line 2: Real project usage (1 sentence).
+- STOP. Do not add impact, benefits, percentages, or summaries.
+If more than 2 lines are written, the answer is WRONG.
+`.trim()
+  });
+}
+
       if (!codeMode) {
   messages.push({
     role: "system",
