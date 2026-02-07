@@ -4,7 +4,7 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
-// STATIC IMPORTS REQUIRED BY VERCEL
+// NEW — STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import crypto from "crypto";
@@ -24,77 +24,6 @@ export const config = {
 };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const STYLE_SYSTEM = `
-You are answering as a senior engineer in an interview.
-
-VOICE:
-- Direct. Practical. Indian onsite style.
-- Short sentences. Plain English.
-- Sounds like real work done.
-
-FORMAT (MANDATORY):
-- Line 1: Direct answer.
-- Line 2: What I did in real project (1 line).
-- Line 3: Optional (only if needed). Otherwise stop.
-
-RULES:
-- No filler words (Absolutely, Certainly, Sure, etc).
-- No "In summary", no "To conclude".
-- No long paragraphs.
-- Max 3 lines total.
-
-ENFORCEMENT:
-- If more than 3 lines are written, the answer is WRONG.
-- Stop early.
-`.trim();
-
-const EXPLAIN_SYSTEM_STRICT = `
-You are answering an interview explanation question.
-
-VOICE:
-- Direct. Practical. Production language.
-
-FORMAT (MANDATORY):
-- Line 1: Direct answer (one sentence).
-- Lines 2-5: Steps (4 bullets max, each one short).
-- Line 6: One real example line (optional). If not needed, stop.
-
-RULES (CRITICAL):
-- Max 6 lines total.
-- No paragraphs. No extra commentary.
-- No filler words (Absolutely, Certainly, Sure, etc).
-- No "In summary", no "To conclude".
-
-ENFORCEMENT:
-- If more than 6 lines are written, the answer is WRONG.
-- Stop immediately after format is satisfied.
-`.trim();
-
-const CODE_FIRST_SYSTEM = `
-You are answering a coding interview question.
-
-OUTPUT RULES:
-- Start IMMEDIATELY with code. No intro text.
-- No theory before code.
-- Inline comments only for critical logic.
-
-STRUCTURE (MANDATORY):
-1) Code (fenced)
-2) Concepts: (1 line)
-3) Used in: (1 real scenario line)
-
-OUTPUT CONTROL (CRITICAL):
-- Before answering, internally plan the response so it fully fits within the token limit.
-- If code is long:
-  - Prioritize core logic
-  - Skip boilerplate
-  - Avoid duplicate examples
-- NEVER cut code or explanation midway.
-- If it cannot fit, shorten — do NOT truncate.
-
-Stop immediately after completing the structure.
-`.trim();
 
 // In-memory cache (per warm lambda) to avoid re-summarizing the same resume
 const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
@@ -128,6 +57,7 @@ function readJson(req) {
     req.on("error", reject);
   });
 }
+
 
 function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
@@ -176,12 +106,16 @@ ${resumeText.slice(0, 20000)}
     RESUME_SUMMARY_CACHE.set(key, finalSummary);
     return finalSummary;
   } catch {
+    // If summarization fails, fall back to a short slice.
     return resumeText.slice(0, 2500);
   }
 }
 
 /**
- * Hardened multipart reader
+ * Hardened multipart reader:
+ * - waits for file stream completion
+ * - handles aborted/limit/error
+ * - avoids "finish" resolving before file end in edge cases
  */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
@@ -194,7 +128,7 @@ function readMultipart(req) {
 
     const bb = Busboy({
       headers,
-      limits: { fileSize: 25 * 1024 * 1024 } // 25MB
+      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
     });
 
     const fields = {};
@@ -244,7 +178,8 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host)
+    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
@@ -283,8 +218,92 @@ function safeHistory(history) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* INTENT DETECTION                                                           */
+/* LIGHTWEIGHT CODE-INTENT DETECTION (ADDED)                                  */
+/* - DOES NOT rely on "java/python" keywords                                   */
+/* - Explanation intent overrides language mentions like "in Java"             */
 /* -------------------------------------------------------------------------- */
+
+function looksLikeCodeText(s = "") {
+  // quick signals: braces/semicolons/common code tokens OR fenced blocks
+  if (!s) return false;
+  const t = String(s);
+
+  if (t.includes("```")) return true;
+
+  const tokenHits =
+    (t.match(/[{}();]/g)?.length || 0) +
+    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
+
+  return tokenHits >= 6;
+}
+
+// -------------------------------------------------------
+// QUESTION INTENT DETECTION (FIXED / PRACTICAL)
+// -------------------------------------------------------
+
+
+
+// -------------------------------------------------------
+// FOLLOW-UP DETECTION + CONTEXT PACK (ADDED)
+// - Improves continuity across 8–9 Q&As without extra model calls
+// -------------------------------------------------------
+
+function isFollowUpPrompt(q = "") {
+  const s = normalizeQ(q);
+  if (!s) return false;
+
+  // short questions with references are usually follow-ups
+  const followTokens = [
+    "then",
+    "so",
+    "but",
+    "that",
+    "this",
+    "it",
+    "same",
+    "why",
+    "how come",
+    "as you said",
+    "you said",
+    "earlier",
+    "previous",
+    "follow up",
+    "based on that"
+  ];
+
+  const hasRef = followTokens.some(t => s.includes(t));
+  const isShort = s.length <= 160;
+
+  return hasRef || isShort;
+}
+
+function buildContextPack(hist = []) {
+  // Build up to last 9 Q&A pairs as a compact system note.
+  const pairs = [];
+  let lastUser = null;
+
+  for (const m of hist) {
+    if (m.role === "user") {
+      lastUser = m.content;
+    } else if (m.role === "assistant" && lastUser) {
+      pairs.push({ q: lastUser, a: m.content });
+      lastUser = null;
+    }
+  }
+
+  const tail = pairs.slice(-9);
+  if (!tail.length) return "";
+
+  const lines = ["CONTEXT (use only if the current question is a follow-up):"];
+  tail.forEach((p, i) => {
+    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 240);
+    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 260);
+    lines.push(`${i + 1}) Q: ${q}`);
+    lines.push(`   A: ${a}`);
+  });
+
+  return lines.join("\n");
+}
 
 function normalizeQ(q = "") {
   return String(q || "")
@@ -296,37 +315,47 @@ function normalizeQ(q = "") {
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
 
-  const explanationSignals = [
+  // Strong explanation patterns (no code needed)
+  const explainStarts = [
     "explain",
-    "how",
+    "what is",
+    "how does",
     "why",
-    "what do",
-    "what happens",
     "describe",
-    "your role",
-    "your responsibility",
-    "your experience",
-    "flow",
-    "end to end",
-    "end-to-end",
-    "architecture",
-    "design",
-    "pipeline",
-    "integration",
-    "testing",
-    "pos",
-    "system",
-    "process",
-    "workflow",
-    "approach"
+    "define",
+    "difference between",
+    "compare",
+    "advantages",
+    "disadvantages",
+    "pros and cons"
   ];
 
-  return explanationSignals.some(k => s.includes(k));
+  // Common deep-dive / theory topics (usually explanation)
+  const explainTopics = [
+    "architecture",
+    "design",
+    "lifecycle",
+    "internals",
+    "jvm",
+    "garbage collector",
+    "class loader",
+    "multithreading",
+    "deadlock",
+    "solid",
+    "oops",
+    "normalization"
+  ];
+
+  return (
+    explainStarts.some(p => s.startsWith(p)) ||
+    explainTopics.some(t => s.includes(t))
+  );
 }
 
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
 
+  // If user explicitly wants code, always treat as code
   const explicitCode = [
     "code",
     "program",
@@ -339,12 +368,14 @@ function isCodeQuestion(q = "") {
     "show me code"
   ];
 
+  // Task verbs that strongly indicate coding even without "code" word
   const taskVerbs = [
     "write",
     "implement",
     "create",
     "build",
     "develop",
+    "program",
     "solve",
     "print",
     "return",
@@ -360,8 +391,10 @@ function isCodeQuestion(q = "") {
     "convert"
   ];
 
+  // Classic coding-problem keywords
   const algoKeywords = [
     "vowel",
+    "vowels",
     "palindrome",
     "anagram",
     "fibonacci",
@@ -370,6 +403,7 @@ function isCodeQuestion(q = "") {
     "string",
     "array",
     "hashmap",
+    "hash set",
     "linked list",
     "stack",
     "queue",
@@ -378,10 +412,14 @@ function isCodeQuestion(q = "") {
     "space complexity"
   ];
 
+  // Code-looking characters/signals
   const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
 
   const wantsExample = /\b(example|sample|demo)\b/.test(s);
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
+
+  // Explanation override ONLY when it's purely theory (no "example/code/task")
+  // const looksLikeExplain = isExplanationQuestion(s);
 
   let score = 0;
 
@@ -392,13 +430,18 @@ function isCodeQuestion(q = "") {
   if (algoKeywords.some(k => s.includes(k))) score += 2;
 
   if (wantsExample) score += 1;
-  if (mentionsLanguage) score += 1;
+  if (mentionsLanguage) score += 1; // LOW weight on purpose
 
+  // If it's strongly explanation AND score is weak, keep it explanation
+  // if (looksLikeExplain && score < 3) return false;
+
+  // Threshold: >=3 => code-intent
   return score >= 3;
 }
 
+
 /* -------------------------------------------------------------------------- */
-/* RESUME EXTRACTION                                                          */
+/* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
 /* -------------------------------------------------------------------------- */
 
 function guessExtAndMime(file) {
@@ -414,7 +457,8 @@ function guessExtAndMime(file) {
       mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     };
 
-  if (name.endsWith(".txt") || mime.includes("text/plain")) return { ext: "txt", mime: "text/plain" };
+  if (name.endsWith(".txt") || mime.includes("text/plain"))
+    return { ext: "txt", mime: "text/plain" };
 
   return { ext: "bin", mime: "application/octet-stream" };
 }
@@ -537,9 +581,14 @@ export default async function handler(req, res) {
       const user = data.user;
       if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
 
-      const profile = await supabaseAdmin().from("user_profiles").select("approved").eq("id", user.id).single();
+      const profile = await supabaseAdmin()
+        .from("user_profiles")
+        .select("approved")
+        .eq("id", user.id)
+        .single();
 
-      if (!profile.data?.approved) return res.status(403).json({ error: "Admin has not approved your account yet" });
+      if (!profile.data?.approved)
+        return res.status(403).json({ error: "Admin has not approved your account yet" });
 
       return res.json({
         ok: true,
@@ -622,20 +671,27 @@ export default async function handler(req, res) {
 
       const sb = supabaseAdmin();
 
-      const { data: row, error: e1 } = await sb.from("user_profiles").select("credits").eq("id", gate.user.id).single();
+      const { data: row, error: e1 } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
       if (e1) return res.status(400).json({ error: e1.message });
 
       const current = Number(row?.credits || 0);
       const remaining = Math.max(0, current - d);
 
-      const { error: e2 } = await sb.from("user_profiles").update({ credits: remaining }).eq("id", gate.user.id);
+      const { error: e2 } = await sb
+        .from("user_profiles")
+        .update({ credits: remaining })
+        .eq("id", gate.user.id);
       if (e2) return res.status(400).json({ error: e2.message });
 
       return res.json({ ok: remaining > 0, remaining });
     }
 
     /* ------------------------------------------------------- */
-    /* REALTIME — CLIENT SECRET                                */
+    /* REALTIME — CLIENT SECRET (NEW)                           */
     /* ------------------------------------------------------- */
     if (path === "realtime/client_secret") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -643,12 +699,18 @@ export default async function handler(req, res) {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      const { data: row } = await supabaseAdmin().from("user_profiles").select("credits").eq("id", gate.user.id).single();
+      // basic credit gate (don't start ASR if no credits)
+      const { data: row } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
 
       const body = await readJson(req).catch(() => ({}));
-      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600)));
+      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
 
       const payload = {
         expires_after: { anchor: "created_at", seconds: ttl },
@@ -708,7 +770,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* TRANSCRIBE                                              */
+    /* TRANSCRIBE (mic/system audio)                           */
     /* ------------------------------------------------------- */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -727,7 +789,10 @@ export default async function handler(req, res) {
           "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(
+          0,
+          800
+        );
 
         const out = await openai.audio.transcriptions.create({
           file: audioFile,
@@ -746,7 +811,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND                                               */
+    /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -760,76 +825,138 @@ export default async function handler(req, res) {
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
       res.flushHeaders?.();
-      res.write("\u200B"); // kick
 
-      const forceCode =
-        /\b(java)\b/i.test(prompt) && /\b(count|find|occurrence|program|stream)\b/i.test(prompt);
-
-      const codeMode = forceCode || isCodeQuestion(prompt);
-      const explanationMode = !codeMode && isExplanationQuestion(prompt);
+      // Kick chunk so UI receives "first token" immediately
+      res.write("\u200B"); // zero-width kick for streaming without visible leading space
 
       const messages = [];
 
-      // ONE system message only
+            const baseSystem = `
+You are answering live interview questions.
+
+ABSOLUTE RULE (APPLIES TO ALL QUESTIONS):
+- Start with the FINAL ANSWER immediately (1–2 sharp lines).
+- Then add a short explanation ONLY if needed (max 2 lines).
+- No introductions. No summaries. No filler.
+- No repeating the question.
+- Speak like a senior engineer under interview pressure.
+
+STYLE:
+- Practical, real-world, experience-based.
+- Indian professional tone.
+- Simple English. Direct sentences.
+
+STOP once the answer is complete.
+`.trim();
+
+
+
+const CODE_FIRST_SYSTEM = `
+You are answering a coding interview question.
+
+OUTPUT RULES:
+- Start IMMEDIATELY with code. No intro text.
+- No theory before code.
+- Inline comments only for critical logic.
+
+STRUCTURE (MANDATORY):
+1) Code (fenced)
+2) Concepts: (1 line)
+3) Used in: (1 real scenario line)
+
+OUTPUT CONTROL (CRITICAL):
+- Before answering, internally plan the response so it fully fits within the token limit.
+- If code is long:
+  - Prioritize core logic
+  - Skip boilerplate
+  - Avoid duplicate examples
+- NEVER cut code or explanation midway.
+- If it cannot fit, shorten — do NOT truncate.
+
+Stop immediately after completing the structure.
+`.trim();
+
+
+      const forceCode =
+  /\b(java)\b/i.test(prompt) &&
+  /\b(count|find|occurrence|program|stream)\b/i.test(prompt);
+
+const codeMode = forceCode || isCodeQuestion(prompt);
+
+
       messages.push({
         role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : explanationMode ? EXPLAIN_SYSTEM_STRICT : STYLE_SYSTEM
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
+      if (!codeMode) {
+  messages.push({
+    role: "system",
+    content:
+      "If you explain before answering directly, the response is WRONG. Answer first, explain second."
+  });
+}
 
-      // keep instructions as SYSTEM (safe)
+
+      messages.push({
+  role: "system",
+  content:
+    "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
+});
+
+
       if (!codeMode && instructions?.trim()) {
+        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
+      }
+
+      if (resumeText?.trim()) {
         messages.push({
           role: "system",
-          content: "Tone preference only. Ignore if conflicts.\n" + instructions.trim().slice(0, 1500)
+          content:
+            "Use this resume context when answering. Do not invent details.\n\n" +
+            resumeText.trim().slice(0, 12000)
         });
       }
 
-      // resume context (optional)
-      if (resumeText?.trim()) {
-        const summary = await getResumeSummary(resumeText.trim()).catch(() =>
-          resumeText.trim().slice(0, 2500)
-        );
-        messages.push({
-          role: "assistant",
-          content: "Resume context for reference only.\n\n" + String(summary || "").slice(0, 12000)
-        });
-      }
-
-      // IMPORTANT: for explanation questions, DO NOT send history
       const hist = safeHistory(history);
-      if (!explanationMode) {
-        for (const m of hist) messages.push(m);
+
+      // Add a compact context pack ONLY for follow-up questions (improves continuity)
+      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+        const ctx = buildContextPack(hist);
+        if (ctx) messages.push({ role: "system", content: ctx });
       }
 
-      // user prompt last
-      messages.push({
-        role: "user",
-        content: String(prompt).slice(0, 7000).trim()
-      });
+      for (const m of hist) messages.push(m);
 
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        stream: codeMode,
-        temperature: codeMode ? 0 : 0.2,
-        max_tokens: codeMode ? 900 : explanationMode ? 220 : 140,
-        // helps cut rambling if model ignores constraints
-        stop: codeMode ? undefined : ["\n\n\n", "\nIn summary", "\nTo conclude"],
-        messages
-      });
+      // Keep prompt as-is (no extra prefix that might alter meaning)
+      // Send only the raw prompt to reduce the chance of the model echoing it.
+messages.push({
+  role: "user",
+  content: String(prompt).slice(0, 7000).trim()
+});
 
-      if (codeMode) {
-        try {
-          for await (const chunk of completion) {
-            const t = chunk?.choices?.[0]?.delta?.content || "";
-            if (t) res.write(t);
-          }
-        } catch {}
-        return res.end();
-      } else {
-        const text = completion?.choices?.[0]?.message?.content || "";
-        res.write(text);
-        return res.end();
-      }
+const stream = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  stream: true,
+  temperature: 0,                 // tighter, no narration
+  max_tokens: codeMode ? 900 : 550, // 👈 HARD CAP FOR CODE
+  messages
+});
+
+
+      try {
+  for await (const chunk of stream) {
+    const t = chunk?.choices?.[0]?.delta?.content || "";
+    if (t) res.write(t);
+  }
+} catch {}
+
+// 🔒 Anti-theory guardrail: stop model from drifting into explanations
+// if (!codeMode) {
+//   res.write("\n\n");
+// }
+
+return res.end();
+
     }
 
     /* ------------------------------------------------------- */
@@ -881,7 +1008,11 @@ export default async function handler(req, res) {
       const { user_id, delta } = await readJson(req);
 
       const sb = supabaseAdmin();
-      const { data: row } = await sb.from("user_profiles").select("credits").eq("id", user_id).single();
+      const { data: row } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", user_id)
+        .single();
 
       const newCredits = Math.max(0, Number(row.credits) + Number(delta));
 
@@ -899,6 +1030,7 @@ export default async function handler(req, res) {
   } catch (err) {
     const msg = String(err?.message || err);
 
+    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
       return res.status(400).json({
         error: "Unexpected end of form (multipart stream was consumed or interrupted)."
