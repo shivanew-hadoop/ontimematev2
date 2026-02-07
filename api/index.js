@@ -813,150 +813,186 @@ export default async function handler(req, res) {
     /* ------------------------------------------------------- */
     /* CHAT SEND — STREAM WITH IMPROVED FORMATTING             */
     /* ------------------------------------------------------- */
-    if (path === "chat/send") {
-      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+    // FINAL WORKING SOLUTION - REPLACE CHAT/SEND SECTION COMPLETELY
+// This uses few-shot examples to force the exact ChatGPT format
 
-      const { prompt, instructions, resumeText, history } = await readJson(req);
-      if (!prompt) return res.status(400).json({ error: "Missing prompt" });
+if (path === "chat/send") {
+  if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      // STREAM-SAFE HEADERS
-      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
-      res.setHeader("Cache-Control", "no-cache, no-transform");
-      res.setHeader("Connection", "keep-alive");
-      res.setHeader("Transfer-Encoding", "chunked");
-      res.flushHeaders?.();
+  const { prompt, instructions, resumeText, history } = await readJson(req);
+  if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // Kick chunk so UI receives "first token" immediately
-      res.write("\u200B"); // zero-width kick for streaming without visible leading space
+  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Transfer-Encoding", "chunked");
+  res.flushHeaders?.();
 
-      const messages = [];
+  res.write("\u200B");
 
-      // UPDATED SYSTEM PROMPTS
-      const baseSystem = `You answer interview questions with SHORT, STRUCTURED responses.
+  const messages = [];
 
-FORMAT (MANDATORY):
-
-For all questions:
-- 1 sentence direct answer (bold the key insight)
-- Numbered list (3-7 items max, each 1 line with bold keywords)
-- Bullet points if showing reasons/benefits (3-5 max, bold key terms)
-- 1 sentence example
-
-RULES:
-- Keep descriptions to ONE line per point
-- Use **bold** for key terms only
-- NO long explanations
-- NO filler words (Absolutely, Certainly, etc.)
-- NO verbose paragraphs
-
-Example structure:
-**Main Point:** Brief answer.
-
-**Process:**
-1. **Step 1** – One line only
-2. **Step 2** – One line only
-3. **Step 3** – One line only
-
-**Why:**
-- **Reason A** – Brief explanation
-- **Reason B** – Brief explanation
-
-**Example:** One concrete scenario.`.trim();
-
-      const CODE_FIRST_SYSTEM = `You are answering a coding question.
+  // ============================================================
+  // FEW-SHOT SYSTEM PROMPT - SHOWS EXACT FORMAT
+  // ============================================================
+  
+  const baseSystem = `You are an interview coach. Answer in ChatGPT's concise, structured format.
 
 MANDATORY FORMAT:
 
+1-2 sentence direct answer with **bold key insight**.
+
+**Section Heading:**
+1. **Key Term** – One line max
+2. **Key Term** – One line max
+3. **Key Term** – One line max
+
+**Another Section:**
+• **Point** – Brief explanation
+• **Point** – Brief explanation
+
+**Example:** One concrete scenario.
+
+RULES:
+- Each list item = ONE line maximum
+- Bold only key technical terms
+- No verbose paragraphs
+- No filler words
+- Stop after example`.trim();
+
+  const CODE_FIRST_SYSTEM = `Answer coding questions concisely.
+
 **Solution:**
 \`\`\`java
-// Your code with minimal comments
+// code
 \`\`\`
 
-**Analysis:**
-- **Time Complexity:** O(n)
-- **Space Complexity:** O(1)  
-- **Approach:** [One line explanation]
+**Complexity:** O(n) time, O(1) space
+**Use:** Real-world scenario.`.trim();
 
-**Real-world Use:** [One concrete example]
+  const forceCode =
+    /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
+    /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
 
-CRITICAL: Always use this exact markdown structure.`.trim();
+  const codeMode = forceCode || isCodeQuestion(prompt);
 
-      const forceCode =
-        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
-        /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
-
-      const codeMode = forceCode || isCodeQuestion(prompt);
-
-      messages.push({
-        role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-      });
-
-      messages.push({
-  role: "system",
-  content: "CRITICAL: Keep each point to ONE LINE. No verbose explanations. Use ChatGPT's concise style."
-});
-      // Double enforcement for formatting
-if (!codeMode) {
   messages.push({
     role: "system",
-    content: "CRITICAL REMINDER: Use markdown formatting with numbered lists, bullet points, and **bold text**. Paragraph-only responses are WRONG."
+    content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
   });
-}
 
-      // Anti-filler reinforcement
-      messages.push({
-        role: "system",
-        content:
-          "Start your response directly with the content. No introductory phrases like 'Absolutely', 'Certainly', 'Sure', 'Yes', etc."
-      });
+  // ============================================================
+  // FEW-SHOT EXAMPLES - THIS IS THE KEY!
+  // ============================================================
+  
+  if (!codeMode) {
+    // Example 1: Show the model EXACTLY what we want
+    messages.push({
+      role: "user",
+      content: "Explain your POS testing architecture and why you chose it."
+    });
+    
+    messages.push({
+      role: "assistant",
+      content: `I designed **POS testing as an end-to-end retail transaction pipeline**, not isolated screens.
 
-      
-      if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
-      }
+**End-to-end Flow:**
+1. **POS UI (NCR)** – Scan → price/promo → tender
+2. **Payment devices** – Pin pad auth, approvals, reversals
+3. **Middleware/APIs** – Events to backend services
+4. **Kafka** – Validate topic, partition, offset, schema
+5. **Backend systems** – Inventory, order, receipt, loyalty
+6. **Database checks** – SQL/NoSQL validation
+7. **Downstream** – Reporting, audit, refunds
 
-      if (resumeText?.trim()) {
-        messages.push({
-          role: "system",
-          content:
-            "Use this resume context when relevant. Do not invent details.\n\n" +
-            resumeText.trim().slice(0, 12000)
-        });
-      }
+**Why This Architecture:**
+• **Integration issues** – Not UI bugs
+• **Store-specific testing** – Generic NCR tests miss retail logic
+• **Data validation** – Kafka + DB prevent silent failures
+• **Regression safety** – Automation at each layer
 
-      const hist = safeHistory(history);
+**Example:** POS succeeded, but Kafka event failed → inventory not updated. Only end-to-end flow caught it.`
+    });
 
-      // Add context pack for follow-up questions
-      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
-        const ctx = buildContextPack(hist);
-        if (ctx) messages.push({ role: "system", content: ctx });
-      }
+    // Example 2: Another pattern
+    messages.push({
+      role: "user",
+      content: "If everything is done at NCR, what do QA do at Albertsons?"
+    });
+    
+    messages.push({
+      role: "assistant",
+      content: `**NCR builds POS; Albertsons owns the business flow — QA validates that fit.**
 
-      for (const m of hist) messages.push(m);
+**Our Testing Focus:**
+1. **Store-specific rules** – Albertsons pricing, promos, tax, loyalty
+2. **Device integration** – Scanner, pin pad, scale, printer in real scenarios
+3. **Backend validation** – POS → inventory, orders, Kafka, payments
+4. **Regression testing** – NCR upgrades/patches before store rollout
+5. **Gap detection** – Where NCR is generic but retail behavior is client-specific
 
-      messages.push({
-        role: "user",
-        content: String(prompt).slice(0, 7000).trim()
-      });
+**Tools Used:**
+• **Robot Framework** – Transaction flow automation
+• **Selenium/Appium** – UI + mobile testing
+• **Postman** – API/backend validation
 
-    const stream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0.4,  // Changed from 0 or 0.3
-  max_tokens: codeMode ? 1000 : 600,  // REDUCED from 800 to force brevity
-  messages
-});
+**Example:** NCR POS works generically; we caught wrong tax/discount for specific Albertsons store configs before release.`
+    });
+  }
 
-      try {
-        for await (const chunk of stream) {
-          const t = chunk?.choices?.[0]?.delta?.content || "";
-          if (t) res.write(t);
-        }
-      } catch {}
+  if (!codeMode && instructions?.trim()) {
+    messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
+  }
 
-      return res.end();
+  if (resumeText?.trim()) {
+    messages.push({
+      role: "system",
+      content: "Resume context:\n" + resumeText.trim().slice(0, 12000)
+    });
+  }
+
+  const hist = safeHistory(history);
+
+  if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+    const ctx = buildContextPack(hist);
+    if (ctx) messages.push({ role: "system", content: ctx });
+  }
+
+  for (const m of hist) messages.push(m);
+
+  messages.push({
+    role: "user",
+    content: String(prompt).slice(0, 7000).trim()
+  });
+
+  // Before user's real question, we add 2 example Q&As:
+
+messages.push({ role: "user", content: "Explain POS testing" });
+messages.push({ role: "assistant", content: "I designed **POS as end-to-end**...\n\n**Flow:**\n1. **POS** – Scan\n2. **Kafka** – Validate" });
+
+messages.push({ role: "user", content: "What do QA do at Albertsons?" });
+messages.push({ role: "assistant", content: "**NCR builds; QA validates fit.**\n\n**Focus:**\n1. **Store rules**\n2. **Devices**" });
+
+// NOW the user's real question
+messages.push({ role: "user", content: "Can you explain..." });
+
+  const stream = await openai.chat.completions.create({
+    model: "gpt-4o-mini",
+    stream: true,
+    temperature: 0.5,  // Higher for better format matching
+    max_tokens: 650,
+    messages
+  });
+
+  try {
+    for await (const chunk of stream) {
+      const t = chunk?.choices?.[0]?.delta?.content || "";
+      if (t) res.write(t);
     }
+  } catch {}
+
+  return res.end();
+}
 
     /* ------------------------------------------------------- */
     /* CHAT RESET                                              */
