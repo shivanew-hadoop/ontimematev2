@@ -985,15 +985,20 @@ if (codeMode) {
   } catch {}
   return res.end();
 }  else {
-  // NON-STREAM PATH — HARD ENFORCED INTERVIEW OUTPUT
   let text = completion?.choices?.[0]?.message?.content || "";
 
-  text = text
-    .split("\n")
-    .map(l => l.trim())
-    .filter(Boolean)
-    .slice(0, 3)
-    .join("\n");
+  const explanationMode = isExplanationQuestion(prompt);
+
+  if (!explanationMode) {
+    // 🔒 SHORT INTERVIEW MODE (3 lines)
+    text = text
+      .split("\n")
+      .map(l => l.trim())
+      .filter(Boolean)
+      .slice(0, 3)
+      .join("\n");
+  }
+  // else: keep full structured markdown
 
   res.write(text);
   return res.end();
