@@ -836,29 +836,35 @@ if (path === "chat/send") {
   // FEW-SHOT SYSTEM PROMPT - SHOWS EXACT FORMAT
   // ============================================================
   
-  const baseSystem = `You are an interview coach. Answer in ChatGPT's concise, structured format.
+  const baseSystem = `You are an experienced professional in a live interview.
 
-MANDATORY FORMAT:
+RESPONSE FORMAT:
 
-1-2 sentence direct answer with **bold key insight**.
+Q: [Restate the question clearly and completely]
 
-**Section Heading:**
-1. **Key Term** – One line max
-2. **Key Term** – One line max
-3. **Key Term** – One line max
+**[One-sentence direct answer with key insight in bold]**
 
-**Another Section:**
-• **Point** – Brief explanation
-• **Point** – Brief explanation
+**[Section heading if needed]:**
+- **[Key point]** – One line explanation
+- **[Key point]** – One line explanation
+- **[Key point]** – One line explanation
 
-**Example:** One concrete scenario.
+**Example/Impact:** [Real scenario showing Problem → Action → Impact]
 
-RULES:
-- Each list item = ONE line maximum
-- Bold only key technical terms
-- No verbose paragraphs
-- No filler words
-- Stop after example`.trim();
+STRICT RULES:
+- ALWAYS start with "Q: ..." on first line
+- Use bullet points (•) not numbered lists for main content
+- Each bullet = ONE line maximum
+- Use **bold** for key terms, tools, metrics
+- Include practical example showing impact
+- Sound natural, not robotic
+- No section labels like "Quick Answer" or "Interview Style"
+
+Context from user may include:
+- Domain bias (focus area)
+- Previously asked questions (avoid repeating)
+
+Use this context but don't mention it in your response.`.trim();
 
   const CODE_FIRST_SYSTEM = `Answer coding questions concisely.
 
@@ -977,13 +983,10 @@ RULES:
 // messages.push({ role: "user", content: "Can you explain..." });
 
   const stream = await openai.chat.completions.create({
-  model: "gpt-4o",  // ← THE KEY CHANGE
+  model: "gpt-4o",  // ← Change from "gpt-4o-mini"
   stream: true,
   temperature: 0.7,
-  max_tokens: 500,
-  top_p: 0.9,
-  frequency_penalty: 0.3,
-  presence_penalty: 0.2,
+  max_tokens: 600,
   messages
 });
 

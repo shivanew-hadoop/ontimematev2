@@ -296,23 +296,7 @@ let sysAsr = null;
 /* -------------------------------------------------------------------------- */
 const MODE_INSTRUCTIONS = {
   general: "",
-  interview: `
-OUTPUT FORMAT RULE:
-Do NOT use HTML tags. Use clean Markdown with **bold**, lists, and blank lines.
-Always answer in TWO SECTIONS ONLY:
-
-1) Print questions first then 
-2) Quick Answer (Interview Style)
-- 4–6 crisp bullet points
-- Direct, domain-specific, no fluff
-
-3) Real-Time Project Example
-- 2–4 bullets from practical experience (Problem → Action → Impact)
-
-QUESTION EXPANSION RULE:
-If user gives only keyword/fragment, convert into a full interview question.
-Never answer raw fragment.
-`.trim(),
+  interview: "",  // ← EMPTY!
   sales: `
 Respond in persuasive, value-driven style.
 Highlight benefits/outcomes.
@@ -806,15 +790,22 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
-  // Extract prior questions for deduplication
   const priorQs = extractPriorQuestions();
-  
-  // Build a minimal, ChatGPT-style prompt
-  return `
-${base}
+  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
-${priorQs.length ? `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}` : ""}
-`.trim();
+  // Build minimal context - backend handles formatting
+  let context = "";
+  
+  if (domainBias) {
+    context += `Domain: ${domainBias}\n`;
+  }
+  
+  if (priorQs.length) {
+    context += `\nPreviously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n`;
+  }
+
+  // Send question with context - backend will format the response
+  return context ? `${context}\n${base}` : base;
 }
 
 // That's it! The backend already has the ChatGPT-style system prompt.
@@ -2095,15 +2086,15 @@ async function handleSend() {
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
+  
   updateTopicMemory(base);
-  const question = buildDraftQuestion(base);
+  const question = buildDraftQuestion(base);  // ← KEEP THIS
+  
   if (!base) return;
 
   if (manualQuestion) manualQuestion.value = "";
 
-  // IMPORTANT: identical to click behavior
   abortChatStreamOnly(true);
-
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
@@ -2118,7 +2109,7 @@ async function handleSend() {
   const mode = modeSelect?.value || "interview";
   const promptToSend =
     mode === "interview"
-      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))  // ← KEEP THIS
       : question;
 
   await startChatStreaming(promptToSend, base);
