@@ -799,53 +799,25 @@ function capitalizeQuestion(q) {
 }
 
 
+// REPLACE THIS FUNCTION IN YOUR app.js (around line 580-620)
+
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
 
+  // Extract prior questions for deduplication
   const priorQs = extractPriorQuestions();
-  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
-
+  
+  // Build a minimal, ChatGPT-style prompt
   return `
-You are answering a real interview question spoken by an interviewer.
-
-First, restate the interviewer’s question clearly in the format:
-Q: <question>
-
-Then answer it naturally, as a senior professional would explain verbally.
-
-ANSWERING STYLE (MANDATORY):
-- Sound confident, calm, and experienced.
-- Start with a direct explanation before going deeper.
-- Explain how and why, not textbook definitions.
-- Speak like a human in an interview, not like documentation.
-
-DEPTH RULES:
-- Provide enough detail to demonstrate real understanding.
-- If a tool, framework, or concept is mentioned, briefly explain how you used it.
-- If leadership or decision-making is implied, explain impact and outcomes.
-
-EXAMPLES:
-- Naturally weave real project experience into the explanation.
-- Do NOT label sections like "Quick Answer" or "Project Example".
-- Do NOT use numbered sections or templates.
-
-FORMATTING:
-- Use Markdown lightly.
-- Short paragraphs preferred.
-- Bullets ONLY if they genuinely improve clarity.
-- Bold ONLY key technologies, tools, patterns, or measurable outcomes.
-
-CONTEXT:
-- Stay grounded in the interviewer’s question.
-- Prefer topics aligned with this domain bias: ${domainBias || "software engineering"}.
-- Avoid repeating previously asked questions:
-${priorQs.length ? priorQs.map(q => "- " + q).join("\n") : "- (none)"}
-
-INTERVIEWER QUESTION:
 ${base}
+
+${priorQs.length ? `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}` : ""}
 `.trim();
 }
+
+// That's it! The backend already has the ChatGPT-style system prompt.
+// Don't override it with verbose frontend instructions.
 
 /* -------------------------------------------------------------------------- */
 /* PROFILE                                                                      */
