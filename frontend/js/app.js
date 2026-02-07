@@ -301,11 +301,12 @@ OUTPUT FORMAT RULE:
 Do NOT use HTML tags. Use clean Markdown with **bold**, lists, and blank lines.
 Always answer in TWO SECTIONS ONLY:
 
-1) Quick Answer (Interview Style)
+1) Print questions first then 
+2) Quick Answer (Interview Style)
 - 4–6 crisp bullet points
 - Direct, domain-specific, no fluff
 
-2) Real-Time Project Example
+3) Real-Time Project Example
 - 2–4 bullets from practical experience (Problem → Action → Impact)
 
 QUESTION EXPANSION RULE:
