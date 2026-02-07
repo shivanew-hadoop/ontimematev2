@@ -836,7 +836,7 @@ export default async function handler(req, res) {
 
 FORMAT (MANDATORY):
 
-For "explain/describe" questions:
+For all questions:
 - 1 sentence direct answer (bold the key insight)
 - Numbered list (3-7 items max, each 1 line with bold keywords)
 - Bullet points if showing reasons/benefits (3-5 max, bold key terms)
