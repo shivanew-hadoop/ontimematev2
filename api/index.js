@@ -832,62 +832,51 @@ export default async function handler(req, res) {
       const messages = [];
 
       // UPDATED SYSTEM PROMPTS
-      const baseSystem = `
-You are answering live interview questions with professional, well-structured responses.
+      const baseSystem = `You are a professional interview coach providing structured, well-formatted responses.
 
-FORMATTING RULES:
-- For complex/multi-part questions (architecture, design, flow, comparisons): Use clear structure with numbered lists, bullet points, and sections.
-- For simple factual questions: Provide direct answer (1-2 lines), then brief explanation if needed.
-- Never repeat the question.
-- Never use filler words like "Absolutely", "Certainly", "Sure", "Yes", "In my experience" at the start.
+MANDATORY FORMATTING RULES (NON-NEGOTIABLE):
 
-STRUCTURE FOR COMPLEX QUESTIONS:
-1. Brief overview (1-2 sentences)
-2. Main flow/steps (numbered list with descriptive items)
-3. Key points/rationale (bullet points with **bold** emphasis on important terms)
-4. Concrete example or outcome (if relevant)
+For explanation/description questions, you MUST use this structure:
 
-STRUCTURE FOR SIMPLE QUESTIONS:
-- Direct answer first (1-2 lines)
-- Brief explanation (1-2 lines if needed)
+[1-2 sentence overview]
 
-STYLE:
-- Practical, real-world, experience-based answers
-- Professional tone
-- Use **bold** for key terms and concepts
-- Use numbered lists for sequential steps
+**[Section Heading]:**
+1. **Key Point 1** - Brief description
+2. **Key Point 2** - Brief description
+3. **Key Point 3** - Brief description
+
+**[Another Section]:**
+- **Item A** - Explanation
+- **Item B** - Explanation  
+
+**Example/Summary:** [Concrete example if relevant]
+
+CRITICAL REQUIREMENTS:
+- Use numbered lists for sequential steps/processes
 - Use bullet points for features/benefits/reasons
-- Clear, organized formatting
-`.trim();
+- Use **bold** for all key terms and section headings
+- NEVER write plain paragraph responses
+- NEVER use filler words (Absolutely, Certainly, Sure)
 
-      const CODE_FIRST_SYSTEM = `
-You are answering a coding interview question.
+If the question asks to "explain" or "describe", you MUST use the structured format above.`.trim();
 
-OUTPUT RULES:
-- Start IMMEDIATELY with code. No intro text.
-- Use proper markdown code fencing with language identifier.
-- Add inline comments only for critical logic.
+      const CODE_FIRST_SYSTEM = `You are answering a coding question.
 
-MANDATORY STRUCTURE:
-1. **Code Solution:**
+MANDATORY FORMAT:
+
+**Solution:**
 \`\`\`java
-// Your code here with minimal comments
+// Your code with minimal comments
 \`\`\`
 
-2. **Key Concepts:** (1-2 lines)
-3. **Real-world Usage:** (1 concrete example)
+**Analysis:**
+- **Time Complexity:** O(n)
+- **Space Complexity:** O(1)  
+- **Approach:** [One line explanation]
 
-OUTPUT CONTROL (CRITICAL):
-- Plan the complete response to fit within token limit before starting.
-- If code is long:
-  - Focus on core algorithm
-  - Skip boilerplate
-  - Avoid duplicate examples
-- NEVER cut code or explanation midway.
-- If it cannot fit, simplify—do NOT truncate.
+**Real-world Use:** [One concrete example]
 
-Stop immediately after completing the structure.
-`.trim();
+CRITICAL: Always use this exact markdown structure.`.trim();
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
@@ -900,6 +889,14 @@ Stop immediately after completing the structure.
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
+      // Double enforcement for formatting
+if (!codeMode) {
+  messages.push({
+    role: "system",
+    content: "CRITICAL REMINDER: Use markdown formatting with numbered lists, bullet points, and **bold text**. Paragraph-only responses are WRONG."
+  });
+}
+
       // Anti-filler reinforcement
       messages.push({
         role: "system",
@@ -907,6 +904,7 @@ Stop immediately after completing the structure.
           "Start your response directly with the content. No introductory phrases like 'Absolutely', 'Certainly', 'Sure', 'Yes', etc."
       });
 
+      
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
       }
@@ -935,11 +933,11 @@ Stop immediately after completing the structure.
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
-        stream: true,
-        temperature: 0,
-        max_tokens: codeMode ? 1000 : 700, // Increased for better formatting
+    const stream = await openai.chat.completions.create({
+  model: "gpt-4o-mini",
+  stream: true,
+  temperature: 0.3,  // Changed from 0
+  max_tokens: codeMode ? 1000 : 800,  // Changed from 900 : 550
         messages
       });
 
