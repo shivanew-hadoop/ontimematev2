@@ -977,12 +977,26 @@ RULES:
 // messages.push({ role: "user", content: "Can you explain..." });
 
   const stream = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    stream: true,
-    temperature: 0.5,  // Higher for better format matching
-    max_tokens: 650,
-    messages
-  });
+  model: "gpt-4o",  // ← THE KEY CHANGE
+  stream: true,
+  temperature: 0.7,
+  max_tokens: 500,
+  top_p: 0.9,
+  frequency_penalty: 0.3,
+  presence_penalty: 0.2,
+  messages
+});
+
+// const stream = await openai.chat.completions.create({
+//   model: "gpt-4o-mini",
+//   stream: true,
+//   temperature: 0.7,
+//   max_tokens: 400,  // VERY strict limit
+//   top_p: 0.9,
+//   frequency_penalty: 0.5,  // High penalty
+//   presence_penalty: 0.3,
+//   messages
+// });
 
   try {
     for await (const chunk of stream) {
