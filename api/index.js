@@ -984,7 +984,7 @@ if (codeMode) {
     }
   } catch {}
   return res.end();
-} } else {
+}  else {
   // NON-STREAM PATH — HARD ENFORCED INTERVIEW OUTPUT
   let text = completion?.choices?.[0]?.message?.content || "";
 
