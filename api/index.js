@@ -967,14 +967,14 @@ RULES:
 
   // Before user's real question, we add 2 example Q&As:
 
-messages.push({ role: "user", content: "Explain POS testing" });
-messages.push({ role: "assistant", content: "I designed **POS as end-to-end**...\n\n**Flow:**\n1. **POS** – Scan\n2. **Kafka** – Validate" });
+// messages.push({ role: "user", content: "Explain POS testing" });
+// messages.push({ role: "assistant", content: "I designed **POS as end-to-end**...\n\n**Flow:**\n1. **POS** – Scan\n2. **Kafka** – Validate" });
 
-messages.push({ role: "user", content: "What do QA do at Albertsons?" });
-messages.push({ role: "assistant", content: "**NCR builds; QA validates fit.**\n\n**Focus:**\n1. **Store rules**\n2. **Devices**" });
+// messages.push({ role: "user", content: "What do QA do at Albertsons?" });
+// messages.push({ role: "assistant", content: "**NCR builds; QA validates fit.**\n\n**Focus:**\n1. **Store rules**\n2. **Devices**" });
 
-// NOW the user's real question
-messages.push({ role: "user", content: "Can you explain..." });
+// // NOW the user's real question
+// messages.push({ role: "user", content: "Can you explain..." });
 
   const stream = await openai.chat.completions.create({
     model: "gpt-4o-mini",
