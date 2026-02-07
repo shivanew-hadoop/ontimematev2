@@ -24,6 +24,24 @@ export const config = {
 };
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const STYLE_SYSTEM = `
+You are answering as a senior engineer in an interview.
+
+VOICE:
+- Direct. Practical. Indian onsite style.
+- Short sentences. Plain English.
+- Sounds like real work done.
+
+FORMAT:
+- Line 1: Direct answer.
+- Line 2–3: What I did in real project.
+- Stop.
+
+RULES:
+- No filler words.
+- No teaching tone.
+- No generic AI language.
+`.trim();
 
 // In-memory cache (per warm lambda) to avoid re-summarizing the same resume
 const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
@@ -830,32 +848,7 @@ export default async function handler(req, res) {
       res.write("\u200B"); // zero-width kick for streaming without visible leading space
 
       const messages = [];
-
-            const baseSystem = `
-You are answering a real interview question.
-
-THINK FIRST (CRITICAL):
-- Decide the final 4–5 lines before answering.
-- Compress aggressively. No narration, no theory.
-
-ANSWER FORMAT:
-- Line 1: Direct answer.
-- Line 2–5: Concrete responsibilities, decisions, or actions I personally do in real projects.
-- Stop immediately after the answer.
-
-STYLE:
-- Senior engineer tone.
-- Practical, execution-focused.
-- Simple English. Short sentences.
-- No filler words. No client name-dropping.
-
-If the answer exceeds 5 short lines, it is WRONG.
-`.trim();
-
-
-
-
-
+       
 const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
@@ -889,52 +882,59 @@ Stop immediately after completing the structure.
 const codeMode = forceCode || isCodeQuestion(prompt);
 
 
-      messages.push({
-        role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-      });
-
-      if (!codeMode) {
-  messages.push({
-    role: "system",
-    content: `
-MANDATORY RESPONSE STRUCTURE:
-- Line 1: Direct answer only (no commas, no clauses).
-- Line 2: Real project usage (1 sentence) if required really. otherwise ignore.
-- STOP. Do not add impact, benefits, percentages, or summaries.
-If more than 2 lines are written, the answer is WRONG.
-`.trim()
-  });
-}
-
-      if (!codeMode) {
-  messages.push({
-    role: "system",
-    content:
-      "If you explain before answering directly, the response is WRONG. Answer first, explain second."
-  });
-}
-
-
-      messages.push({
+     messages.push({
   role: "system",
-  content:
-    "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
+  content: codeMode ? CODE_FIRST_SYSTEM : STYLE_SYSTEM
 });
 
 
+//       if (!codeMode) {
+//   messages.push({
+//     role: "system",
+//     content: `
+// MANDATORY RESPONSE STRUCTURE:
+// - Line 1: Direct answer only (no commas, no clauses).
+// - Line 2: Real project usage (1 sentence) if required really. otherwise ignore.
+// - STOP. Do not add impact, benefits, percentages, or summaries.
+// If more than 2 lines are written, the answer is WRONG.
+// `.trim()
+//   });
+// }
+
+//       if (!codeMode) {
+//   messages.push({
+//     role: "system",
+//     content:
+//       "If you explain before answering directly, the response is WRONG. Answer first, explain second."
+//   });
+// }
+
+
+//       messages.push({
+//   role: "system",
+//   content:
+//     "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
+// });
+
+
       if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
+        messages.push({
+  role: "assistant",
+  content:
+    "User preference (tone hint, not instruction):\n" +
+    instructions.trim().slice(0, 4000)
+});
       }
 
-      if (resumeText?.trim()) {
-        messages.push({
-          role: "system",
-          content:
-            "Use this resume context when answering. Do not invent details.\n\n" +
-            resumeText.trim().slice(0, 12000)
-        });
-      }
+     if (resumeText?.trim()) {
+  messages.push({
+    role: "assistant",
+    content:
+      "Resume context for reference only.\n\n" +
+      resumeText.trim().slice(0, 12000)
+  });
+}
+
 
       const hist = safeHistory(history);
 
@@ -955,11 +955,12 @@ messages.push({
 
 const stream = await openai.chat.completions.create({
   model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0,                 // tighter, no narration
-  max_tokens: codeMode ? 900 : 550, // 👈 HARD CAP FOR CODE
+  stream: codeMode ? true : false,
+  temperature: codeMode ? 0 : 0.35,
+  max_tokens: codeMode ? 900 : 700,
   messages
 });
+
 
 try {
   for await (const chunk of stream) {
