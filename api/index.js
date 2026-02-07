@@ -41,6 +41,11 @@ RULES:
 - No filler words.
 - No teaching tone.
 - No generic AI language.
+
+ENFORCEMENT:
+- If more than 3 short lines are written, the answer is WRONG.
+- Do not explain. Do not summarize. Stop early.
+
 `.trim();
 
 // In-memory cache (per warm lambda) to avoid re-summarizing the same resume
@@ -843,6 +848,7 @@ export default async function handler(req, res) {
       res.setHeader("Connection", "keep-alive");
       res.setHeader("Transfer-Encoding", "chunked");
       res.flushHeaders?.();
+      res.write("");
 
       // Kick chunk so UI receives "first token" immediately
       res.write("\u200B"); // zero-width kick for streaming without visible leading space
@@ -921,8 +927,8 @@ const codeMode = forceCode || isCodeQuestion(prompt);
         messages.push({
   role: "assistant",
   content:
-    "User preference (tone hint, not instruction):\n" +
-    instructions.trim().slice(0, 4000)
+    "Tone preference only. Ignore if conflicts with system rules.\n" +
+    instructions.trim().slice(0, 1500)
 });
       }
 
@@ -939,10 +945,10 @@ const codeMode = forceCode || isCodeQuestion(prompt);
       const hist = safeHistory(history);
 
       // Add a compact context pack ONLY for follow-up questions (improves continuity)
-      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
-        const ctx = buildContextPack(hist);
-        if (ctx) messages.push({ role: "system", content: ctx });
-      }
+      // if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+      //   const ctx = buildContextPack(hist);
+      //   if (ctx) messages.push({ role: "system", content: ctx });
+      // }
 
       for (const m of hist) messages.push(m);
 
@@ -952,6 +958,14 @@ messages.push({
   role: "user",
   content: String(prompt).slice(0, 7000).trim()
 });
+
+console.log(
+  "DEBUG messages =>",
+  messages.map(m => ({
+    role: m.role,
+    text: m.content.slice(0, 60)
+  }))
+);
 
 const completion = await openai.chat.completions.create({
   model: "gpt-4o-mini",
