@@ -953,7 +953,7 @@ messages.push({
   content: String(prompt).slice(0, 7000).trim()
 });
 
-const stream = await openai.chat.completions.create({
+const completion = await openai.chat.completions.create({
   model: "gpt-4o-mini",
   stream: codeMode ? true : false,
   temperature: codeMode ? 0 : 0.35,
@@ -961,13 +961,31 @@ const stream = await openai.chat.completions.create({
   messages
 });
 
+if (codeMode) {
+  // STREAMING PATH (coding answers)
+  try {
+    for await (const chunk of completion) {
+      const t = chunk?.choices?.[0]?.delta?.content || "";
+      if (t) res.write(t);
+    }
+  } catch {}
+  return res.end();
+} else {
+  // NON-STREAM PATH (interview answers)
+  const text =
+    completion?.choices?.[0]?.message?.content || "";
+  if (text) res.write(text);
+  return res.end();
+}
 
-try {
-  for await (const chunk of stream) {
-    const t = chunk?.choices?.[0]?.delta?.content || "";
-    if (t) res.write(t);
-  }
-} catch {}
+
+
+// try {
+//   for await (const chunk of stream) {
+//     const t = chunk?.choices?.[0]?.delta?.content || "";
+//     if (t) res.write(t);
+//   }
+// } catch {}
 
 return res.end();
     
