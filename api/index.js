@@ -33,42 +33,42 @@ VOICE:
 - Short sentences. Plain English.
 - Sounds like real work done.
 
-FORMAT:
+FORMAT (MANDATORY):
 - Line 1: Direct answer.
-- Line 2–3: What I did in real project.
-- Stop.
+- Line 2: What I did in real project (1 line).
+- Line 3: Optional (only if needed). Otherwise stop.
 
 RULES:
-- No filler words.
-- No teaching tone.
-- No generic AI language.
-- NEVER start with: Absolutely, Certainly, Sure, In summary.
+- No filler words (Absolutely, Certainly, Sure, etc).
+- No "In summary", no "To conclude".
+- No long paragraphs.
+- Max 3 lines total.
 
 ENFORCEMENT:
-- If more than 3 short lines are written, the answer is WRONG.
-- Do not explain. Do not summarize. Stop early.
+- If more than 3 lines are written, the answer is WRONG.
+- Stop early.
 `.trim();
 
-const EXPLAIN_SYSTEM = `
+const EXPLAIN_SYSTEM_STRICT = `
 You are answering an interview explanation question.
 
-STYLE:
-- Clear.
-- Structured.
-- Real project language.
-- No generic filler.
+VOICE:
+- Direct. Practical. Production language.
 
 FORMAT (MANDATORY):
-- Short opening line.
-- Step-by-step flow (numbered or bullets).
-- Bold key systems / tools.
-- Real example if relevant.
+- Line 1: Direct answer (one sentence).
+- Lines 2-5: Steps (4 bullets max, each one short).
+- Line 6: One real example line (optional). If not needed, stop.
 
-RULES:
-- No fluff.
-- No generic definitions.
-- Sound like real production experience.
-- NEVER start with: Absolutely, Certainly, Sure, In summary.
+RULES (CRITICAL):
+- Max 6 lines total.
+- No paragraphs. No extra commentary.
+- No filler words (Absolutely, Certainly, Sure, etc).
+- No "In summary", no "To conclude".
+
+ENFORCEMENT:
+- If more than 6 lines are written, the answer is WRONG.
+- Stop immediately after format is satisfied.
 `.trim();
 
 const CODE_FIRST_SYSTEM = `
@@ -181,10 +181,7 @@ ${resumeText.slice(0, 20000)}
 }
 
 /**
- * Hardened multipart reader:
- * - waits for file stream completion
- * - handles aborted/limit/error
- * - avoids "finish" resolving before file end in edge cases
+ * Hardened multipart reader
  */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
@@ -773,13 +770,13 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-      // 1) ONE system message only (chooses correct persona)
+      // ONE system message only
       messages.push({
         role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : explanationMode ? EXPLAIN_SYSTEM : STYLE_SYSTEM
+        content: codeMode ? CODE_FIRST_SYSTEM : explanationMode ? EXPLAIN_SYSTEM_STRICT : STYLE_SYSTEM
       });
 
-      // 2) instructions must be SYSTEM (not assistant) to avoid poisoning
+      // keep instructions as SYSTEM (safe)
       if (!codeMode && instructions?.trim()) {
         messages.push({
           role: "system",
@@ -787,7 +784,7 @@ export default async function handler(req, res) {
         });
       }
 
-      // 3) resume context (optional, keep as assistant note)
+      // resume context (optional)
       if (resumeText?.trim()) {
         const summary = await getResumeSummary(resumeText.trim()).catch(() =>
           resumeText.trim().slice(0, 2500)
@@ -798,28 +795,25 @@ export default async function handler(req, res) {
         });
       }
 
-      // 4) IMPORTANT: for explanation questions, DO NOT send history (prevents “Absolutely…” leakage)
+      // IMPORTANT: for explanation questions, DO NOT send history
       const hist = safeHistory(history);
       if (!explanationMode) {
         for (const m of hist) messages.push(m);
       }
 
-      // 5) user prompt last
+      // user prompt last
       messages.push({
         role: "user",
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      console.log(
-        "DEBUG messages =>",
-        messages.map(m => ({ role: m.role, text: String(m.content || "").slice(0, 60) }))
-      );
-
       const completion = await openai.chat.completions.create({
         model: "gpt-4o-mini",
-        stream: codeMode, // only code streams (keeps UI stable)
-        temperature: codeMode ? 0 : 0.25,
-        max_tokens: codeMode ? 900 : explanationMode ? 500 : 250,
+        stream: codeMode,
+        temperature: codeMode ? 0 : 0.2,
+        max_tokens: codeMode ? 900 : explanationMode ? 220 : 140,
+        // helps cut rambling if model ignores constraints
+        stop: codeMode ? undefined : ["\n\n\n", "\nIn summary", "\nTo conclude"],
         messages
       });
 
