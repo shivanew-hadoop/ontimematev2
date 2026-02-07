@@ -832,33 +832,36 @@ export default async function handler(req, res) {
       const messages = [];
 
       // UPDATED SYSTEM PROMPTS
-      const baseSystem = `You are a professional interview coach providing structured, well-formatted responses.
+      const baseSystem = `You answer interview questions with SHORT, STRUCTURED responses.
 
-MANDATORY FORMATTING RULES (NON-NEGOTIABLE):
+FORMAT (MANDATORY):
 
-For explanation/description questions, you MUST use this structure:
+For "explain/describe" questions:
+- 1 sentence direct answer (bold the key insight)
+- Numbered list (3-7 items max, each 1 line with bold keywords)
+- Bullet points if showing reasons/benefits (3-5 max, bold key terms)
+- 1 sentence example
 
-[1-2 sentence overview]
+RULES:
+- Keep descriptions to ONE line per point
+- Use **bold** for key terms only
+- NO long explanations
+- NO filler words (Absolutely, Certainly, etc.)
+- NO verbose paragraphs
 
-**[Section Heading]:**
-1. **Key Point 1** - Brief description
-2. **Key Point 2** - Brief description
-3. **Key Point 3** - Brief description
+Example structure:
+**Main Point:** Brief answer.
 
-**[Another Section]:**
-- **Item A** - Explanation
-- **Item B** - Explanation  
+**Process:**
+1. **Step 1** – One line only
+2. **Step 2** – One line only
+3. **Step 3** – One line only
 
-**Example/Summary:** [Concrete example if relevant]
+**Why:**
+- **Reason A** – Brief explanation
+- **Reason B** – Brief explanation
 
-CRITICAL REQUIREMENTS:
-- Use numbered lists for sequential steps/processes
-- Use bullet points for features/benefits/reasons
-- Use **bold** for all key terms and section headings
-- NEVER write plain paragraph responses
-- NEVER use filler words (Absolutely, Certainly, Sure)
-
-If the question asks to "explain" or "describe", you MUST use the structured format above.`.trim();
+**Example:** One concrete scenario.`.trim();
 
       const CODE_FIRST_SYSTEM = `You are answering a coding question.
 
@@ -889,6 +892,10 @@ CRITICAL: Always use this exact markdown structure.`.trim();
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
+      messages.push({
+  role: "system",
+  content: "CRITICAL: Keep each point to ONE LINE. No verbose explanations. Use ChatGPT's concise style."
+});
       // Double enforcement for formatting
 if (!codeMode) {
   messages.push({
@@ -936,10 +943,10 @@ if (!codeMode) {
     const stream = await openai.chat.completions.create({
   model: "gpt-4o-mini",
   stream: true,
-  temperature: 0.3,  // Changed from 0
-  max_tokens: codeMode ? 1000 : 800,  // Changed from 900 : 550
-        messages
-      });
+  temperature: 0.4,  // Changed from 0 or 0.3
+  max_tokens: codeMode ? 1000 : 600,  // REDUCED from 800 to force brevity
+  messages
+});
 
       try {
         for await (const chunk of stream) {
