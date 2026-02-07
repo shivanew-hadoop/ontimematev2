@@ -811,7 +811,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — STREAM FIRST BYTE IMMEDIATELY                */
+    /* CHAT SEND — STREAM WITH IMPROVED FORMATTING             */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -831,78 +831,81 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-            const baseSystem = `
-You are answering live interview questions.
+      // UPDATED SYSTEM PROMPTS
+      const baseSystem = `
+You are answering live interview questions with professional, well-structured responses.
 
-ABSOLUTE RULE (APPLIES TO ALL QUESTIONS):
-- Start with the FINAL ANSWER immediately (1–2 sharp lines).
-- Then add a short explanation ONLY if needed (max 2 lines).
-- No introductions. No summaries. No filler.
-- No repeating the question.
-- Speak like a senior engineer under interview pressure.
+FORMATTING RULES:
+- For complex/multi-part questions (architecture, design, flow, comparisons): Use clear structure with numbered lists, bullet points, and sections.
+- For simple factual questions: Provide direct answer (1-2 lines), then brief explanation if needed.
+- Never repeat the question.
+- Never use filler words like "Absolutely", "Certainly", "Sure", "Yes", "In my experience" at the start.
+
+STRUCTURE FOR COMPLEX QUESTIONS:
+1. Brief overview (1-2 sentences)
+2. Main flow/steps (numbered list with descriptive items)
+3. Key points/rationale (bullet points with **bold** emphasis on important terms)
+4. Concrete example or outcome (if relevant)
+
+STRUCTURE FOR SIMPLE QUESTIONS:
+- Direct answer first (1-2 lines)
+- Brief explanation (1-2 lines if needed)
 
 STYLE:
-- Practical, real-world, experience-based.
-- Indian professional tone.
-- Simple English. Direct sentences.
-
-STOP once the answer is complete.
+- Practical, real-world, experience-based answers
+- Professional tone
+- Use **bold** for key terms and concepts
+- Use numbered lists for sequential steps
+- Use bullet points for features/benefits/reasons
+- Clear, organized formatting
 `.trim();
 
-
-
-const CODE_FIRST_SYSTEM = `
+      const CODE_FIRST_SYSTEM = `
 You are answering a coding interview question.
 
 OUTPUT RULES:
 - Start IMMEDIATELY with code. No intro text.
-- No theory before code.
-- Inline comments only for critical logic.
+- Use proper markdown code fencing with language identifier.
+- Add inline comments only for critical logic.
 
-STRUCTURE (MANDATORY):
-1) Code (fenced)
-2) Concepts: (1 line)
-3) Used in: (1 real scenario line)
+MANDATORY STRUCTURE:
+1. **Code Solution:**
+\`\`\`java
+// Your code here with minimal comments
+\`\`\`
+
+2. **Key Concepts:** (1-2 lines)
+3. **Real-world Usage:** (1 concrete example)
 
 OUTPUT CONTROL (CRITICAL):
-- Before answering, internally plan the response so it fully fits within the token limit.
+- Plan the complete response to fit within token limit before starting.
 - If code is long:
-  - Prioritize core logic
+  - Focus on core algorithm
   - Skip boilerplate
   - Avoid duplicate examples
 - NEVER cut code or explanation midway.
-- If it cannot fit, shorten — do NOT truncate.
+- If it cannot fit, simplify—do NOT truncate.
 
 Stop immediately after completing the structure.
 `.trim();
 
-
       const forceCode =
-  /\b(java)\b/i.test(prompt) &&
-  /\b(count|find|occurrence|program|stream)\b/i.test(prompt);
+        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
+        /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
 
-const codeMode = forceCode || isCodeQuestion(prompt);
-
+      const codeMode = forceCode || isCodeQuestion(prompt);
 
       messages.push({
         role: "system",
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
-      if (!codeMode) {
-  messages.push({
-    role: "system",
-    content:
-      "If you explain before answering directly, the response is WRONG. Answer first, explain second."
-  });
-}
 
-
+      // Anti-filler reinforcement
       messages.push({
-  role: "system",
-  content:
-    "Do NOT start answers with filler words like Absolutely, Certainly, Sure, Yes, In my experience. Start directly with the answer."
-});
-
+        role: "system",
+        content:
+          "Start your response directly with the content. No introductory phrases like 'Absolutely', 'Certainly', 'Sure', 'Yes', etc."
+      });
 
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 4000) });
@@ -912,14 +915,14 @@ const codeMode = forceCode || isCodeQuestion(prompt);
         messages.push({
           role: "system",
           content:
-            "Use this resume context when answering. Do not invent details.\n\n" +
+            "Use this resume context when relevant. Do not invent details.\n\n" +
             resumeText.trim().slice(0, 12000)
         });
       }
 
       const hist = safeHistory(history);
 
-      // Add a compact context pack ONLY for follow-up questions (improves continuity)
+      // Add context pack for follow-up questions
       if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
         const ctx = buildContextPack(hist);
         if (ctx) messages.push({ role: "system", content: ctx });
@@ -927,36 +930,27 @@ const codeMode = forceCode || isCodeQuestion(prompt);
 
       for (const m of hist) messages.push(m);
 
-      // Keep prompt as-is (no extra prefix that might alter meaning)
-      // Send only the raw prompt to reduce the chance of the model echoing it.
-messages.push({
-  role: "user",
-  content: String(prompt).slice(0, 7000).trim()
-});
+      messages.push({
+        role: "user",
+        content: String(prompt).slice(0, 7000).trim()
+      });
 
-const stream = await openai.chat.completions.create({
-  model: "gpt-4o-mini",
-  stream: true,
-  temperature: 0,                 // tighter, no narration
-  max_tokens: codeMode ? 900 : 550, // 👈 HARD CAP FOR CODE
-  messages
-});
-
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        stream: true,
+        temperature: 0,
+        max_tokens: codeMode ? 1000 : 700, // Increased for better formatting
+        messages
+      });
 
       try {
-  for await (const chunk of stream) {
-    const t = chunk?.choices?.[0]?.delta?.content || "";
-    if (t) res.write(t);
-  }
-} catch {}
+        for await (const chunk of stream) {
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
+        }
+      } catch {}
 
-// 🔒 Anti-theory guardrail: stop model from drifting into explanations
-// if (!codeMode) {
-//   res.write("\n\n");
-// }
-
-return res.end();
-
+      return res.end();
     }
 
     /* ------------------------------------------------------- */
