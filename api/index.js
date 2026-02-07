@@ -48,6 +48,28 @@ ENFORCEMENT:
 
 `.trim();
 
+const EXPLAIN_SYSTEM = `
+You are answering an interview explanation question.
+
+STYLE:
+- Clear.
+- Structured.
+- Real project language.
+- No generic filler.
+
+FORMAT (MANDATORY):
+- Short opening line.
+- Step-by-step flow (numbered or bullets).
+- Bold key systems / tools.
+- Real example if relevant.
+
+RULES:
+- No fluff.
+- No generic definitions.
+- Sound like real production experience.
+`.trim();
+
+
 // In-memory cache (per warm lambda) to avoid re-summarizing the same resume
 const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
 
@@ -338,42 +360,42 @@ function normalizeQ(q = "") {
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // Strong explanation patterns (no code needed)
-  const explainStarts = [
+  // Questions that require structured / flow-based answers
+  const explanationSignals = [
+    // intent
     "explain",
-    "what is",
-    "how does",
+    "how",
     "why",
+    "what do",
+    "what happens",
     "describe",
-    "define",
-    "difference between",
-    "compare",
-    "advantages",
-    "disadvantages",
-    "pros and cons"
-  ];
 
-  // Common deep-dive / theory topics (usually explanation)
-  const explainTopics = [
+    // scope / responsibility
+    "your role",
+    "your responsibility",
+    "your experience",
+    "what do you",
+    "how do you",
+
+    // systems / process
+    "flow",
+    "end to end",
+    "end-to-end",
     "architecture",
     "design",
-    "lifecycle",
-    "internals",
-    "jvm",
-    "garbage collector",
-    "class loader",
-    "multithreading",
-    "deadlock",
-    "solid",
-    "oops",
-    "normalization"
+    "pipeline",
+    "integration",
+    "testing",
+    "pos",
+    "system",
+    "process",
+    "workflow",
+    "approach"
   ];
 
-  return (
-    explainStarts.some(p => s.startsWith(p)) ||
-    explainTopics.some(t => s.includes(t))
-  );
+  return explanationSignals.some(k => s.includes(k));
 }
+
 
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
@@ -888,9 +910,20 @@ Stop immediately after completing the structure.
 const codeMode = forceCode || isCodeQuestion(prompt);
 
 
-     messages.push({
+//      messages.push({
+//   role: "system",
+//   content: codeMode ? CODE_FIRST_SYSTEM : STYLE_SYSTEM
+// });
+
+const explanationMode = isExplanationQuestion(prompt);
+
+messages.push({
   role: "system",
-  content: codeMode ? CODE_FIRST_SYSTEM : STYLE_SYSTEM
+  content: codeMode
+    ? CODE_FIRST_SYSTEM
+    : explanationMode
+      ? EXPLAIN_SYSTEM
+      : STYLE_SYSTEM
 });
 
 
@@ -976,7 +1009,6 @@ const completion = await openai.chat.completions.create({
 });
 
 if (codeMode) {
-  // STREAMING PATH (coding answers)
   try {
     for await (const chunk of completion) {
       const t = chunk?.choices?.[0]?.delta?.content || "";
@@ -984,25 +1016,12 @@ if (codeMode) {
     }
   } catch {}
   return res.end();
-}  else {
-  let text = completion?.choices?.[0]?.message?.content || "";
-
-  const explanationMode = isExplanationQuestion(prompt);
-
-  if (!explanationMode) {
-    // 🔒 SHORT INTERVIEW MODE (3 lines)
-    text = text
-      .split("\n")
-      .map(l => l.trim())
-      .filter(Boolean)
-      .slice(0, 3)
-      .join("\n");
-  }
-  // else: keep full structured markdown
-
+} else {
+  const text = completion?.choices?.[0]?.message?.content || "";
   res.write(text);
   return res.end();
 }
+
 
 
 
