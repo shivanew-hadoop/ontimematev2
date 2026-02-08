@@ -664,15 +664,33 @@ function extractPriorQuestions() {
   return Array.from(new Set(qs)).slice(-8);
 }
 
+
 function guessDomainBias(text) {
   const s = (text || "").toLowerCase();
+  
+  // Only return domain if question is genuinely vague (< 5 words)
+  const wordCount = s.trim().split(/\s+/).length;
+  if (wordCount > 5) return "";  // Question is specific enough
+  
+  // For very vague questions, infer domain from recent context
   const hits = [];
-  if (s.includes("selenium") || s.includes("cucumber") || s.includes("bdd") || s.includes("playwright")) hits.push("test automation");
-  if (s.includes("page object") || s.includes("pom") || s.includes("singleton") || s.includes("factory")) hits.push("automation design patterns");
   if (s.includes("trigger") || s.includes("sql") || s.includes("database") || s.includes("data model") || s.includes("fact") || s.includes("dimension")) hits.push("data modeling / databases");
-  if (s.includes("api") || s.includes("postman") || s.includes("rest")) hits.push("api testing / integration");
-  if (s.includes("supabase") || s.includes("jwt") || s.includes("auth") || s.includes("token")) hits.push("auth / backend");
-  return hits.slice(0, 3).join(", ");
+
+  if (s.includes("trigger") || s.includes("database") || s.includes("sql")) {
+    hits.push("database design");
+  }
+  if (s.includes("api") || s.includes("rest") || s.includes("grpc")) {
+    hits.push("API integration");
+  }
+  if (s.includes("auth") || s.includes("jwt") || s.includes("token")) {
+    hits.push("authentication");
+  }
+  if (s.includes("test") || s.includes("automation") || s.includes("selenium") || s.includes("cucumber") || s.includes("bdd") || s.includes("playwright")) {
+    hits.push("test automation");
+  
+  }
+  
+  return hits.slice(0, 1).join("");  // Return at most 1 domain, or empty
 }
 
 function extractAnchorKeywords(text) {
@@ -711,13 +729,13 @@ function isNewTopic(text) {
 }
 
 function buildDraftQuestion(spoken) {
-  // 1️⃣ Hard cleanup (kills Arabic, junk, filler)
   let s = normalizeSpokenText(normalize(spoken))
-    .replace(/[^\x00-\x7F]/g, " ")           // remove Arabic, unicode junk
+    .replace(/[^\x00-\x7F]/g, " ")
     .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
     .replace(/\s+/g, " ")
     .trim();
-     if (isNewTopic(s)) {
+
+  if (isNewTopic(s)) {
     activeIntent = null;
     activeTech = null;
   }
@@ -725,53 +743,85 @@ function buildDraftQuestion(spoken) {
   if (!s) return "Q: Can you explain your current project end-to-end?";
 
   const low = s.toLowerCase();
+  const wordCount = s.split(/\s+/).length;
 
-  // 2️⃣ Detect language
-  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd)/i.exec(low);
+  // Detect language
+  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd|typescript|react|node)/i.exec(low);
   if (techMatch) activeTech = techMatch[1].toLowerCase();
 
-  // 3️⃣ Coding signals
-  const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge"];
-  const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","api"];
+  // === CODING INTENT ===
+  const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge","parse","filter","map","reduce"];
+  const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","xml","character"];
+  
+  const hasCodeVerb = CODE_VERBS.some(v => low.includes(v));
+  const hasCodeNoun = CODE_NOUNS.some(n => low.includes(n));
 
-  const hasVerb = CODE_VERBS.some(v => low.includes(v));
-  const hasNoun = CODE_NOUNS.some(n => low.includes(n));
-
-  // 4️⃣ If user just said "java" or "python"
-  if (!hasVerb && activeIntent === "code" && activeTech) {
-    return `Q: Write ${activeTech} code for the previous problem and explain the logic.`;
-  }
-
-  // 5️⃣ Lock coding intent
-  if (hasVerb && hasNoun) {
+  if (hasCodeVerb && hasCodeNoun) {
     activeIntent = "code";
-    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic `;
+    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic.`;
   }
 
-  // 6️⃣ Debug
-  if (/error|issue|not working|failed|bug|timeout/.test(low)) {
-    activeIntent = "debug";
-    return `Q: How would you debug ${s} and what steps did you take in production?`;
+  if (!hasCodeVerb && activeIntent === "code" && activeTech) {
+    return `Q: Write ${activeTech} code for the previous problem and explain it.`;
   }
 
-  // 7️⃣ Design
-  if (/architecture|design|flow|system|microservice|pattern/.test(low)) {
+  // === SYSTEM DESIGN / ARCHITECTURE ===
+  if (/architect|design|flow|system|microservice|orchestrat|pipeline|communication|integration|distributed/.test(low)) {
     activeIntent = "design";
-    return `Q: Explain the ${s} you designed and why this architecture was chosen.`;
+    
+    // Check if it's asking "how" something works
+    if (/how .+ work|how .+ communicate|how .+ handle|how .+ manage/.test(low)) {
+      return `Q: Can you explain how ${s.replace(/^how /i, "")}?`;
+    }
+    
+    return `Q: Can you explain the ${s}?`;
   }
 
-  // 8️⃣ Theory
-  if (/what is|explain|define|theory/.test(low)) {
+  // === TECHNICAL MECHANISMS ===
+  if (/circuit breaker|retry|timeout|backoff|fallback|cache|queue|buffer|throttle|rate limit/.test(low)) {
+    activeIntent = "mechanism";
+    return `Q: Can you explain ${s}?`;
+  }
+
+  // === DEBUGGING / TROUBLESHOOTING ===
+  if (/error|issue|problem|bug|fail|timeout|crash|debug|fix|solve/.test(low)) {
+    activeIntent = "debug";
+    
+    if (wordCount <= 4) {
+      return `Q: How would you debug ${s}?`;
+    }
+    
+    return `Q: Can you explain ${s}?`;
+  }
+
+  // === THEORY / CONCEPTS ===
+  if (/what is|define|explain|describe|difference between|compare/.test(low)) {
     activeIntent = "theory";
-    return `Q: Can you explain ${s} with a real-world example?`;
+    return `Q: Can you explain ${s.replace(/^(what is|define|explain|describe) /i, "")}?`;
   }
 
-  // 9️⃣ Fallback using previous intent
-  if (activeIntent === "code") {
-    return `Q: Write ${activeTech || "a"} program related to ${s} and explain it.`;
+  // === WORKFLOW / PROCESS ===
+  if (/step by step|process|workflow|after .+ then|when .+ happen/.test(low)) {
+    activeIntent = "workflow";
+    return `Q: Can you explain ${s} step-by-step?`;
   }
 
-  return `Q: Can you explain ${s} with a real project example?`;
+  // === GENERAL TECHNICAL QUESTION ===
+  // If question is already well-formed (> 8 words), keep it
+  if (wordCount >= 8) {
+    // Just capitalize and add Q: prefix
+    return `Q: ${s.charAt(0).toUpperCase() + s.slice(1)}${s.endsWith('?') ? '' : '?'}`;
+  }
+
+  // === SHORT TECHNICAL FRAGMENTS ===
+  // For short fragments (< 8 words), expand intelligently
+  if (wordCount <= 3) {
+    // Very short - ask for explanation
+    return `Q: Can you explain ${s} with an example?`;
+  }
+  
+  // Medium length (4-7 words) - likely already a question, just clean it up
+  return `Q: Can you explain ${s}?`;
 }
 
 
@@ -791,21 +841,15 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   if (!base) return "";
 
   const priorQs = extractPriorQuestions();
-  const domainBias = guessDomainBias((resumeTextMem || "") + "\n" + base);
 
-  // Build minimal context - backend handles formatting
-  let context = "";
-  
-  if (domainBias) {
-    context += `Domain: ${domainBias}\n`;
-  }
+  // Build simple prompt - NO domain injection
+  let prompt = base;
   
   if (priorQs.length) {
-    context += `\nPreviously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n`;
+    prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
   }
 
-  // Send question with context - backend will format the response
-  return context ? `${context}\n${base}` : base;
+  return prompt;
 }
 
 // That's it! The backend already has the ChatGPT-style system prompt.
