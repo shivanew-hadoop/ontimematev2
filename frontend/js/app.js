@@ -729,99 +729,233 @@ function isNewTopic(text) {
 }
 
 function buildDraftQuestion(spoken) {
-  let s = normalizeSpokenText(normalize(spoken))
-    .replace(/[^\x00-\x7F]/g, " ")
-    .replace(/\b(how you can|you can|can you|how can)\b/gi, " ")
-    .replace(/\s+/g, " ")
+  // Step 1: Light cleanup ONLY (don't destroy meaning)
+  const cleaned = normalize(spoken)
+    .replace(/\s+/g, " ")  // Normalize whitespace only
     .trim();
-
-  if (isNewTopic(s)) {
-    activeIntent = null;
-    activeTech = null;
-  }
-
-  if (!s) return "Q: Can you explain your current project end-to-end?";
-
-  const low = s.toLowerCase();
-  const wordCount = s.split(/\s+/).length;
-
-  // Detect language
-  const techMatch = /(java|python|c\+\+|javascript|sql|selenium|playwright|bdd|typescript|react|node)/i.exec(low);
-  if (techMatch) activeTech = techMatch[1].toLowerCase();
-
-  // === CODING INTENT ===
-  const CODE_VERBS = ["reverse","count","sort","find","check","validate","convert","remove","replace","merge","parse","filter","map","reduce"];
-  const CODE_NOUNS = ["string","number","array","list","digits","vowels","palindrome","json","xml","character"];
   
-  const hasCodeVerb = CODE_VERBS.some(v => low.includes(v));
-  const hasCodeNoun = CODE_NOUNS.some(n => low.includes(n));
-
-  if (hasCodeVerb && hasCodeNoun) {
-    activeIntent = "code";
-    return `Q: Write ${activeTech || "a"} program to ${s} and explain the logic.`;
-  }
-
-  if (!hasCodeVerb && activeIntent === "code" && activeTech) {
-    return `Q: Write ${activeTech} code for the previous problem and explain it.`;
-  }
-
-  // === SYSTEM DESIGN / ARCHITECTURE ===
-  if (/architect|design|flow|system|microservice|orchestrat|pipeline|communication|integration|distributed/.test(low)) {
-    activeIntent = "design";
-    
-    // Check if it's asking "how" something works
-    if (/how .+ work|how .+ communicate|how .+ handle|how .+ manage/.test(low)) {
-      return `Q: Can you explain how ${s.replace(/^how /i, "")}?`;
-    }
-    
-    return `Q: Can you explain the ${s}?`;
-  }
-
-  // === TECHNICAL MECHANISMS ===
-  if (/circuit breaker|retry|timeout|backoff|fallback|cache|queue|buffer|throttle|rate limit/.test(low)) {
-    activeIntent = "mechanism";
-    return `Q: Can you explain ${s}?`;
-  }
-
-  // === DEBUGGING / TROUBLESHOOTING ===
-  if (/error|issue|problem|bug|fail|timeout|crash|debug|fix|solve/.test(low)) {
-    activeIntent = "debug";
-    
-    if (wordCount <= 4) {
-      return `Q: How would you debug ${s}?`;
-    }
-    
-    return `Q: Can you explain ${s}?`;
-  }
-
-  // === THEORY / CONCEPTS ===
-  if (/what is|define|explain|describe|difference between|compare/.test(low)) {
-    activeIntent = "theory";
-    return `Q: Can you explain ${s.replace(/^(what is|define|explain|describe) /i, "")}?`;
-  }
-
-  // === WORKFLOW / PROCESS ===
-  if (/step by step|process|workflow|after .+ then|when .+ happen/.test(low)) {
-    activeIntent = "workflow";
-    return `Q: Can you explain ${s} step-by-step?`;
-  }
-
-  // === GENERAL TECHNICAL QUESTION ===
-  // If question is already well-formed (> 8 words), keep it
-  if (wordCount >= 8) {
-    // Just capitalize and add Q: prefix
-    return `Q: ${s.charAt(0).toUpperCase() + s.slice(1)}${s.endsWith('?') ? '' : '?'}`;
-  }
-
-  // === SHORT TECHNICAL FRAGMENTS ===
-  // For short fragments (< 8 words), expand intelligently
-  if (wordCount <= 3) {
-    // Very short - ask for explanation
-    return `Q: Can you explain ${s} with an example?`;
+  if (!cleaned) return "Q: Can you walk me through your current project?";
+  
+  const low = cleaned.toLowerCase();
+  
+  // Step 2: Detect if it's already a well-formed question
+  if (isWellFormedQuestion(cleaned)) {
+    // Just capitalize and ensure it ends with ?
+    return formatAsQuestion(cleaned);
   }
   
-  // Medium length (4-7 words) - likely already a question, just clean it up
-  return `Q: Can you explain ${s}?`;
+  // Step 3: Detect question type from conversational cues
+  const questionType = detectQuestionIntent(cleaned);
+  
+  // Step 4: Frame appropriately based on detected intent
+  return frameQuestion(cleaned, questionType);
+}
+
+// ============================================================================
+// HELPER 1: Check if already a good question
+// ============================================================================
+function isWellFormedQuestion(text) {
+  const t = text.trim();
+  
+  // Already has question structure
+  if (/^(can you|could you|would you|how do|how does|what is|what are|why|when|where|which|who)\b/i.test(t)) {
+    return true;
+  }
+  
+  // Already ends with question mark and is long enough
+  if (t.endsWith('?') && t.split(' ').length >= 5) {
+    return true;
+  }
+  
+  return false;
+}
+
+// ============================================================================
+// HELPER 2: Detect what they're really asking about
+// ============================================================================
+function detectQuestionIntent(text) {
+  const low = text.toLowerCase();
+  
+  // WORKFLOW / PROCESS questions
+  if (/after .+ then|step by step|process|workflow|flow/.test(low)) {
+    return { type: 'workflow', marker: 'step-by-step' };
+  }
+  
+  // HOW IT WORKS questions
+  if (/how .+ work|how .+ communicate|how .+ handle|how .+ manage/.test(low)) {
+    return { type: 'mechanism', marker: 'how-it-works' };
+  }
+  
+  // TECHNICAL COMPARISON
+  if (/difference|compare|versus|vs\b|better than/.test(low)) {
+    return { type: 'comparison', marker: 'compare' };
+  }
+  
+  // PROBLEM/DEBUGGING
+  if (/error|issue|problem|fail|timeout|bug|not working/.test(low)) {
+    return { type: 'debug', marker: 'troubleshoot' };
+  }
+  
+  // ARCHITECTURE/DESIGN
+  if (/architect|design|structure|pattern|approach/.test(low)) {
+    return { type: 'design', marker: 'architecture' };
+  }
+  
+  // IMPLEMENTATION (specific tech/tool)
+  if (/circuit breaker|retry|cache|queue|orchestrat|grpc|rest api|kafka|redis|postgres/.test(low)) {
+    return { type: 'implementation', marker: 'technical' };
+  }
+  
+  // CODING task
+  if (/write|code|program|implement|function|algorithm/.test(low)) {
+    return { type: 'code', marker: 'coding' };
+  }
+  
+  // DEFINITION/CONCEPT
+  if (/what is|what are|define|meaning of/.test(low)) {
+    return { type: 'definition', marker: 'concept' };
+  }
+  
+  // EXPERIENCE/PROJECT
+  if (/your project|your work|your role|your experience|you did|you worked/.test(low)) {
+    return { type: 'experience', marker: 'project-based' };
+  }
+  
+  // DEFAULT: General explanation
+  return { type: 'general', marker: 'explain' };
+}
+
+// ============================================================================
+// HELPER 3: Frame the question naturally based on intent
+// ============================================================================
+function frameQuestion(text, intent) {
+  const cleaned = text.trim();
+  
+  switch (intent.type) {
+    case 'workflow':
+      // "after APM then work starts" → "Walk me through the workflow after APM approval"
+      return `Q: Walk me through ${extractCore(cleaned)}`;
+    
+    case 'mechanism':
+      // "how communication works between services" → "How does communication work between services?"
+      if (/^how /i.test(cleaned)) {
+        return formatAsQuestion(cleaned);
+      }
+      return `Q: How does ${extractCore(cleaned)} work?`;
+    
+    case 'comparison':
+      // "difference between X and Y" → "What's the difference between X and Y?"
+      return `Q: What's ${extractCore(cleaned)}?`;
+    
+    case 'debug':
+      // "timeout error in vendor calls" → "How would you debug timeout errors in vendor calls?"
+      return `Q: How would you troubleshoot ${extractCore(cleaned)}?`;
+    
+    case 'design':
+      // "architecture for microservices" → "What architecture did you use for microservices?"
+      return `Q: What ${extractCore(cleaned)} did you design and why?`;
+    
+    case 'implementation':
+      // "circuit breaker algorithm" → "What circuit breaker implementation did you use?"
+      return `Q: How did you implement ${extractCore(cleaned)}?`;
+    
+    case 'code':
+      // "reverse string in java" → "Write a Java program to reverse a string"
+      const tech = detectTech(cleaned);
+      return `Q: Write ${tech ? tech + ' code' : 'a program'} to ${extractCore(cleaned)}`;
+    
+    case 'definition':
+      // "what is circuit breaker" → "What is a circuit breaker?"
+      return formatAsQuestion(cleaned);
+    
+    case 'experience':
+      // "your project microservices" → "Can you describe your microservices project?"
+      return `Q: Can you describe ${extractCore(cleaned)}?`;
+    
+    default:
+      // Generic fallback - but smarter than just "Can you explain"
+      const core = extractCore(cleaned);
+      
+      // If it mentions a specific tech, ask about implementation
+      if (detectTech(core)) {
+        return `Q: How did you work with ${core}?`;
+      }
+      
+      // If it's conceptual, ask for explanation
+      if (core.split(' ').length <= 3) {
+        return `Q: What is ${core}?`;
+      }
+      
+      // If longer, ask them to describe it
+      return `Q: Can you describe ${core}?`;
+  }
+}
+
+// ============================================================================
+// HELPER 4: Extract the core topic (remove filler)
+// ============================================================================
+function extractCore(text) {
+  let core = text.trim();
+  
+  // Remove common filler at the start
+  core = core.replace(/^(so|like|basically|uh|um|well|okay|alright|yeah)\b,?\s*/gi, '');
+  
+  // Remove trailing filler
+  core = core.replace(/\s+(right|okay|you know|like that|basically|sort of)$/gi, '');
+  
+  // Remove excessive "like"
+  core = core.replace(/\blike,?\s+/gi, ' ');
+  
+  // Remove "we did the hand with" type phrases
+  core = core.replace(/we did the hand with\s+/gi, '');
+  core = core.replace(/we have\s+/gi, '');
+  core = core.replace(/you have\s+/gi, '');
+  
+  // Clean up whitespace
+  core = core.replace(/\s+/g, ' ').trim();
+  
+  return core;
+}
+
+// ============================================================================
+// HELPER 5: Detect programming language/tech
+// ============================================================================
+function detectTech(text) {
+  const low = text.toLowerCase();
+  
+  const techs = {
+    java: /\bjava\b/,
+    python: /\bpython\b/,
+    javascript: /\b(javascript|js|node)\b/,
+    typescript: /\btypescript\b/,
+    sql: /\bsql\b/,
+    react: /\breact\b/,
+    spring: /\bspring\b/
+  };
+  
+  for (const [name, pattern] of Object.entries(techs)) {
+    if (pattern.test(low)) return name.charAt(0).toUpperCase() + name.slice(1);
+  }
+  
+  return null;
+}
+
+// ============================================================================
+// HELPER 6: Format existing question nicely
+// ============================================================================
+function formatAsQuestion(text) {
+  let q = text.trim();
+  
+  // Capitalize first letter
+  q = q.charAt(0).toUpperCase() + q.slice(1);
+  
+  // Ensure ends with ?
+  if (!q.endsWith('?')) q += '?';
+  
+  // Add Q: prefix if not present
+  if (!q.startsWith('Q:')) q = 'Q: ' + q;
+  
+  return q;
 }
 
 
