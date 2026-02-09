@@ -263,36 +263,65 @@ let micLangIndex = 0;
 
 const TRANSCRIBE_PROMPT = `Transcribe English accurately for both Indian and American accents.
 
+CRITICAL: Listen carefully and transcribe EXACTLY what is spoken.
+
 ACCENT HANDLING:
-- Indian English: Accept pronunciations like "shed-yool" (schedule), "vit-amin" (vitamin)
-- American English: Standard American pronunciations
+- Indian English: "shed-yool" (schedule), "vit-amin" (vitamin), "al-go-rithm" (algorithm)
+- American English: Standard pronunciations
 - Both are equally valid - transcribe what you hear
 
-TECHNICAL VOCABULARY (Common in conversation):
-- Microservices: orchestrator, gRPC, REST API, vendor, circuit breaker
-- Databases: Kafka, Redis, PostgreSQL, MongoDB, SQL
-- Testing: Selenium, Robot Framework, Playwright, Cucumber, BDD
-- Cloud: AWS, Azure, API Gateway, Lambda
-- General: authentication, authorization, JWT, token, session
+TECHNICAL VOCABULARY (MUST RECOGNIZE ACCURATELY):
+Software Testing:
+- BDD (Behavior Driven Development) - NOT "build" or "bed"
+- TDD (Test Driven Development)  
+- Selenium, Playwright, Cucumber
+- Robot Framework, pytest, JUnit
+- Regression, integration, end-to-end
+
+Microservices/Backend:
+- orchestrator, gRPC, REST API, vendor, circuit breaker
+- Kafka, Redis, PostgreSQL, MongoDB, Cassandra
+- API Gateway, Lambda, microservice
+- authentication, authorization, JWT, OAuth, SAML
+
+Frontend/General:
+- React, Angular, Vue, TypeScript, JavaScript
+- Docker, Kubernetes, Jenkins, CI/CD
+- AWS, Azure, GCP, cloud
+
+Common Phrases:
+- "top challenges" NOT "apply challenges"
+- "give challenges" NOT "apply challenges"  
+- "one book every week" NOT "one but every week"
+- "do you know what will happen" NOT "you know what will happen"
 
 SPELLING:
-- Accept both: colour/color, centre/center, behaviour/behavior
-- Use context to determine which is appropriate
+- Accept both British (colour, centre) and American (color, center)
+- Use context to determine
 
-AUDIO QUALITY:
-- Low volume: Amplify and interpret, don't assume silence
-- Background noise: Focus on primary speaker
-- Unclear words: Omit that word only, don't guess
+AUDIO QUALITY RULES:
+- Low volume: AMPLIFY and interpret, don't assume silence
+- Background noise: Focus on primary speaker, ignore ambient sounds
+- Faded audio: Increase sensitivity, still transcribe
+- Unclear single words: Omit that word only, continue with rest
 
-STRICT RULES:
-- Do NOT add filler: "Thanks for watching", "Subscribe", "Please like"
-- Do NOT translate Hindi/Telugu/Tamil - drop completely
-- Do NOT repeat phrases
-- Do NOT add new words not spoken
-- If uncertain about a word, omit it
+STRICT ANTI-HALLUCINATION RULES:
+- Do NOT add: "Thanks for watching", "Subscribe", "Please like"
+- Do NOT translate Hindi/Telugu/Tamil - drop non-English completely
+- Do NOT repeat phrases or sentences
+- Do NOT add words not spoken
+- Do NOT guess unclear words - omit them
+- If very uncertain, output empty string rather than wrong words
 
-Indian names are valid: Chetan, Shiva, Rahul, Priya, Aditya, Manne
-Numbers: "lakh" = 100,000, "crore" = 10,000,000`;
+DUPLICATE PREVENTION:
+- Do NOT output the same sentence twice
+- Do NOT repeat phrases word-for-word
+- Each transcription should be unique content
+
+Indian names are valid: Chetan, Shiva, Rahul, Priya, Aditya, Manne, Kumar, Singh
+Numbers: "lakh" = 100,000, "crore" = 10,000,000
+
+TRANSCRIBE EXACTLY WHAT IS SPOKEN. ACCURACY OVER SPEED.`;
 
 
 /* -------------------------------------------------------------------------- */
@@ -1220,6 +1249,8 @@ function stopAsrSession(which) {
   else sysAsr = null;
 }
 
+const COMMIT_WORDS = 50;
+
 function asrUpsertDelta(which, itemId, deltaText) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
@@ -1227,48 +1258,42 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
   
-  // === NEW: Track what we've already shown for word-by-word display ===
-  if (!s.itemShown) s.itemShown = {};
-  if (!s.itemShown[itemId]) s.itemShown[itemId] = "";
+  // Track what we've already committed to timeline
+  if (!s.itemCommitted) s.itemCommitted = {};
+  if (!s.itemCommitted[itemId]) s.itemCommitted[itemId] = "";
   
   s.itemText[itemId] += String(deltaText || "");
   
-  // === NEW: Word-by-word display for system audio ===
+  // === WORD-BY-WORD DISPLAY (SYSTEM AUDIO) ===
   if (which === "sys") {
     const fullText = normalize(s.itemText[itemId]);
-    const shownText = s.itemShown[itemId];
+    const alreadyCommitted = s.itemCommitted[itemId];
     
-    // Find new words that haven't been shown yet
-    const newPart = fullText.slice(shownText.length).trim();
+    // Find new text since last commit
+    const newText = fullText.slice(alreadyCommitted.length).trim();
     
-    if (newPart) {
-      // Split into words
-      const words = newPart.split(/\s+/);
+    if (newText) {
+      const words = newText.split(/\s+/);
       
-      // Show complete words immediately (keep last word in buffer if incomplete)
-      if (words.length > 1 || /[.!?,;:\n]$/.test(newPart)) {
-        // We have complete word(s) - show them now
-        const toShow = words.length > 1 
-          ? words.slice(0, -1).join(" ") + " "  // Show all but last word
-          : newPart;  // Or show everything if it ends with punctuation
+      // Commit complete words immediately
+      // Keep last incomplete word in buffer
+      if (words.length > 1 || /[.!?,;:\n]$/.test(newText)) {
+        const toCommit = words.length > 1 
+          ? words.slice(0, -1).join(" ") + " "
+          : newText;
         
-        if (toShow.trim()) {
-          // Show this word immediately (0 = no delay)
-          addTypewriterSpeech(toShow, 0, "interviewer");
+        if (toCommit.trim()) {
+          // Add to timeline immediately with NO typewriter delay
+          addTypewriterSpeech(toCommit, 0, "interviewer");
           
-          // Update what we've shown
-          s.itemShown[itemId] = shownText + toShow;
+          // Update committed tracker
+          s.itemCommitted[itemId] = alreadyCommitted + toCommit;
         }
       }
     }
   }
   
-  // === EXISTING LOGIC (unchanged) ===
-  const words = normalize(s.itemText[itemId]).split(" ");
-  if (words.length >= COMMIT_WORDS) {
-    asrFinalizeItem(which, itemId, s.itemText[itemId]);
-  }
-
+  // === KEEP ENTRY UPDATED FOR INTERIM DISPLAY ===
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
 
@@ -1322,22 +1347,22 @@ function sendAsrConfig(ws) {
     input_audio_format: "pcm16",
     input_audio_transcription: {
       model: REALTIME_ASR_MODEL,
-      language: "en",  // Changed from "en-IN" for better multi-accent support
-      prompt: TRANSCRIBE_PROMPT + 
-        " The speaker may have an Indian English or American English accent. " +
-        "Recognize both Indian pronunciation (e.g., 'shed-yool' for schedule) and American pronunciation. " +
-        "Common technical terms: microservice, orchestrator, gRPC, circuit breaker, Kafka, Redis, API, vendor, REST. " +
-        "Accept both British spelling (colour, centre) and American spelling (color, center). " +
-        "Low volume audio should be interpreted, not ignored.",
-      temperature: 0.2  // Lower = less hallucination, more accurate
+      language: "en",
+      prompt: TRANSCRIBE_PROMPT +
+        " CRITICAL: Speaker may have Indian or American accent with background noise. " +
+        " Amplify low volume audio. Ignore background chatter. Focus on primary voice. " +
+        " Technical terms like BDD, TDD, gRPC, Kafka, Selenium are common - recognize accurately.",
+      temperature: 0.1  // Lower = more conservative, less hallucination (was 0.2)
     },
     turn_detection: {
       type: "server_vad",
-      threshold: 0.4,  // More sensitive (was 0.5) - catches quieter speech
-      prefix_padding_ms: 400,  // More padding (was 300) - catches word starts
-      silence_duration_ms: 500  // Longer silence (was 350) - fewer cuts
+      threshold: 0.35,  // Even MORE sensitive (was 0.4) for faded audio
+      prefix_padding_ms: 500,  // More padding (was 400) to catch soft starts
+      silence_duration_ms: 600  // Longer (was 500) to avoid cutting mid-sentence
     },
-    input_audio_noise_reduction: { type: "far_field" }
+    input_audio_noise_reduction: { 
+      type: "far_field"  // Aggressive noise reduction for background noise
+    }
   };
 
   try { ws.send(JSON.stringify(cfgA)); } catch {}
@@ -1354,19 +1379,19 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
             model: REALTIME_ASR_MODEL,
-            language: "en",  // Multi-accent support
+            language: "en",
             prompt: TRANSCRIBE_PROMPT +
-              " Speaker may have Indian or American accent. " +
-              "Technical interview conversation. " +
-              "Low volume audio - amplify and interpret.",
-            temperature: 0.2
+              " Speaker has Indian or American accent with possible background noise. " +
+              " Low volume audio - amplify and transcribe. " +
+              " Technical terms: BDD, TDD, gRPC, Kafka, Selenium.",
+            temperature: 0.1  // Lower temperature
           },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
-            threshold: 0.4,  // More sensitive
-            prefix_padding_ms: 400,
-            silence_duration_ms: 500
+            threshold: 0.35,  // More sensitive
+            prefix_padding_ms: 500,
+            silence_duration_ms: 600
           }
         }
       }
@@ -1378,16 +1403,15 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
 
 // NEW: Normalize quiet audio by amplifying it
 function normalizeAudioBuffer(float32Array) {
-  // Find peak volume in this buffer
   let max = 0;
   for (let i = 0; i < float32Array.length; i++) {
     const abs = Math.abs(float32Array[i]);
     if (abs > max) max = abs;
   }
   
-  // If audio is very quiet (peak < 0.1), boost it
-  if (max > 0 && max < 0.1) {
-    const boost = 0.5 / max;  // Boost to 50% of max range
+  // Boost even quieter audio (was < 0.1, now < 0.15)
+  if (max > 0 && max < 0.15) {
+    const boost = 0.6 / max;  // Boost to 60% (was 50%)
     const result = new Float32Array(float32Array.length);
     for (let i = 0; i < float32Array.length; i++) {
       result[i] = float32Array[i] * boost;
@@ -1398,7 +1422,6 @@ function normalizeAudioBuffer(float32Array) {
     return result;
   }
   
-  // Audio is normal volume, return as-is
   return float32Array;
 }
 
@@ -1422,9 +1445,9 @@ const gain = ctx.createGain();
 
 // === FIX: Amplify audio instead of muting it ===
 if (which === "sys") {
-  gain.gain.value = 3.5;  // Amplify system audio 3.5x (low volume fix)
+  gain.gain.value = 4.5;  // Amplify system audio 3.5x (low volume fix)
 } else {
-  gain.gain.value = 2.5;  // Amplify mic 2.5x
+  gain.gain.value = 3.0;  // Amplify mic 2.5x
 }
 
   const proc = ctx.createScriptProcessor(4096, 1, 1);
@@ -2237,8 +2260,8 @@ resumeInput?.addEventListener("change", async () => {
 /* START / STOP                                                                 */
 /* -------------------------------------------------------------------------- */
 async function startAll() {
-  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-await startStreamingAsr("mic", micStream);
+  // const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+// await startStreamingAsr("mic", micStream);
   hideBanner();
   if (isRunning) return;
 
