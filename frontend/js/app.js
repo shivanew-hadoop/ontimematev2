@@ -261,15 +261,38 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-const TRANSCRIBE_PROMPT =
-  "Transcribe only English as spoken with an Indian English accent. " +
-  "STRICTLY ignore and OMIT any Urdu, Arabic, Hindi, or other non-English words. " +
-  "If a word is not English, drop it completely. " +
-  "Use Indian English pronunciation and spelling. " +
-  "Do NOT Americanize words. " +
-  "Do NOT translate. " +
-  "Do NOT add new words. Do NOT repeat phrases. " +
-  "Keep punctuation minimal. If uncertain, omit.";
+const TRANSCRIBE_PROMPT = `Transcribe English accurately for both Indian and American accents.
+
+ACCENT HANDLING:
+- Indian English: Accept pronunciations like "shed-yool" (schedule), "vit-amin" (vitamin)
+- American English: Standard American pronunciations
+- Both are equally valid - transcribe what you hear
+
+TECHNICAL VOCABULARY (Common in conversation):
+- Microservices: orchestrator, gRPC, REST API, vendor, circuit breaker
+- Databases: Kafka, Redis, PostgreSQL, MongoDB, SQL
+- Testing: Selenium, Robot Framework, Playwright, Cucumber, BDD
+- Cloud: AWS, Azure, API Gateway, Lambda
+- General: authentication, authorization, JWT, token, session
+
+SPELLING:
+- Accept both: colour/color, centre/center, behaviour/behavior
+- Use context to determine which is appropriate
+
+AUDIO QUALITY:
+- Low volume: Amplify and interpret, don't assume silence
+- Background noise: Focus on primary speaker
+- Unclear words: Omit that word only, don't guess
+
+STRICT RULES:
+- Do NOT add filler: "Thanks for watching", "Subscribe", "Please like"
+- Do NOT translate Hindi/Telugu/Tamil - drop completely
+- Do NOT repeat phrases
+- Do NOT add new words not spoken
+- If uncertain about a word, omit it
+
+Indian names are valid: Chetan, Shiva, Rahul, Priya, Aditya, Manne
+Numbers: "lakh" = 100,000, "crore" = 10,000,000`;
 
 
 /* -------------------------------------------------------------------------- */
@@ -1203,11 +1226,48 @@ function asrUpsertDelta(which, itemId, deltaText) {
 
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
+  
+  // === NEW: Track what we've already shown for word-by-word display ===
+  if (!s.itemShown) s.itemShown = {};
+  if (!s.itemShown[itemId]) s.itemShown[itemId] = "";
+  
   s.itemText[itemId] += String(deltaText || "");
- const words = normalize(s.itemText[itemId]).split(" ");
-if (words.length >= COMMIT_WORDS) {
-  asrFinalizeItem(which, itemId, s.itemText[itemId]);
-}
+  
+  // === NEW: Word-by-word display for system audio ===
+  if (which === "sys") {
+    const fullText = normalize(s.itemText[itemId]);
+    const shownText = s.itemShown[itemId];
+    
+    // Find new words that haven't been shown yet
+    const newPart = fullText.slice(shownText.length).trim();
+    
+    if (newPart) {
+      // Split into words
+      const words = newPart.split(/\s+/);
+      
+      // Show complete words immediately (keep last word in buffer if incomplete)
+      if (words.length > 1 || /[.!?,;:\n]$/.test(newPart)) {
+        // We have complete word(s) - show them now
+        const toShow = words.length > 1 
+          ? words.slice(0, -1).join(" ") + " "  // Show all but last word
+          : newPart;  // Or show everything if it ends with punctuation
+        
+        if (toShow.trim()) {
+          // Show this word immediately (0 = no delay)
+          addTypewriterSpeech(toShow, 0, "interviewer");
+          
+          // Update what we've shown
+          s.itemShown[itemId] = shownText + toShow;
+        }
+      }
+    }
+  }
+  
+  // === EXISTING LOGIC (unchanged) ===
+  const words = normalize(s.itemText[itemId]).split(" ");
+  if (words.length >= COMMIT_WORDS) {
+    asrFinalizeItem(which, itemId, s.itemText[itemId]);
+  }
 
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
@@ -1233,23 +1293,27 @@ function asrFinalizeItem(which, itemId, transcript) {
   if (!s) return;
 
   const entry = s.itemEntry[itemId];
-let draftText = "";
+  let draftText = "";
 
-if (entry) {
-  draftText = entry.text || "";
-  const idx = timeline.indexOf(entry);
-  if (idx >= 0) timeline.splice(idx, 1);
-}
+  if (entry) {
+    draftText = entry.text || "";
+    const idx = timeline.indexOf(entry);
+    if (idx >= 0) timeline.splice(idx, 1);
+  }
 
-delete s.itemEntry[itemId];
-delete s.itemText[itemId];
+  delete s.itemEntry[itemId];
+  delete s.itemText[itemId];
+  
+  // === NEW: Clean up word-by-word tracking ===
+  if (s.itemShown) delete s.itemShown[itemId];
 
-const final = normalize(transcript || draftText);
-if (!final) return;
+  const final = normalize(transcript || draftText);
+  if (!final) return;
 
-const role = (which === "sys") ? "interviewer" : "candidate";
-addFinalSpeech(final, role);
-
+  const role = (which === "sys") ? "interviewer" : "candidate";
+  
+  // For system audio, use addFinalSpeech (no typewriter effect needed, already shown incrementally)
+  addFinalSpeech(final, role);
 }
 
 function sendAsrConfig(ws) {
@@ -1257,25 +1321,28 @@ function sendAsrConfig(ws) {
     type: "transcription_session.update",
     input_audio_format: "pcm16",
     input_audio_transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt: TRANSCRIBE_PROMPT + 
-    " Speaker has an Indian English accent. " +
-    "Prefer Indian pronunciation and spelling. " +
-    "Do not normalize to US English."
-},
-
+      model: REALTIME_ASR_MODEL,
+      language: "en",  // Changed from "en-IN" for better multi-accent support
+      prompt: TRANSCRIBE_PROMPT + 
+        " The speaker may have an Indian English or American English accent. " +
+        "Recognize both Indian pronunciation (e.g., 'shed-yool' for schedule) and American pronunciation. " +
+        "Common technical terms: microservice, orchestrator, gRPC, circuit breaker, Kafka, Redis, API, vendor, REST. " +
+        "Accept both British spelling (colour, centre) and American spelling (color, center). " +
+        "Low volume audio should be interpreted, not ignored.",
+      temperature: 0.2  // Lower = less hallucination, more accurate
+    },
     turn_detection: {
       type: "server_vad",
-      threshold: 0.5,
-      prefix_padding_ms: 300,
-      silence_duration_ms: 350
+      threshold: 0.4,  // More sensitive (was 0.5) - catches quieter speech
+      prefix_padding_ms: 400,  // More padding (was 300) - catches word starts
+      silence_duration_ms: 500  // Longer silence (was 350) - fewer cuts
     },
     input_audio_noise_reduction: { type: "far_field" }
   };
 
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
+
 
 function sendAsrConfigFallbackSessionUpdate(ws) {
   const cfgB = {
@@ -1286,19 +1353,20 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
         input: {
           format: { type: "audio/pcm", rate: ASR_TARGET_RATE },
           transcription: {
-  model: REALTIME_ASR_MODEL,
-  language: "en-IN",
-  prompt:
-    TRANSCRIBE_PROMPT +
-    " Speaker has an Indian English accent. " +
-    "Use Indian pronunciation and spelling."
-},
+            model: REALTIME_ASR_MODEL,
+            language: "en",  // Multi-accent support
+            prompt: TRANSCRIBE_PROMPT +
+              " Speaker may have Indian or American accent. " +
+              "Technical interview conversation. " +
+              "Low volume audio - amplify and interpret.",
+            temperature: 0.2
+          },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
-            threshold: 0.5,
-            prefix_padding_ms: 300,
-            silence_duration_ms: 350
+            threshold: 0.4,  // More sensitive
+            prefix_padding_ms: 400,
+            silence_duration_ms: 500
           }
         }
       }
@@ -1306,6 +1374,32 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
   };
 
   try { ws.send(JSON.stringify(cfgB)); } catch {}
+}
+
+// NEW: Normalize quiet audio by amplifying it
+function normalizeAudioBuffer(float32Array) {
+  // Find peak volume in this buffer
+  let max = 0;
+  for (let i = 0; i < float32Array.length; i++) {
+    const abs = Math.abs(float32Array[i]);
+    if (abs > max) max = abs;
+  }
+  
+  // If audio is very quiet (peak < 0.1), boost it
+  if (max > 0 && max < 0.1) {
+    const boost = 0.5 / max;  // Boost to 50% of max range
+    const result = new Float32Array(float32Array.length);
+    for (let i = 0; i < float32Array.length; i++) {
+      result[i] = float32Array[i] * boost;
+      // Prevent clipping
+      if (result[i] > 1.0) result[i] = 1.0;
+      if (result[i] < -1.0) result[i] = -1.0;
+    }
+    return result;
+  }
+  
+  // Audio is normal volume, return as-is
+  return float32Array;
 }
 
 async function startStreamingAsr(which, mediaStream) {
@@ -1324,8 +1418,14 @@ async function startStreamingAsr(which, mediaStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(mediaStream);
 
-  const gain = ctx.createGain();
-  gain.gain.value = 0;
+const gain = ctx.createGain();
+
+// === FIX: Amplify audio instead of muting it ===
+if (which === "sys") {
+  gain.gain.value = 3.5;  // Amplify system audio 3.5x (low volume fix)
+} else {
+  gain.gain.value = 2.5;  // Amplify mic 2.5x
+}
 
   const proc = ctx.createScriptProcessor(4096, 1, 1);
   const queue = [];
@@ -1342,17 +1442,20 @@ async function startStreamingAsr(which, mediaStream) {
   else sysAsr = state;
 
   proc.onaudioprocess = (e) => {
-    if (!isRunning) return;
-    if (which === "mic" && micMuted) return;
-    if (ws.readyState !== 1) return;
+  if (!isRunning) return;
+  if (which === "mic" && micMuted) return;
+  if (ws.readyState !== 1) return;
 
-    const ch0 = e.inputBuffer.getChannelData(0);
-    const inRate = ctx.sampleRate || 48000;
-
-    const resampled = resampleFloat32(ch0, inRate, ASR_TARGET_RATE);
-    const bytes = floatToInt16Bytes(resampled);
-    if (bytes.length) queue.push(bytes);
-  };
+  const ch0 = e.inputBuffer.getChannelData(0);
+  
+  // === NEW: Normalize volume for low audio ===
+  const normalized = normalizeAudioBuffer(ch0);
+  
+  const inRate = ctx.sampleRate || 48000;
+  const resampled = resampleFloat32(normalized, inRate, ASR_TARGET_RATE);
+  const bytes = floatToInt16Bytes(resampled);
+  if (bytes.length) queue.push(bytes);
+};
 
   src.connect(proc);
   proc.connect(gain);
