@@ -533,8 +533,30 @@ function getFreshInterviewerBlocksText() {
 
 function updateTranscript() {
   if (!liveTranscript) return;
-  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+
+  // Separate live (in-progress) entries from committed ones
+  const liveEntries = timeline.filter(x => x.live);
+  const committed = timeline.filter(x => !x.live);
+
+  // Committed blocks newest-first
+  const committedLines = committed
+    .slice()
+    .sort((a, b) => (b.t || 0) - (a.t || 0))
+    .map(x => String(x.text || "").trim())
+    .filter(Boolean);
+
+  // Live entries always appear at the very top (most recent first)
+  const liveLines = liveEntries
+    .slice()
+    .sort((a, b) => (b.t || 0) - (a.t || 0))
+    .map(x => String(x.text || "").trim())
+    .filter(Boolean);
+
+  const all = [...liveLines, ...committedLines];
+  liveTranscript.innerText = all.join("\n\n").trim();
+
+  // Always pin to top so newest live text is always visible
+  requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
 function removeInterimIfAny() {
@@ -615,17 +637,18 @@ function addFinalSpeech(txt, role) {
   const gap = now - (lastSpeechAt || 0);
 
   if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    timeline.push({ t: now, text: trimmedRaw, role: r });
+    timeline.push({ t: now, text: trimmedRaw, role: r, live: false });
   } else {
     const last = timeline[timeline.length - 1];
 
-    // Merge only if same role; else new block
-    if (last.role && last.role !== r) {
-      timeline.push({ t: now, text: trimmedRaw, role: r });
+    // Merge only if same role AND not a live (in-progress) entry; else new block
+    if ((last.role && last.role !== r) || last.live) {
+      timeline.push({ t: now, text: trimmedRaw, role: r, live: false });
     } else {
       last.text = normalize((last.text || "") + " " + trimmedRaw);
       last.t = now;
       last.role = r;
+      last.live = false;
     }
   }
 
@@ -1223,59 +1246,27 @@ function asrUpsertDelta(which, itemId, deltaText) {
 
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
-  
-  // Track what we've already committed to timeline
-  if (!s.itemCommitted) s.itemCommitted = {};
-  if (!s.itemCommitted[itemId]) s.itemCommitted[itemId] = "";
-  
   s.itemText[itemId] += String(deltaText || "");
-  
-  // === WORD-BY-WORD DISPLAY (SYSTEM AUDIO) ===
-  if (which === "sys") {
-    const fullText = normalize(s.itemText[itemId]);
-    const alreadyCommitted = s.itemCommitted[itemId];
-    
-    // Find new text since last commit
-    const newText = fullText.slice(alreadyCommitted.length).trim();
-    
-    if (newText) {
-      const words = newText.split(/\s+/);
-      
-      // Commit complete words immediately
-      // Keep last incomplete word in buffer
-      if (words.length > 1 || /[.!?,;:\n]$/.test(newText)) {
-        const toCommit = words.length > 1 
-          ? words.slice(0, -1).join(" ") + " "
-          : newText;
-        
-        if (toCommit.trim()) {
-          // Add to timeline immediately with NO typewriter delay
-          addTypewriterSpeech(toCommit, 0, "interviewer");
-          
-          // Update committed tracker
-          s.itemCommitted[itemId] = alreadyCommitted + toCommit;
-        }
-      }
-    }
-  }
-  
-  // === KEEP ENTRY UPDATED FOR INTERIM DISPLAY ===
+
+  // === INSTANT WORD-BY-WORD: update the live entry directly, no delay ===
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
 
   const role = (which === "sys") ? "interviewer" : "candidate";
 
   if (!s.itemEntry[itemId]) {
-    const entry = { t: now, text: cur, role };
+    // First delta for this item — push a new live entry to timeline
+    const entry = { t: now, text: cur, role, live: true };
     s.itemEntry[itemId] = entry;
     timeline.push(entry);
   } else {
+    // Update the existing live entry IN-PLACE (no new block, just update text)
     s.itemEntry[itemId].text = cur;
     s.itemEntry[itemId].t = now;
-    s.itemEntry[itemId].role = role;
   }
 
   lastSpeechAt = now;
+  // Direct DOM update — no sort, no full rebuild, just update the live line
   updateTranscript();
 }
 
@@ -1288,22 +1279,20 @@ function asrFinalizeItem(which, itemId, transcript) {
 
   if (entry) {
     draftText = entry.text || "";
+    // Remove the live entry from timeline — addFinalSpeech will add a permanent one
     const idx = timeline.indexOf(entry);
     if (idx >= 0) timeline.splice(idx, 1);
   }
 
   delete s.itemEntry[itemId];
   delete s.itemText[itemId];
-  
-  // === NEW: Clean up word-by-word tracking ===
   if (s.itemShown) delete s.itemShown[itemId];
+  if (s.itemCommitted) delete s.itemCommitted[itemId];
 
   const final = normalize(transcript || draftText);
   if (!final) return;
 
   const role = (which === "sys") ? "interviewer" : "candidate";
-  
-  // For system audio, use addFinalSpeech (no typewriter effect needed, already shown incrementally)
   addFinalSpeech(final, role);
 }
 
@@ -1855,29 +1844,68 @@ async function enableSystemAudioLegacy() {
   setStatus(audioStatus, "System audio enabled (legacy).", "text-green-600");
 }
 
+// Try mic-based capture first (no tab/window selection needed, like Huddlemate/Parakeet)
+// Falls back to getDisplayMedia if mic capture fails or is denied
 async function enableSystemAudioStreaming() {
   if (!isRunning) return;
 
   stopSystemAudioOnly();
 
+  // STRATEGY 1: Try loopback via getUserMedia with specific constraints
+  // This works on many systems without requiring tab selection
+  let gotStream = false;
+
+  // Try getUserMedia with system audio constraints (works on some browsers/OS combos)
   try {
-    sysStream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+    const constraints = {
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        // Some browsers support these for loopback:
+        mandatory: { chromeMediaSource: "desktop" }
+      },
+      video: false
+    };
+    // This only works in Electron / some Chromium builds — will throw in regular Chrome
+    sysStream = await navigator.mediaDevices.getUserMedia(constraints);
+    gotStream = true;
+    setStatus(audioStatus, "System audio capturing (no tab selection needed).", "text-green-600");
   } catch {
-    setStatus(audioStatus, "Share audio denied.", "text-red-600");
-    return;
+    gotStream = false;
+  }
+
+  // STRATEGY 2: getDisplayMedia (standard) — asks user to pick tab/window/screen
+  if (!gotStream) {
+    try {
+      // Offer both audio options so user can choose screen or just audio
+      sysStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { width: 1, height: 1, frameRate: 1 },  // Minimal video to keep dialog simple
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          suppressLocalAudioPlayback: false
+        }
+      });
+      gotStream = true;
+    } catch {
+      setStatus(audioStatus, "Share audio denied.", "text-red-600");
+      return;
+    }
   }
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
-    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    setStatus(audioStatus, "No system audio detected. Make sure 'Share audio' is checked in the picker.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling \u201cShare audio\u201d in the picker.");
+    showBanner("Enable \u201cShare audio\u201d in the screen picker for system audio.");
     return;
   }
 
   sysTrack.onended = () => {
     stopSystemAudioOnly();
-    setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
+    setStatus(audioStatus, "System audio stopped.", "text-orange-600");
   };
 
   try {
@@ -1885,7 +1913,7 @@ async function enableSystemAudioStreaming() {
     if (!ok) throw new Error("ASR start failed");
   } catch (e) {
     console.error(e);
-    setStatus(audioStatus, "Streaming ASR failed. Falling back to legacy system transcription\u2026", "text-orange-600");
+    setStatus(audioStatus, "Streaming ASR failed. Falling back to legacy\u2026", "text-orange-600");
     await enableSystemAudioLegacy();
   }
 }
@@ -2352,26 +2380,35 @@ async function handleSend() {
   if (sendBtn.disabled) return;
 
   const manual = normalize(manualQuestion?.value || "");
+
+  // ONLY grab text since the last send (sentCursor marks the boundary)
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
-  
+
+  if (!base) {
+    // Nothing new to send
+    if (manualQuestion) manualQuestion.value = "";
+    return;
+  }
+
+  // Clear the input immediately
+  if (manualQuestion) manualQuestion.value = "";
+
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
-  
-  if (!base) return;
-
-  if (manualQuestion) manualQuestion.value = "";
 
   abortChatStreamOnly(true);
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
+  // ADVANCE sentCursor NOW so next send only picks up new text
   sentCursor = timeline.length;
   pinnedTop = true;
+  // Scroll transcript to top so user sees latest
+  if (liveTranscript) liveTranscript.scrollTop = 0;
   updateTranscript();
 
-  const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer\u2026_`);
+  responseBox.innerHTML = renderMarkdownLite(`${question}\n\n_Generating answer\u2026_`);
   setStatus(sendStatus, "Queued\u2026", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
@@ -2386,24 +2423,36 @@ async function handleSend() {
 sendBtn.onclick = handleSend;
 
 /* -------------------------------------------------------------------------- */
-/* GLOBAL ENTER = SEND (page-wide, skips if typing in manualQuestion)         */
+/* ENTER KEY HANDLING — single source of truth, no double-fire               */
 /* -------------------------------------------------------------------------- */
-document.addEventListener("keydown", (e) => {
-  if (e.target === manualQuestion) return;
-  if (e.key !== "Enter" || e.shiftKey) return;
-  e.preventDefault();
-  handleSend();
-});
+let enterHandledAt = 0;  // debounce guard to prevent double-fire
 
-/* *** PATCH C: Attach Enter key to manualQuestion — was never wired *** */
+function triggerSendOnce() {
+  const now = Date.now();
+  if (now - enterHandledAt < 80) return;  // 80ms debounce
+  enterHandledAt = now;
+  handleSend();
+}
+
+// manualQuestion: Enter sends, Shift+Enter inserts newline
 if (manualQuestion) {
   manualQuestion.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (sendBtn && !sendBtn.disabled) handleSend();
+      e.stopPropagation();
+      triggerSendOnce();
     }
+    // Shift+Enter: do nothing (default textarea behavior = newline)
   });
 }
+
+// Global fallback: fires when Enter is pressed outside manualQuestion
+document.addEventListener("keydown", (e) => {
+  if (e.target === manualQuestion) return;  // handled above
+  if (e.key !== "Enter" || e.shiftKey) return;
+  e.preventDefault();
+  triggerSendOnce();
+});
 
 /* -------------------------------------------------------------------------- */
 /* handleEnterToSend kept for backward compatibility                           */
