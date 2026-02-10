@@ -1,15 +1,14 @@
 /* ========================================================================== */
-/* app.js — ORIGINAL CODE + 3 SURGICAL PATCHES ONLY                           */
-/* PATCH 1: Added USE_BROWSER_SR = false at top (was undefined → crash)        */
-/* PATCH 2: startAll() micOk = false → micOk = startMic() (was hardcoded)     */
-/* PATCH 3: manualQuestion Enter key attached (was defined but never wired)    */
-/* Everything else is IDENTICAL to the original file                           */
+/* app.js — END TO END (Replace your complete app.js with this file)           */
+/* Fixes:                                                                     */
+/* 1) Duplicate lines / repeated phrases (SR + fallback + overlap)             */
+/* 2) Role-safe transcript merging (interviewer vs candidate)                  */
+/* 3) Correct system overlap trimming (bugfix order)                           */
+/* 4) Strong final dedupe (punctuation/case-insensitive + overlap trim)        */
 /* ========================================================================== */
 
-/* ★ PATCH 1: Feature flags — defined here so startMic() doesn't crash       */
-const USE_BROWSER_SR               = false;   // mic OFF — system audio only
-const USE_STREAMING_ASR_SYS        = true;
-const USE_STREAMING_ASR_MIC_FALLBACK = false;
+/* *** PATCH A: Define USE_BROWSER_SR so startMic() doesn't crash *** */
+const USE_BROWSER_SR = false; // mic off — system audio only
 
 /* -------------------------------------------------------------------------- */
 /* BASIC TEXT HELPERS                                                          */
@@ -175,8 +174,8 @@ let isRunning = false;
 
 let hiddenInstructions = "";
 
-// MIC MUTE — always true (system audio only)
-let micMuted = true;
+// MIC MUTE
+let micMuted = false;
 
 // SpeechRecognition (fast preview)
 let recognition = null;
@@ -331,8 +330,10 @@ TRANSCRIBE EXACTLY WHAT IS SPOKEN. ACCURACY OVER SPEED.`;
 /* -------------------------------------------------------------------------- */
 /* STREAMING ASR (Realtime)                                                     */
 /* -------------------------------------------------------------------------- */
-// NOTE: USE_STREAMING_ASR_SYS and USE_STREAMING_ASR_MIC_FALLBACK are now
-// declared at the very top of this file (PATCH 1).
+// Force system audio to legacy MediaRecorder -> /transcribe
+const USE_STREAMING_ASR_SYS = true;
+// Allow mic streaming fallback when SR is weak
+const USE_STREAMING_ASR_MIC_FALLBACK = false;
 
 const REALTIME_INTENT_URL = "wss://api.openai.com/v1/realtime?intent=transcription";
 const REALTIME_ASR_MODEL = "gpt-4o-mini-transcribe";
@@ -390,11 +391,15 @@ function authHeaders() {
 function updateMicMuteUI() {
   if (!micMuteBtn) return;
 
-  // Always show Mic: OFF since mic is disabled
-  micMuteBtn.textContent = "Mic: OFF";
-  micMuteBtn.classList.remove("bg-gray-700");
-  micMuteBtn.classList.add("bg-gray-900");
-  micMuteBtn.title = "Mic disabled — system audio only";
+  if (micMuted) {
+    micMuteBtn.textContent = "Mic: OFF";
+    micMuteBtn.classList.remove("bg-gray-700");
+    micMuteBtn.classList.add("bg-gray-900");
+  } else {
+    micMuteBtn.textContent = "Mic: ON";
+    micMuteBtn.classList.remove("bg-gray-900");
+    micMuteBtn.classList.add("bg-gray-700");
+  }
 }
 
 // Stop mic pipelines only (do not touch system)
@@ -410,15 +415,45 @@ function stopMicPipelinesOnly() {
   removeInterimIfAny();
 }
 
-// Mic toggle is a no-op — system audio only mode
 async function setMicMuted(on) {
-  micMuted = true;  // always keep muted
+  micMuted = !!on;
   updateMicMuteUI();
+
+  if (!isRunning) return;
+
+  if (micMuted) {
+    stopMicPipelinesOnly();
+    setStatus(audioStatus, "Mic muted (user OFF). System audio continues.", "text-orange-600");
+    return;
+  }
+
+  const micOk = startMic();
+  if (!micOk) {
+    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
+    if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
+    if (!micAsr && !micStream) {
+      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
+      await enableMicRecorderFallback().catch(() => {});
+    }
+  } else {
+    setStatus(audioStatus, "Mic unmuted.", "text-green-600");
+  }
+
+  setTimeout(() => {
+    if (!isRunning) return;
+    if (micMuted) return;
+    if (micSrIsHealthy()) return;
+
+    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
+      enableMicStreamingFallback().catch(() => {});
+      return;
+    }
+    if (!micStream) enableMicRecorderFallback().catch(() => {});
+  }, 2000);
 }
 
 if (micMuteBtn) {
-  // Button exists but clicking does nothing (mic disabled)
-  micMuteBtn.addEventListener("click", () => { /* mic disabled */ });
+  micMuteBtn.addEventListener("click", () => setMicMuted(!micMuted));
   updateMicMuteUI();
 }
 
@@ -684,20 +719,33 @@ function extractPriorQuestions() {
   return Array.from(new Set(qs)).slice(-8);
 }
 
+
 function guessDomainBias(text) {
   const s = (text || "").toLowerCase();
   
+  // Only return domain if question is genuinely vague (< 5 words)
   const wordCount = s.trim().split(/\s+/).length;
-  if (wordCount > 5) return "";
+  if (wordCount > 5) return "";  // Question is specific enough
   
+  // For very vague questions, infer domain from recent context
   const hits = [];
   if (s.includes("trigger") || s.includes("sql") || s.includes("database") || s.includes("data model") || s.includes("fact") || s.includes("dimension")) hits.push("data modeling / databases");
-  if (s.includes("trigger") || s.includes("database") || s.includes("sql")) hits.push("database design");
-  if (s.includes("api") || s.includes("rest") || s.includes("grpc")) hits.push("API integration");
-  if (s.includes("auth") || s.includes("jwt") || s.includes("token")) hits.push("authentication");
-  if (s.includes("test") || s.includes("automation") || s.includes("selenium") || s.includes("cucumber") || s.includes("bdd") || s.includes("playwright")) hits.push("test automation");
+
+  if (s.includes("trigger") || s.includes("database") || s.includes("sql")) {
+    hits.push("database design");
+  }
+  if (s.includes("api") || s.includes("rest") || s.includes("grpc")) {
+    hits.push("API integration");
+  }
+  if (s.includes("auth") || s.includes("jwt") || s.includes("token")) {
+    hits.push("authentication");
+  }
+  if (s.includes("test") || s.includes("automation") || s.includes("selenium") || s.includes("cucumber") || s.includes("bdd") || s.includes("playwright")) {
+    hits.push("test automation");
   
-  return hits.slice(0, 1).join("");
+  }
+  
+  return hits.slice(0, 1).join("");  // Return at most 1 domain, or empty
 }
 
 function extractAnchorKeywords(text) {
@@ -720,52 +768,121 @@ function isGenericProjectAsk(text) {
 
 function isNewTopic(text) {
   const s = (text || "").toLowerCase().trim();
+
+  // Social / filler resets
   if (/^(hi|hello|hey|thanks|thank you|cheers|okay|cool|alright)\b/.test(s)) return true;
+
+  // Interview soft switches
   if (/tell me about|your project|your role|responsibilities|experience|walk me through|about your/i.test(s)) return true;
+
+  // If it's not a coding sentence and it's longer than a few words → topic change
   const codeVerbs = ["reverse","count","sort","find","validate","check","convert","parse","remove","merge"];
   const hasCode = codeVerbs.some(v => s.includes(v));
   if (!hasCode && s.split(" ").length > 4) return true;
+
   return false;
 }
 
 function buildDraftQuestion(spoken) {
+  // Step 1: Light cleanup ONLY (don't destroy meaning)
   const cleaned = normalize(spoken)
-    .replace(/\s+/g, " ")
+    .replace(/\s+/g, " ")  // Normalize whitespace only
     .trim();
   
   if (!cleaned) return "Q: Can you walk me through your current project?";
   
   const low = cleaned.toLowerCase();
   
+  // Step 2: Detect if it's already a well-formed question
   if (isWellFormedQuestion(cleaned)) {
+    // Just capitalize and ensure it ends with ?
     return formatAsQuestion(cleaned);
   }
   
+  // Step 3: Detect question type from conversational cues
   const questionType = detectQuestionIntent(cleaned);
+  
+  // Step 4: Frame appropriately based on detected intent
   return frameQuestion(cleaned, questionType);
 }
 
+// ============================================================================
+// HELPER 1: Check if already a good question
+// ============================================================================
 function isWellFormedQuestion(text) {
   const t = text.trim();
-  if (/^(can you|could you|would you|how do|how does|what is|what are|why|when|where|which|who)\b/i.test(t)) return true;
-  if (t.endsWith('?') && t.split(' ').length >= 5) return true;
+  
+  // Already has question structure
+  if (/^(can you|could you|would you|how do|how does|what is|what are|why|when|where|which|who)\b/i.test(t)) {
+    return true;
+  }
+  
+  // Already ends with question mark and is long enough
+  if (t.endsWith('?') && t.split(' ').length >= 5) {
+    return true;
+  }
+  
   return false;
 }
 
+// ============================================================================
+// HELPER 2: Detect what they're really asking about
+// ============================================================================
 function detectQuestionIntent(text) {
   const low = text.toLowerCase();
-  if (/after .+ then|step by step|process|workflow|flow/.test(low)) return { type: 'workflow', marker: 'step-by-step' };
-  if (/how .+ work|how .+ communicate|how .+ handle|how .+ manage/.test(low)) return { type: 'mechanism', marker: 'how-it-works' };
-  if (/difference|compare|versus|vs\b|better than/.test(low)) return { type: 'comparison', marker: 'compare' };
-  if (/error|issue|problem|fail|timeout|bug|not working/.test(low)) return { type: 'debug', marker: 'troubleshoot' };
-  if (/architect|design|structure|pattern|approach/.test(low)) return { type: 'design', marker: 'architecture' };
-  if (/circuit breaker|retry|cache|queue|orchestrat|grpc|rest api|kafka|redis|postgres/.test(low)) return { type: 'implementation', marker: 'technical' };
-  if (/write|code|program|implement|function|algorithm/.test(low)) return { type: 'code', marker: 'coding' };
-  if (/what is|what are|define|meaning of/.test(low)) return { type: 'definition', marker: 'concept' };
-  if (/your project|your work|your role|your experience|you did|you worked/.test(low)) return { type: 'experience', marker: 'project-based' };
+  
+  // WORKFLOW / PROCESS questions
+  if (/after .+ then|step by step|process|workflow|flow/.test(low)) {
+    return { type: 'workflow', marker: 'step-by-step' };
+  }
+  
+  // HOW IT WORKS questions
+  if (/how .+ work|how .+ communicate|how .+ handle|how .+ manage/.test(low)) {
+    return { type: 'mechanism', marker: 'how-it-works' };
+  }
+  
+  // TECHNICAL COMPARISON
+  if (/difference|compare|versus|vs\b|better than/.test(low)) {
+    return { type: 'comparison', marker: 'compare' };
+  }
+  
+  // PROBLEM/DEBUGGING
+  if (/error|issue|problem|fail|timeout|bug|not working/.test(low)) {
+    return { type: 'debug', marker: 'troubleshoot' };
+  }
+  
+  // ARCHITECTURE/DESIGN
+  if (/architect|design|structure|pattern|approach/.test(low)) {
+    return { type: 'design', marker: 'architecture' };
+  }
+  
+  // IMPLEMENTATION (specific tech/tool)
+  if (/circuit breaker|retry|cache|queue|orchestrat|grpc|rest api|kafka|redis|postgres/.test(low)) {
+    return { type: 'implementation', marker: 'technical' };
+  }
+  
+  // CODING task
+  if (/write|code|program|implement|function|algorithm/.test(low)) {
+    return { type: 'code', marker: 'coding' };
+  }
+  
+  // DEFINITION/CONCEPT
+  if (/what is|what are|define|meaning of/.test(low)) {
+    return { type: 'definition', marker: 'concept' };
+  }
+  
+  // EXPERIENCE/PROJECT
+  if (/your project|your work|your role|your experience|you did|you worked/.test(low)) {
+    return { type: 'experience', marker: 'project-based' };
+  }
+  
+  // DEFAULT: General explanation
   return { type: 'general', marker: 'explain' };
 }
 
+// ============================================================================
+// HELPER 3: Frame the question naturally based on intent
+// ============================================================================
 function frameQuestion(text, intent) {
   const cleaned = text.trim();
   
@@ -774,7 +891,9 @@ function frameQuestion(text, intent) {
       return `Q: Walk me through ${extractCore(cleaned)}`;
     
     case 'mechanism':
-      if (/^how /i.test(cleaned)) return formatAsQuestion(cleaned);
+      if (/^how /i.test(cleaned)) {
+        return formatAsQuestion(cleaned);
+      }
       return `Q: How does ${extractCore(cleaned)} work?`;
     
     case 'comparison':
@@ -801,14 +920,25 @@ function frameQuestion(text, intent) {
     
     default:
       const core = extractCore(cleaned);
-      if (detectTech(core)) return `Q: How did you work with ${core}?`;
-      if (core.split(' ').length <= 3) return `Q: What is ${core}?`;
+      
+      if (detectTech(core)) {
+        return `Q: How did you work with ${core}?`;
+      }
+      
+      if (core.split(' ').length <= 3) {
+        return `Q: What is ${core}?`;
+      }
+      
       return `Q: Can you describe ${core}?`;
   }
 }
 
+// ============================================================================
+// HELPER 4: Extract the core topic (remove filler)
+// ============================================================================
 function extractCore(text) {
   let core = text.trim();
+  
   core = core.replace(/^(so|like|basically|uh|um|well|okay|alright|yeah)\b,?\s*/gi, '');
   core = core.replace(/\s+(right|okay|you know|like that|basically|sort of)$/gi, '');
   core = core.replace(/\blike,?\s+/gi, ' ');
@@ -816,11 +946,16 @@ function extractCore(text) {
   core = core.replace(/we have\s+/gi, '');
   core = core.replace(/you have\s+/gi, '');
   core = core.replace(/\s+/g, ' ').trim();
+  
   return core;
 }
 
+// ============================================================================
+// HELPER 5: Detect programming language/tech
+// ============================================================================
 function detectTech(text) {
   const low = text.toLowerCase();
+  
   const techs = {
     java: /\bjava\b/,
     python: /\bpython\b/,
@@ -830,12 +965,17 @@ function detectTech(text) {
     react: /\breact\b/,
     spring: /\bspring\b/
   };
+  
   for (const [name, pattern] of Object.entries(techs)) {
     if (pattern.test(low)) return name.charAt(0).toUpperCase() + name.slice(1);
   }
+  
   return null;
 }
 
+// ============================================================================
+// HELPER 6: Format existing question nicely
+// ============================================================================
 function formatAsQuestion(text) {
   let q = text.trim();
   q = q.charAt(0).toUpperCase() + q.slice(1);
@@ -857,6 +997,7 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
 
   const priorQs = extractPriorQuestions();
 
+  // Build simple prompt - NO domain injection
   let prompt = base;
   
   if (priorQs.length) {
@@ -1083,6 +1224,7 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
   
+  // Track what we've already committed to timeline
   if (!s.itemCommitted) s.itemCommitted = {};
   if (!s.itemCommitted[itemId]) s.itemCommitted[itemId] = "";
   
@@ -1093,24 +1235,31 @@ function asrUpsertDelta(which, itemId, deltaText) {
     const fullText = normalize(s.itemText[itemId]);
     const alreadyCommitted = s.itemCommitted[itemId];
     
+    // Find new text since last commit
     const newText = fullText.slice(alreadyCommitted.length).trim();
     
     if (newText) {
       const words = newText.split(/\s+/);
       
+      // Commit complete words immediately
+      // Keep last incomplete word in buffer
       if (words.length > 1 || /[.!?,;:\n]$/.test(newText)) {
         const toCommit = words.length > 1 
           ? words.slice(0, -1).join(" ") + " "
           : newText;
         
         if (toCommit.trim()) {
+          // Add to timeline immediately with NO typewriter delay
           addTypewriterSpeech(toCommit, 0, "interviewer");
+          
+          // Update committed tracker
           s.itemCommitted[itemId] = alreadyCommitted + toCommit;
         }
       }
     }
   }
   
+  // === KEEP ENTRY UPDATED FOR INTERIM DISPLAY ===
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
 
@@ -1145,12 +1294,16 @@ function asrFinalizeItem(which, itemId, transcript) {
 
   delete s.itemEntry[itemId];
   delete s.itemText[itemId];
+  
+  // === NEW: Clean up word-by-word tracking ===
   if (s.itemShown) delete s.itemShown[itemId];
 
   const final = normalize(transcript || draftText);
   if (!final) return;
 
   const role = (which === "sys") ? "interviewer" : "candidate";
+  
+  // For system audio, use addFinalSpeech (no typewriter effect needed, already shown incrementally)
   addFinalSpeech(final, role);
 }
 
@@ -1165,21 +1318,22 @@ function sendAsrConfig(ws) {
         " CRITICAL: Speaker may have Indian or American accent with background noise. " +
         " Amplify low volume audio. Ignore background chatter. Focus on primary voice. " +
         " Technical terms like BDD, TDD, gRPC, Kafka, Selenium are common - recognize accurately.",
-      temperature: 0.1
+      temperature: 0.1  // Lower = more conservative, less hallucination (was 0.2)
     },
     turn_detection: {
       type: "server_vad",
-      threshold: 0.35,
-      prefix_padding_ms: 500,
-      silence_duration_ms: 600
+      threshold: 0.35,  // Even MORE sensitive (was 0.4) for faded audio
+      prefix_padding_ms: 500,  // More padding (was 400) to catch soft starts
+      silence_duration_ms: 600  // Longer (was 500) to avoid cutting mid-sentence
     },
     input_audio_noise_reduction: { 
-      type: "far_field"
+      type: "far_field"  // Aggressive noise reduction for background noise
     }
   };
 
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
+
 
 function sendAsrConfigFallbackSessionUpdate(ws) {
   const cfgB = {
@@ -1196,12 +1350,12 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
               " Speaker has Indian or American accent with possible background noise. " +
               " Low volume audio - amplify and transcribe. " +
               " Technical terms: BDD, TDD, gRPC, Kafka, Selenium.",
-            temperature: 0.1
+            temperature: 0.1  // Lower temperature
           },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
-            threshold: 0.35,
+            threshold: 0.35,  // More sensitive
             prefix_padding_ms: 500,
             silence_duration_ms: 600
           }
@@ -1213,6 +1367,7 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
 
+// NEW: Normalize quiet audio by amplifying it
 function normalizeAudioBuffer(float32Array) {
   let max = 0;
   for (let i = 0; i < float32Array.length; i++) {
@@ -1220,11 +1375,13 @@ function normalizeAudioBuffer(float32Array) {
     if (abs > max) max = abs;
   }
   
+  // Boost even quieter audio (was < 0.1, now < 0.15)
   if (max > 0 && max < 0.15) {
-    const boost = 0.6 / max;
+    const boost = 0.6 / max;  // Boost to 60% (was 50%)
     const result = new Float32Array(float32Array.length);
     for (let i = 0; i < float32Array.length; i++) {
       result[i] = float32Array[i] * boost;
+      // Prevent clipping
       if (result[i] > 1.0) result[i] = 1.0;
       if (result[i] < -1.0) result[i] = -1.0;
     }
@@ -1250,13 +1407,14 @@ async function startStreamingAsr(which, mediaStream) {
   const ctx = new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(mediaStream);
 
-  const gain = ctx.createGain();
+const gain = ctx.createGain();
 
-  if (which === "sys") {
-    gain.gain.value = 4.5;
-  } else {
-    gain.gain.value = 3.0;
-  }
+// === FIX: Amplify audio instead of muting it ===
+if (which === "sys") {
+  gain.gain.value = 4.5;  // Amplify system audio 3.5x (low volume fix)
+} else {
+  gain.gain.value = 3.0;  // Amplify mic 2.5x
+}
 
   const proc = ctx.createScriptProcessor(4096, 1, 1);
   const queue = [];
@@ -1273,17 +1431,20 @@ async function startStreamingAsr(which, mediaStream) {
   else sysAsr = state;
 
   proc.onaudioprocess = (e) => {
-    if (!isRunning) return;
-    if (which === "mic" && micMuted) return;
-    if (ws.readyState !== 1) return;
+  if (!isRunning) return;
+  if (which === "mic" && micMuted) return;
+  if (ws.readyState !== 1) return;
 
-    const ch0 = e.inputBuffer.getChannelData(0);
-    const normalized = normalizeAudioBuffer(ch0);
-    const inRate = ctx.sampleRate || 48000;
-    const resampled = resampleFloat32(normalized, inRate, ASR_TARGET_RATE);
-    const bytes = floatToInt16Bytes(resampled);
-    if (bytes.length) queue.push(bytes);
-  };
+  const ch0 = e.inputBuffer.getChannelData(0);
+  
+  // === NEW: Normalize volume for low audio ===
+  const normalized = normalizeAudioBuffer(ch0);
+  
+  const inRate = ctx.sampleRate || 48000;
+  const resampled = resampleFloat32(normalized, inRate, ASR_TARGET_RATE);
+  const bytes = floatToInt16Bytes(resampled);
+  if (bytes.length) queue.push(bytes);
+};
 
   src.connect(proc);
   proc.connect(gain);
@@ -1354,10 +1515,10 @@ async function startStreamingAsr(which, mediaStream) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* MIC — SpeechRecognition (disabled in system-audio-only mode)                */
+/* MIC — SpeechRecognition + fallback                                           */
 /* -------------------------------------------------------------------------- */
 function micSrIsHealthy() {
-  return false;  // mic disabled
+  return (Date.now() - (lastMicResultAt || 0)) < 1800;
 }
 
 function stopMicOnly() {
@@ -1370,7 +1531,7 @@ function stopMicOnly() {
 
 function startMic() {
   if (micMuted) return false;
-  if (!USE_BROWSER_SR) return false;  // USE_BROWSER_SR = false → always returns false
+  if (!USE_BROWSER_SR) return false;
 
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   if (!SR) {
@@ -1385,6 +1546,7 @@ function startMic() {
   recognition.interimResults = true;
   recognition.maxAlternatives = 1;
   recognition.lang = "en-IN";
+
 
   recognition.onstart = () => {
     setStatus(audioStatus, "Mic active (fast preview).", "text-green-600");
@@ -1401,6 +1563,7 @@ function startMic() {
     for (let i = ev.resultIndex; i < ev.results.length; i++) {
       const r = ev.results[i];
       const text = normalize(r[0].transcript || "");
+
       if (r.isFinal) addFinalSpeech(text, "candidate");
       else latestInterim = text;
     }
@@ -1436,6 +1599,7 @@ function startMic() {
     if (micMuted) return;
 
     if (micSrIsHealthy()) {
+      // If SR healthy, stop fallbacks
       if (micRecorder || micStream) stopMicRecorderOnly();
       if (micAsr) stopAsrSession("mic");
       if (!USE_BROWSER_SR) return;
@@ -1610,7 +1774,11 @@ async function transcribeMicBlob(blob, myEpoch) {
 
   if (myEpoch !== transcriptEpoch) return;
   if (micMuted) return;
+
   if (!res.ok) return;
+
+  // CRITICAL DUPLICATE FIX:
+  // If SR became healthy or streaming ASR is active, drop recorder results.
   if (micSrIsHealthy()) return;
   if (micAsr) return;
 
@@ -1656,6 +1824,7 @@ function stopSystemAudioOnly() {
   sysErrBackoffUntil = 0;
 }
 
+// Legacy system audio pipeline (MediaRecorder -> /transcribe)
 async function enableSystemAudioLegacy() {
   if (!isRunning) return;
 
@@ -1672,7 +1841,7 @@ async function enableSystemAudioLegacy() {
   if (!sysTrack) {
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
+    showBanner("System audio requires selecting a window/tab and enabling \u201cShare audio\u201d in the picker.");
     return;
   }
 
@@ -1702,7 +1871,7 @@ async function enableSystemAudioStreaming() {
   if (!sysTrack) {
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
+    showBanner("System audio requires selecting a window/tab and enabling \u201cShare audio\u201d in the picker.");
     return;
   }
 
@@ -1716,7 +1885,7 @@ async function enableSystemAudioStreaming() {
     if (!ok) throw new Error("ASR start failed");
   } catch (e) {
     console.error(e);
-    setStatus(audioStatus, "Streaming ASR failed. Falling back to legacy system transcription…", "text-orange-600");
+    setStatus(audioStatus, "Streaming ASR failed. Falling back to legacy system transcription\u2026", "text-orange-600");
     await enableSystemAudioLegacy();
   }
 }
@@ -1800,7 +1969,10 @@ function trimOverlap(prev, next) {
   for (let k = maxCheck; k >= 3; k--) {
     const pTail = pWords.slice(-k).join(" ");
     const nHead = nWords.slice(0, k).join(" ");
-    if (pTail === nHead) return nWords.slice(k).join(" ");
+
+    if (pTail === nHead) {
+      return nWords.slice(k).join(" ");
+    }
   }
   return next;
 }
@@ -1856,6 +2028,7 @@ async function transcribeSysBlob(blob, myEpoch) {
   const trimmed = trimOverlap(lastSysPrinted, text);
   if (!trimmed) return;
 
+  // Maintain a growing reference so overlap trimming stays stable
   lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
   lastSysPrintedAt = now;
 
@@ -1939,8 +2112,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
   if (userTextForHistory) pushHistory("user", userTextForHistory);
 
   aiRawBuffer = "";
-  responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
-  setStatus(sendStatus, "Connecting…", "text-orange-600");
+  responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving\u2026</span>`;
+  setStatus(sendStatus, "Connecting\u2026", "text-orange-600");
 
   const body = {
     prompt,
@@ -1992,7 +2165,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
       if (!sawFirstChunk) {
         sawFirstChunk = true;
         responseBox.innerHTML = "";
-        setStatus(sendStatus, "Receiving…", "text-orange-600");
+        setStatus(sendStatus, "Receiving\u2026", "text-orange-600");
       }
 
       if (raw.length < 1800) render();
@@ -2023,7 +2196,7 @@ resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
 
-  if (resumeStatus) resumeStatus.textContent = "Processing…";
+  if (resumeStatus) resumeStatus.textContent = "Processing\u2026";
 
   const fd = new FormData();
   fd.append("file", file);
@@ -2085,16 +2258,16 @@ async function startAll() {
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  /* ★ PATCH 2: was `const micOk = false` (hardcoded) — fixed to call startMic()
-     Since USE_BROWSER_SR=false, startMic() returns false immediately,
-     which means we go straight to the correct status message.             */
+  /* *** PATCH B: was `const micOk = false` — fixed to call startMic()
+     Since USE_BROWSER_SR=false, startMic() immediately returns false,
+     then we fall through to the correct status message.              *** */
   if (!micMuted) {
     const micOk = startMic();
     if (!micOk) {
-      setStatus(audioStatus, "Ready. Press 'System Audio' to start capturing.", "text-blue-600");
+      setStatus(audioStatus, "Ready. Press \u2018System Audio\u2019 to start capturing.", "text-blue-600");
       if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
       if (!micAsr && !micStream) {
-        // mic fallback also disabled, nothing to do
+        // mic fully disabled — nothing more to do
       }
     }
 
@@ -2110,7 +2283,7 @@ async function startAll() {
       if (!micStream) enableMicRecorderFallback().catch(() => {});
     }, 2000);
   } else {
-    setStatus(audioStatus, "Ready. Press 'System Audio' to start capturing.", "text-blue-600");
+    setStatus(audioStatus, "Ready. Press \u2018System Audio\u2019 to start capturing.", "text-blue-600");
   }
 
   startCreditTicking();
@@ -2198,8 +2371,8 @@ async function handleSend() {
   updateTranscript();
 
   const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
-  setStatus(sendStatus, "Queued…", "text-orange-600");
+  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer\u2026_`);
+  setStatus(sendStatus, "Queued\u2026", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
   const promptToSend =
@@ -2213,28 +2386,27 @@ async function handleSend() {
 sendBtn.onclick = handleSend;
 
 /* -------------------------------------------------------------------------- */
-/* GLOBAL ENTER = SEND (page-wide, skip if typing in manualQuestion)          */
+/* GLOBAL ENTER = SEND (page-wide, skips if typing in manualQuestion)         */
 /* -------------------------------------------------------------------------- */
 document.addEventListener("keydown", (e) => {
-  if (e.target === manualQuestion) return;   // handled separately below
+  if (e.target === manualQuestion) return;
   if (e.key !== "Enter" || e.shiftKey) return;
   e.preventDefault();
   handleSend();
 });
 
-/* ★ PATCH 3: Attach Enter to manualQuestion — was defined but never wired   */
+/* *** PATCH C: Attach Enter key to manualQuestion — was never wired *** */
 if (manualQuestion) {
   manualQuestion.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       if (sendBtn && !sendBtn.disabled) handleSend();
     }
-    // Shift+Enter = newline (default textarea behavior, no preventDefault)
   });
 }
 
 /* -------------------------------------------------------------------------- */
-/* handleEnterToSend kept for any external callers                             */
+/* handleEnterToSend kept for backward compatibility                           */
 /* -------------------------------------------------------------------------- */
 function handleEnterToSend(e) {
   if (e.key === "Enter" && !e.shiftKey) {
@@ -2249,7 +2421,7 @@ clearBtn.onclick = () => {
   hardClearTranscript();
   if (manualQuestion) manualQuestion.value = "";
   setStatus(sendStatus, "Transcript cleared", "text-green-600");
-  setStatus(audioStatus, isRunning ? "Listening…" : "Stopped", isRunning ? "text-green-600" : "text-orange-600");
+  setStatus(audioStatus, isRunning ? "Listening\u2026" : "Stopped", isRunning ? "text-green-600" : "text-orange-600");
 };
 
 resetBtn.onclick = async () => {
