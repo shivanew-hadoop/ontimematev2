@@ -221,7 +221,8 @@ let activeTech = null;    // "java" | "python" | ...
 // Transcript blocks
 let timeline = [];
 let lastSpeechAt = 0;
-let sentCursor = 0;
+let sentCursor = 0;       // index of last sent position
+let sentCursorTime = 0;   // timestamp of last send (for live entry filtering)
 
 // "pin to top"
 let pinnedTop = true;
@@ -264,67 +265,14 @@ const CREDITS_PER_SEC = 1;
 const MIC_LANGS = ["en-IN", "en-GB", "en-US"];
 let micLangIndex = 0;
 
-const TRANSCRIBE_PROMPT = `Transcribe English accurately for both Indian and American accents.
-
-CRITICAL: Listen carefully and transcribe EXACTLY what is spoken.
-
-ACCENT HANDLING:
-- Indian English: "shed-yool" (schedule), "vit-amin" (vitamin), "al-go-rithm" (algorithm)
-- American English: Standard pronunciations
-- Both are equally valid - transcribe what you hear
-
-TECHNICAL VOCABULARY (MUST RECOGNIZE ACCURATELY):
-Software Testing:
-- BDD (Behavior Driven Development) - NOT "build" or "bed"
-- TDD (Test Driven Development)  
-- Selenium, Playwright, Cucumber
-- Robot Framework, pytest, JUnit
-- Regression, integration, end-to-end
-
-Microservices/Backend:
-- orchestrator, gRPC, REST API, vendor, circuit breaker
-- Kafka, Redis, PostgreSQL, MongoDB, Cassandra
-- API Gateway, Lambda, microservice
-- authentication, authorization, JWT, OAuth, SAML
-
-Frontend/General:
-- React, Angular, Vue, TypeScript, JavaScript
-- Docker, Kubernetes, Jenkins, CI/CD
-- AWS, Azure, GCP, cloud
-
-Common Phrases:
-- "top challenges" NOT "apply challenges"
-- "give challenges" NOT "apply challenges"  
-- "one book every week" NOT "one but every week"
-- "do you know what will happen" NOT "you know what will happen"
-
-SPELLING:
-- Accept both British (colour, centre) and American (color, center)
-- Use context to determine
-
-AUDIO QUALITY RULES:
-- Low volume: AMPLIFY and interpret, don't assume silence
-- Background noise: Focus on primary speaker, ignore ambient sounds
-- Faded audio: Increase sensitivity, still transcribe
-- Unclear single words: Omit that word only, continue with rest
-
-STRICT ANTI-HALLUCINATION RULES:
-- Do NOT add: "Thanks for watching", "Subscribe", "Please like"
-- Do NOT translate Hindi/Telugu/Tamil - drop non-English completely
-- Do NOT repeat phrases or sentences
-- Do NOT add words not spoken
-- Do NOT guess unclear words - omit them
-- If very uncertain, output empty string rather than wrong words
-
-DUPLICATE PREVENTION:
-- Do NOT output the same sentence twice
-- Do NOT repeat phrases word-for-word
-- Each transcription should be unique content
-
-Indian names are valid: Chetan, Shiva, Rahul, Priya, Aditya, Manne, Kumar, Singh
-Numbers: "lakh" = 100,000, "crore" = 10,000,000
-
-TRANSCRIBE EXACTLY WHAT IS SPOKEN. ACCURACY OVER SPEED.`;
+// IMPORTANT: Keep this prompt SHORT and free of example phrases.
+// Long prompts with example text (like "BDD (Behavior Driven Development)")
+// cause the model to REPEAT those examples as hallucinations during silence.
+const TRANSCRIBE_PROMPT = `Transcribe spoken English only. Output ONLY what is spoken — nothing else.
+If there is silence or no speech, output empty string.
+Do not add explanations, apologies, or filler phrases.
+Preserve technical terms: BDD, TDD, gRPC, Kafka, Selenium, Playwright, JWT, OAuth, REST, API.
+Accept Indian and American accents equally.`;
 
 
 /* -------------------------------------------------------------------------- */
@@ -512,9 +460,9 @@ function getAllBlocksNewestFirst() {
 }
 
 function getFreshBlocksText() {
+  // Include ALL entries (live + committed) added since last send
   return timeline
-    .slice(sentCursor)
-    .filter(x => x && x !== micInterimEntry)
+    .filter(x => x && x !== micInterimEntry && timeline.indexOf(x) >= sentCursor)
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -522,9 +470,18 @@ function getFreshBlocksText() {
 }
 
 function getFreshInterviewerBlocksText() {
+  // All interviewer entries (live + committed) added since last send
+  // sentCursor is an index — but live entries get appended after committed ones,
+  // so use a timestamp-based fallback too
+  const sinceTime = sentCursorTime || 0;
   return timeline
-    .slice(sentCursor)
-    .filter(x => x && x.role === "interviewer")
+    .filter(x => {
+      if (!x) return false;
+      if (x.role !== "interviewer") return false;
+      // Include if after cursor index OR after cursor timestamp
+      const idx = timeline.indexOf(x);
+      return idx >= sentCursor || (x.t || 0) > sinceTime;
+    })
     .map(x => String(x.text || "").trim())
     .filter(Boolean)
     .join("\n\n")
@@ -534,29 +491,29 @@ function getFreshInterviewerBlocksText() {
 function updateTranscript() {
   if (!liveTranscript) return;
 
-  // Separate live (in-progress) entries from committed ones
-  const liveEntries = timeline.filter(x => x.live);
-  const committed = timeline.filter(x => !x.live);
+  // Live = currently being spoken (streaming in real time)
+  // Committed = finalized sentences
+  const liveEntries = timeline.filter(x => x && x.live && x.text);
+  const committed = timeline.filter(x => x && !x.live && x.text);
 
-  // Committed blocks newest-first
+  // Newest committed first
   const committedLines = committed
     .slice()
     .sort((a, b) => (b.t || 0) - (a.t || 0))
     .map(x => String(x.text || "").trim())
     .filter(Boolean);
 
-  // Live entries always appear at the very top (most recent first)
+  // Live text always at the very top
   const liveLines = liveEntries
     .slice()
     .sort((a, b) => (b.t || 0) - (a.t || 0))
     .map(x => String(x.text || "").trim())
     .filter(Boolean);
 
-  const all = [...liveLines, ...committedLines];
-  liveTranscript.innerText = all.join("\n\n").trim();
+  liveTranscript.innerText = [...liveLines, ...committedLines].join("\n\n").trim();
 
-  // Always pin to top so newest live text is always visible
-  requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+  // Force scroll to top — newest text always visible
+  liveTranscript.scrollTop = 0;
 }
 
 function removeInterimIfAny() {
@@ -1143,15 +1100,37 @@ function dedupeByTail(text, tailRef) {
 
 function looksLikeWhisperHallucination(t) {
   const s = normalize(t).toLowerCase();
-  if (!s) return true;
+  if (!s || s.length < 3) return true;
 
   const noise = [
+    // Classic whisper hallucinations
     "thanks for watching",
     "thank you for watching",
-    "subscribe",
+    "please subscribe",
     "please like and subscribe",
+    // Model confusion / no audio
+    "i cannot transcribe",
+    "i am unable to transcribe",
+    "i'm unable to transcribe",
+    "no audio",
+    "no speech",
+    "no text provided",
+    "not provided",
+    "i apologize",
+    "i'm sorry",
+    "i am sorry",
+    "cannot transcribe the audio",
+    "there is no speech",
+    "there is no audio",
+    "silence",
+    // Prompt echoes (from our own prompt being repeated back)
+    "transcribe spoken english",
     "transcribe clearly in english",
+    "transcribe exactly what is spoken",
     "handle indian",
+    "technical terms:",
+    "bdd, tdd, grpc",
+    // Common short hallucinations
     "i don't know",
     "i dont know",
     "this is microphone speech",
@@ -1159,6 +1138,10 @@ function looksLikeWhisperHallucination(t) {
   ];
 
   if (s.length < 40 && (s.endsWith("i don't know.") || s.endsWith("i dont know"))) return true;
+  
+  // Reject very short repeated filler
+  if (s.length < 8) return true;
+  
   return noise.some(p => s.includes(p));
 }
 
@@ -1303,23 +1286,20 @@ function sendAsrConfig(ws) {
     input_audio_transcription: {
       model: REALTIME_ASR_MODEL,
       language: "en",
-      prompt: TRANSCRIBE_PROMPT +
-        " CRITICAL: Speaker may have Indian or American accent with background noise. " +
-        " Amplify low volume audio. Ignore background chatter. Focus on primary voice. " +
-        " Technical terms like BDD, TDD, gRPC, Kafka, Selenium are common - recognize accurately.",
-      temperature: 0.1  // Lower = more conservative, less hallucination (was 0.2)
+      // SHORT prompt only — long prompts with examples cause the model to echo them
+      prompt: "Transcribe spoken English only. Technical terms: BDD, TDD, gRPC, Kafka, Selenium, JWT, REST API.",
+      temperature: 0.0  // Zero temperature = no creativity, pure transcription
     },
     turn_detection: {
       type: "server_vad",
-      threshold: 0.35,  // Even MORE sensitive (was 0.4) for faded audio
-      prefix_padding_ms: 500,  // More padding (was 400) to catch soft starts
-      silence_duration_ms: 600  // Longer (was 500) to avoid cutting mid-sentence
+      threshold: 0.50,           // Higher = only real speech triggers (was 0.35 — too sensitive)
+      prefix_padding_ms: 300,    // Less padding
+      silence_duration_ms: 400   // Shorter silence = faster word-by-word commit
     },
-    input_audio_noise_reduction: { 
-      type: "far_field"  // Aggressive noise reduction for background noise
+    input_audio_noise_reduction: {
+      type: "far_field"
     }
   };
-
   try { ws.send(JSON.stringify(cfgA)); } catch {}
 }
 
@@ -1335,24 +1315,20 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
           transcription: {
             model: REALTIME_ASR_MODEL,
             language: "en",
-            prompt: TRANSCRIBE_PROMPT +
-              " Speaker has Indian or American accent with possible background noise. " +
-              " Low volume audio - amplify and transcribe. " +
-              " Technical terms: BDD, TDD, gRPC, Kafka, Selenium.",
-            temperature: 0.1  // Lower temperature
+            prompt: "Transcribe spoken English only. Technical terms: BDD, TDD, gRPC, Kafka, Selenium, JWT.",
+            temperature: 0.0
           },
           noise_reduction: { type: "far_field" },
           turn_detection: {
             type: "server_vad",
-            threshold: 0.35,  // More sensitive
-            prefix_padding_ms: 500,
-            silence_duration_ms: 600
+            threshold: 0.50,
+            prefix_padding_ms: 300,
+            silence_duration_ms: 400
           }
         }
       }
     }
   };
-
   try { ws.send(JSON.stringify(cfgB)); } catch {}
 }
 
@@ -2262,6 +2238,7 @@ async function startAll() {
   micInterimEntry = null;
   lastSpeechAt = 0;
   sentCursor = 0;
+  sentCursorTime = 0;
   pinnedTop = true;
 
   lastSysTail = "";
@@ -2368,6 +2345,7 @@ function hardClearTranscript() {
   micInterimEntry = null;
   lastSpeechAt = 0;
   sentCursor = 0;
+  sentCursorTime = 0;
   pinnedTop = true;
 
   updateTranscript();
@@ -2376,23 +2354,27 @@ function hardClearTranscript() {
 /* -------------------------------------------------------------------------- */
 /* SEND / CLEAR / RESET                                                        */
 /* -------------------------------------------------------------------------- */
+let isSending = false;  // prevent double-send while streaming
+
 async function handleSend() {
   if (sendBtn.disabled) return;
+  if (isSending) return;  // block concurrent sends
 
   const manual = normalize(manualQuestion?.value || "");
 
-  // ONLY grab text since the last send (sentCursor marks the boundary)
+  // Grab ONLY text since the last send (sentCursor + sentCursorTime boundary)
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const base = manual || freshInterviewer;
 
   if (!base) {
-    // Nothing new to send
     if (manualQuestion) manualQuestion.value = "";
     return;
   }
 
-  // Clear the input immediately
+  // Clear input immediately so user sees it was accepted
   if (manualQuestion) manualQuestion.value = "";
+
+  isSending = true;
 
   updateTopicMemory(base);
   const question = buildDraftQuestion(base);
@@ -2401,10 +2383,10 @@ async function handleSend() {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
-  // ADVANCE sentCursor NOW so next send only picks up new text
+  // ADVANCE sentCursor AND sentCursorTime — next send only picks up NEW text
   sentCursor = timeline.length;
+  sentCursorTime = Date.now();
   pinnedTop = true;
-  // Scroll transcript to top so user sees latest
   if (liveTranscript) liveTranscript.scrollTop = 0;
   updateTranscript();
 
@@ -2417,41 +2399,34 @@ async function handleSend() {
       ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
       : question;
 
-  await startChatStreaming(promptToSend, base);
+  try {
+    await startChatStreaming(promptToSend, base);
+  } finally {
+    isSending = false;  // Always unlock, even if streaming throws
+  }
 }
 
 sendBtn.onclick = handleSend;
 
 /* -------------------------------------------------------------------------- */
-/* ENTER KEY HANDLING — single source of truth, no double-fire               */
+/* ENTER KEY — fires handleSend, protected by isSending flag in handleSend    */
 /* -------------------------------------------------------------------------- */
-let enterHandledAt = 0;  // debounce guard to prevent double-fire
-
-function triggerSendOnce() {
-  const now = Date.now();
-  if (now - enterHandledAt < 80) return;  // 80ms debounce
-  enterHandledAt = now;
-  handleSend();
-}
-
-// manualQuestion: Enter sends, Shift+Enter inserts newline
 if (manualQuestion) {
   manualQuestion.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       e.stopPropagation();
-      triggerSendOnce();
+      handleSend();
     }
-    // Shift+Enter: do nothing (default textarea behavior = newline)
+    // Shift+Enter = newline in textarea (default behavior)
   });
 }
 
-// Global fallback: fires when Enter is pressed outside manualQuestion
 document.addEventListener("keydown", (e) => {
-  if (e.target === manualQuestion) return;  // handled above
+  if (e.target === manualQuestion) return;  // already handled above
   if (e.key !== "Enter" || e.shiftKey) return;
   e.preventDefault();
-  triggerSendOnce();
+  handleSend();
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2514,6 +2489,7 @@ window.addEventListener("load", async () => {
   micInterimEntry = null;
   lastSpeechAt = 0;
   sentCursor = 0;
+  sentCursorTime = 0;
   pinnedTop = true;
 
   lastSysTail = "";
