@@ -53,25 +53,40 @@ function fixSpacingOutsideCodeBlocks(text) {
 function renderMarkdownLite(md) {
   if (!md) return "";
 
-  // Normalize line endings
-  let safe = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
+  // ── PRE-PROCESS: model often outputs emoji steps and bullets on ONE line ──
+  // e.g. "1️⃣ Title * bullet1 * bullet2  2️⃣ Next step * bullet"
+  // Split them into proper lines before any further processing
+  let text = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
 
-  // Split into code-block vs non-code sections
-  const parts = safe.split(/(```[\s\S]*?```)/g);
+  // Inject newline before emoji step markers 2-9 when they appear mid-line
+  text = text.replace(/([^\n])([2-9]️⃣)/g, "$1\n$2");
+
+  // Inject newline before " * " bullets that are mid-line
+  // BUT skip inside code blocks (between ```)
+  const preParts = text.split(/(```[\s\S]*?```)/g);
+  for (let i = 0; i < preParts.length; i++) {
+    if (i % 2 === 0) {                          // outside code blocks only
+      preParts[i] = preParts[i].replace(/ \* /g, "\n* ");
+    }
+  }
+  text = preParts.join("");
+
+  // ── RENDER: split code vs non-code, process each ──
+  const parts = text.split(/(```[\s\S]*?```)/g);
 
   const processedParts = parts.map((part, i) => {
-    // Odd indexes = inside code blocks — escape and wrap, don't touch content
+    // Odd index = inside a fenced code block
     if (i % 2 === 1) {
       const fenceMatch = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
       const lang = fenceMatch?.[1] || "";
-      const code = fenceMatch?.[2] || part.replace(/^```\w*\n?/, "").replace(/```$/, "");
+      const code = fenceMatch?.[2] ?? part.replace(/^```\w*\n?/, "").replace(/```$/, "");
       const escapedCode = code
         .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
         .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
       return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
     }
 
-    // Even indexes = normal text — process markdown
+    // Even index = normal text
     let s = part;
 
     // Escape HTML
@@ -84,37 +99,37 @@ function renderMarkdownLite(md) {
     // Inline `code`
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-    // Process line by line for structure
+    // Process line by line
     const lines = s.split("\n");
     const htmlLines = lines.map(line => {
       const trimmed = line.trim();
 
-      // Emoji step headers: 1️⃣ 2️⃣ etc — make them bold block lines
+      // Emoji step headers: 1️⃣ 2️⃣ etc
       if (/^[1-9]️⃣/.test(trimmed)) {
-        return `<div style="margin-top:10px;margin-bottom:2px;font-weight:600">${trimmed}</div>`;
+        return `<div style="margin-top:10px;margin-bottom:3px;font-weight:600">${trimmed}</div>`;
       }
 
       // * bullet lines
       if (/^\*\s+/.test(trimmed)) {
         const content = trimmed.replace(/^\*\s+/, "");
-        return `<div style="margin-left:16px;margin-top:2px">• ${content}</div>`;
+        return `<div style="margin-left:16px;margin-top:2px;line-height:1.5">• ${content}</div>`;
       }
 
-      // Q: line — bold it
+      // Q: line
       if (/^Q:\s/.test(trimmed)) {
-        return `<div style="margin-bottom:6px"><b>${trimmed}</b></div>`;
+        return `<div style="margin-bottom:8px"><b>${trimmed}</b></div>`;
       }
 
-      // "Here's how I handle it in production:" — styled transition line
+      // "Here's how I handle it in production:" transition line
       if (/^here'?s how i handle it in production/i.test(trimmed)) {
-        return `<div style="margin-top:8px;margin-bottom:4px;font-style:italic">${trimmed}</div>`;
+        return `<div style="margin-top:6px;margin-bottom:4px;font-style:italic">${trimmed}</div>`;
       }
 
-      // Empty line = paragraph break
+      // Empty line = small spacer
       if (!trimmed) return `<div style="height:6px"></div>`;
 
       // Normal line
-      return `<div>${trimmed}</div>`;
+      return `<div style="line-height:1.6">${trimmed}</div>`;
     });
 
     return htmlLines.join("");

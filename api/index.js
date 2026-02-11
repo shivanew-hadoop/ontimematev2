@@ -882,15 +882,18 @@ RULES:
 - For calculation questions: show the formula first, then plug in real numbers
 - For failure/incident questions: steps = detect → contain → fix → verify`.trim();
 
-      const CODE_FIRST_SYSTEM = `Answer coding questions concisely.
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
 
-**Solution:**
-\`\`\`java
-// code
+MANDATORY FORMAT:
+
+\`\`\`[language]
+// Brief one-line description of what this does
+
+[code with inline comment on every non-trivial line]
 \`\`\`
 
-**Complexity:** O(n) time, O(1) space
-**Use:** Real-world scenario.`.trim();
+**Input:** [sample input]
+**Output:** [sample output]`.trim();
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
