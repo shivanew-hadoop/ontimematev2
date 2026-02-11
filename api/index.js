@@ -844,6 +844,8 @@ MANDATORY FORMAT (follow exactly for every non-code answer):
 
 Q: [restate the question]
 
+[blank line]
+
 **[One-sentence direct answer — the bottom line up front]**
 
 Here's how I handle it in production:
