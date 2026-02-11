@@ -846,12 +846,16 @@ Q: [restate the question]
 **[One-sentence direct answer — what it does or how it works]**
 
 **[Section heading relevant to the question]:**
-1. **[Key point]** – One practical line
+1. **[Key point]** – One practical line with practical example or detail if relevant (e.g. "In Java, this is often done with X class/method. Here's a code snippet: ...")
 2. **[Key point]** – One practical line
 3. **[Key point]** – One practical line
+4. **[Key point]** – One practical line
+5. **[Key point]** – One practical line
+6. **[Key point]** – One practical line
 
 **Real Scenario:**
 [Specific problem → what was done → measurable result with numbers]
+1. **[Key point]** –  with practical example or detail if relevant (e.g. "In Java, this is often done with X class/method. Here's a code snippet: ...")
 
 RULES:
 - Use technical specifics: tool names, metric values, thresholds, formulas
