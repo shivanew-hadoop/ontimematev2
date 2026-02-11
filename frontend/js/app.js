@@ -50,32 +50,52 @@ function fixSpacingOutsideCodeBlocks(text) {
   return parts.join("```");
 }
 
+// ============================================================
+// FIND this entire function in app.js and REPLACE with this:
+// function renderMarkdownLite(md) { ... }
+// ============================================================
+
 function renderMarkdownLite(md) {
   if (!md) return "";
 
-  // ── PRE-PROCESS: model often outputs emoji steps and bullets on ONE line ──
-  // e.g. "1️⃣ Title * bullet1 * bullet2  2️⃣ Next step * bullet"
-  // Split them into proper lines before any further processing
+  // ── STEP 1: Normalize line endings ──
   let text = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
 
-  // Inject newline before emoji step markers 2-9 when they appear mid-line
-  text = text.replace(/([^\n])([2-9]️⃣)/g, "$1\n$2");
+  // ── STEP 2: Inject newlines before structural markers that arrive mid-line ──
+  // The model often sends everything on one line:
+  // "Q: What is X? **Bold answer.** Here's how I handle it in production: 1️⃣ Step * bullet 2️⃣ Step"
 
-  // Inject newline before " * " bullets that are mid-line
-  // BUT skip inside code blocks (between ```)
+  // 2a. Split Q: line from the bold answer that follows it
+  // "Q: What is BDD? **BDD is..." → "Q: What is BDD?\n**BDD is..."
+  text = text.replace(/(Q:[^\n]+?)(\s+\*\*[A-Z])/g, "$1\n$2");
+
+  // 2b. Split bold answer from "Here's how" transition line
+  // "**Bold answer.** Here's how..." → "**Bold answer.**\nHere's how..."
+  text = text.replace(/([^\n])(Here's how I handle it in production:?)/gi, "$1\n$2");
+
+  // 2c. Inject newline before ALL emoji step numbers (1️⃣ through 9️⃣) when mid-line
+  // FIXES: old code only handled 2-9, missing 1️⃣ entirely
+  text = text.replace(/([^\n])([1-9]️⃣)/g, "$1\n$2");
+
+  // 2d. Inject newline before " * " bullets that are mid-line — skip code blocks
   const preParts = text.split(/(```[\s\S]*?```)/g);
   for (let i = 0; i < preParts.length; i++) {
-    if (i % 2 === 0) {                          // outside code blocks only
+    if (i % 2 === 0) {                        // outside code blocks only
       preParts[i] = preParts[i].replace(/ \* /g, "\n* ");
     }
   }
   text = preParts.join("");
 
-  // ── RENDER: split code vs non-code, process each ──
+  // 2e. Split closing **bold summary** from last bullet if still mid-line
+  // "* last bullet. **Bold closing statement.**" → split before **
+  text = text.replace(/([^\n])(\*\*[A-Z][^*\n]{15,}\*\*)(\s*)$/gm, "$1\n$2$3");
+
+  // ── STEP 3: Split into code blocks vs normal text and render each ──
   const parts = text.split(/(```[\s\S]*?```)/g);
 
   const processedParts = parts.map((part, i) => {
-    // Odd index = inside a fenced code block
+
+    // Odd index = fenced code block
     if (i % 2 === 1) {
       const fenceMatch = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
       const lang = fenceMatch?.[1] || "";
@@ -86,49 +106,49 @@ function renderMarkdownLite(md) {
       return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
     }
 
-    // Even index = normal text
+    // Even index = normal text — escape then render markdown
     let s = part;
 
-    // Escape HTML
+    // Escape HTML special chars
     s = s.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
          .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 
-    // Bold **text**
+    // **bold**
     s = s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
 
-    // Inline `code`
+    // `inline code`
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
 
-    // Process line by line
+    // Process line by line for structural elements
     const lines = s.split("\n");
     const htmlLines = lines.map(line => {
       const trimmed = line.trim();
 
-      // Emoji step headers: 1️⃣ 2️⃣ etc
+      // 1️⃣ 2️⃣ 3️⃣ ... emoji step headers → bold block with top margin
       if (/^[1-9]️⃣/.test(trimmed)) {
-        return `<div style="margin-top:10px;margin-bottom:3px;font-weight:600">${trimmed}</div>`;
+        return `<div style="margin-top:12px;margin-bottom:4px;font-weight:600">${trimmed}</div>`;
       }
 
-      // * bullet lines
+      // * bullet lines → indented bullet
       if (/^\*\s+/.test(trimmed)) {
         const content = trimmed.replace(/^\*\s+/, "");
-        return `<div style="margin-left:16px;margin-top:2px;line-height:1.5">• ${content}</div>`;
+        return `<div style="margin-left:18px;margin-top:3px;line-height:1.55">• ${content}</div>`;
       }
 
-      // Q: line
+      // Q: line → bold with bottom spacing
       if (/^Q:\s/.test(trimmed)) {
-        return `<div style="margin-bottom:8px"><b>${trimmed}</b></div>`;
+        return `<div style="margin-bottom:8px;font-weight:600">${trimmed}</div>`;
       }
 
-      // "Here's how I handle it in production:" transition line
+      // "Here's how I handle it in production:" → italic transition line
       if (/^here'?s how i handle it in production/i.test(trimmed)) {
-        return `<div style="margin-top:6px;margin-bottom:4px;font-style:italic">${trimmed}</div>`;
+        return `<div style="margin-top:8px;margin-bottom:6px;font-style:italic">${trimmed}</div>`;
       }
 
-      // Empty line = small spacer
+      // Empty line → small vertical spacer
       if (!trimmed) return `<div style="height:6px"></div>`;
 
-      // Normal line
+      // Normal paragraph line
       return `<div style="line-height:1.6">${trimmed}</div>`;
     });
 
