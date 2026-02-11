@@ -52,15 +52,75 @@ function fixSpacingOutsideCodeBlocks(text) {
 
 function renderMarkdownLite(md) {
   if (!md) return "";
-  let safe = String(md).replace(/<br\s*\/?>/gi, "\n");
-  safe = fixSpacingOutsideCodeBlocks(safe);
-  safe = escapeHtml(safe);
-  safe = safe.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  safe = safe
-    .replace(/\r\n/g, "\n")
-    .replace(/\n\s*\n/g, "<br><br>")
-    .replace(/\n/g, "<br>");
-  return safe.trim();
+
+  // Normalize line endings
+  let safe = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
+
+  // Split into code-block vs non-code sections
+  const parts = safe.split(/(```[\s\S]*?```)/g);
+
+  const processedParts = parts.map((part, i) => {
+    // Odd indexes = inside code blocks — escape and wrap, don't touch content
+    if (i % 2 === 1) {
+      const fenceMatch = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+      const lang = fenceMatch?.[1] || "";
+      const code = fenceMatch?.[2] || part.replace(/^```\w*\n?/, "").replace(/```$/, "");
+      const escapedCode = code
+        .replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+      return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
+    }
+
+    // Even indexes = normal text — process markdown
+    let s = part;
+
+    // Escape HTML
+    s = s.replaceAll("&", "&amp;").replaceAll("<", "&lt;")
+         .replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+    // Bold **text**
+    s = s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+
+    // Inline `code`
+    s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+
+    // Process line by line for structure
+    const lines = s.split("\n");
+    const htmlLines = lines.map(line => {
+      const trimmed = line.trim();
+
+      // Emoji step headers: 1️⃣ 2️⃣ etc — make them bold block lines
+      if (/^[1-9]️⃣/.test(trimmed)) {
+        return `<div style="margin-top:10px;margin-bottom:2px;font-weight:600">${trimmed}</div>`;
+      }
+
+      // * bullet lines
+      if (/^\*\s+/.test(trimmed)) {
+        const content = trimmed.replace(/^\*\s+/, "");
+        return `<div style="margin-left:16px;margin-top:2px">• ${content}</div>`;
+      }
+
+      // Q: line — bold it
+      if (/^Q:\s/.test(trimmed)) {
+        return `<div style="margin-bottom:6px"><b>${trimmed}</b></div>`;
+      }
+
+      // "Here's how I handle it in production:" — styled transition line
+      if (/^here'?s how i handle it in production/i.test(trimmed)) {
+        return `<div style="margin-top:8px;margin-bottom:4px;font-style:italic">${trimmed}</div>`;
+      }
+
+      // Empty line = paragraph break
+      if (!trimmed) return `<div style="height:6px"></div>`;
+
+      // Normal line
+      return `<div>${trimmed}</div>`;
+    });
+
+    return htmlLines.join("");
+  });
+
+  return processedParts.join("");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2090,7 +2150,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
         setStatus(sendStatus, "Receiving…", "text-orange-600");
       }
 
-      if (raw.length < 1800) render();
+      render();
     }
 
     if (mySeq === chatStreamSeq) {
