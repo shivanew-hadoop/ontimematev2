@@ -23,6 +23,16 @@ function escapeHtml(s) {
     .replaceAll("'", "&#039;");
 }
 
+function getSessionId() {
+  let id = sessionStorage.getItem("chatSessionId");
+  if (!id) {
+    id = crypto.randomUUID();
+    sessionStorage.setItem("chatSessionId", id);
+  }
+  return id;
+}
+
+
 /* -------------------------------------------------------------------------- */
 /* SIMPLE MARKDOWN (fallback)                                                   */
 /* -------------------------------------------------------------------------- */
@@ -2025,12 +2035,14 @@ async function startChatStreaming(prompt, userTextForHistory) {
   responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
   setStatus(sendStatus, "Connecting…", "text-orange-600");
 
-  const body = {
-    prompt,
-    history: compactHistoryForRequest(),
-    instructions: getEffectiveInstructions(),
-    resumeText: resumeTextMem || ""
-  };
+ const body = {
+  prompt,
+  history: compactHistoryForRequest(),
+  instructions: getEffectiveInstructions(),
+  resumeText: resumeTextMem || "",
+  sessionId: getSessionId()
+};
+
 
   let raw = "";
   let flushTimer = null;
@@ -2085,6 +2097,8 @@ async function startChatStreaming(prompt, userTextForHistory) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
       pushHistory("assistant", raw);
+      resumeTextMem = "";
+
     }
   } catch (e) {
     if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;

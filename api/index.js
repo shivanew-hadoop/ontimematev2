@@ -27,6 +27,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // In-memory cache (per warm lambda) to avoid re-summarizing the same resume
 const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
+const SESSION_CACHE = new Map();
 
 /* -------------------------------------------------------------------------- */
 /* HELPERS                                                                    */
@@ -813,7 +814,8 @@ export default async function handler(req, res) {
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      const { prompt, instructions, resumeText, history } = await readJson(req);
+      const { prompt, instructions, resumeText, history, sessionId } = await readJson(req);
+
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
       // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
@@ -910,12 +912,30 @@ RULES:
 
       // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
       // Still enough for rich context, saves ~2000 tokens of overhead per request
-      if (resumeText?.trim()) {
-        messages.push({
-          role: "system",
-          content: "Candidate background (use to personalize answers):\n" + resumeText.trim().slice(0, 4000)
-        });
-      }
+      let resumeSummary = "";
+
+// First question of session (resume provided)
+if (resumeText?.trim()) {
+  resumeSummary = await getResumeSummary(resumeText);
+
+  if (sessionId) {
+    SESSION_CACHE.set(sessionId, { resumeSummary });
+  }
+}
+// Subsequent questions (no resume sent, reuse cached)
+else if (sessionId && SESSION_CACHE.has(sessionId)) {
+  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+}
+
+if (resumeSummary) {
+  messages.push({
+    role: "system",
+    content:
+      "Candidate background (use to personalize answers):\n" +
+      resumeSummary
+  });
+}
+
 
       const hist = safeHistory(history);
 
@@ -936,10 +956,10 @@ RULES:
       // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
       // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         stream: true,
         temperature: 0.4,    // was 0.7 — lower = more consistent structure
-        max_tokens: 900,     // was 600 — higher = no cut-off answers
+        max_tokens: 650,     // was 600 — higher = no cut-off answers
         messages
       });
 
