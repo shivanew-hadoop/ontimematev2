@@ -1818,30 +1818,28 @@ async function transcribeMicBlob(blob, myEpoch) {
 /* SYSTEM AUDIO                                                                 */
 /* -------------------------------------------------------------------------- */
 function stopSystemAudioOnly() {
-  try { sysAbort?.abort(); } catch {}
-  sysAbort = null;
+  try {
+    systemRecognition?.stop();
+  } catch {}
+  systemRecognition = null;
 
-  if (sysSegmentTimer) clearInterval(sysSegmentTimer);
-  sysSegmentTimer = null;
+  try {
+    systemAudioSource?.disconnect();
+  } catch {}
+  systemAudioSource = null;
 
-  try { sysRecorder?.stop(); } catch {}
-  sysRecorder = null;
-
-  sysSegmentChunks = [];
-  sysQueue = [];
-  sysInFlight = 0;
-
-  stopAsrSession("sys");
+  try {
+    systemAudioContext?.close();
+  } catch {}
+  systemAudioContext = null;
 
   if (sysStream) {
-    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
+    try {
+      sysStream.getTracks().forEach(t => t.stop());
+    } catch {}
   }
-
   sysStream = null;
   sysTrack = null;
-
-  sysErrCount = 0;
-  sysErrBackoffUntil = 0;
 }
 
 // Legacy system audio pipeline (MediaRecorder -> /transcribe)
@@ -1910,9 +1908,140 @@ async function enableSystemAudioStreaming() {
   }
 }
 
+let systemRecognition = null;
+let systemAudioContext = null;
+let systemAudioSource = null;
+
 async function enableSystemAudio() {
-  if (USE_STREAMING_ASR_SYS) return enableSystemAudioStreaming();
-  return enableSystemAudioLegacy();
+  if (!isRunning) return;
+  
+  stopSystemAudioOnly();
+  
+  try {
+    // Get system audio stream
+    sysStream = await navigator.mediaDevices.getDisplayMedia({ 
+      video: true, 
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false
+      }
+    });
+  } catch (err) {
+    setStatus(audioStatus, "Share audio denied.", "text-red-600");
+    return;
+  }
+
+  sysTrack = sysStream.getAudioTracks()[0];
+  if (!sysTrack) {
+    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    stopSystemAudioOnly();
+    showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
+    return;
+  }
+
+  sysTrack.onended = () => {
+    stopSystemAudioOnly();
+    setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
+  };
+
+  // Create Web Speech Recognition for system audio
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    setStatus(audioStatus, "Speech Recognition not supported.", "text-red-600");
+    return;
+  }
+
+  systemRecognition = new SpeechRecognition();
+  systemRecognition.continuous = true;
+  systemRecognition.interimResults = true; // ⚡ THIS ENABLES WORD-BY-WORD
+  systemRecognition.maxAlternatives = 1;
+  systemRecognition.lang = "en-IN";
+
+  // Create audio context to route system audio to speech recognition
+  systemAudioContext = new (window.AudioContext || window.webkitAudioContext)();
+  systemAudioSource = systemAudioContext.createMediaStreamSource(sysStream);
+  
+  const dest = systemAudioContext.createMediaStreamDestination();
+  systemAudioSource.connect(dest);
+
+  let currentInterimEntry = null;
+
+  systemRecognition.onresult = (event) => {
+    if (!isRunning) return;
+
+    let interimText = "";
+    let finalText = "";
+
+    // Process all results
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const result = event.results[i];
+      const text = normalize(result[0].transcript || "");
+
+      if (result.isFinal) {
+        finalText += text + " ";
+      } else {
+        interimText += text + " ";
+      }
+    }
+
+    // ⚡ SHOW INTERIM (WORD-BY-WORD) IMMEDIATELY
+    if (interimText.trim()) {
+      if (currentInterimEntry) {
+        // Update existing interim entry
+        currentInterimEntry.text = normalize(interimText);
+        currentInterimEntry.t = Date.now();
+      } else {
+        // Create new interim entry
+        currentInterimEntry = {
+          t: Date.now(),
+          text: normalize(interimText),
+          role: "interviewer"
+        };
+        timeline.push(currentInterimEntry);
+      }
+      lastSpeechAt = Date.now();
+      updateTranscript();
+    }
+
+    // ⚡ COMMIT FINAL TEXT
+    if (finalText.trim()) {
+      // Remove interim entry if exists
+      if (currentInterimEntry) {
+        const idx = timeline.indexOf(currentInterimEntry);
+        if (idx >= 0) timeline.splice(idx, 1);
+        currentInterimEntry = null;
+      }
+
+      // Add final speech
+      addFinalSpeech(normalize(finalText), "interviewer");
+    }
+  };
+
+  systemRecognition.onerror = (e) => {
+    console.error("System recognition error:", e.error);
+    setStatus(audioStatus, `System audio error: ${e.error}. Retrying...`, "text-orange-600");
+  };
+
+  systemRecognition.onend = () => {
+    if (!isRunning) return;
+    // Auto-restart
+    setTimeout(() => {
+      if (!isRunning) return;
+      try {
+        systemRecognition.start();
+      } catch (err) {
+        console.error("Restart failed:", err);
+      }
+    }, 100);
+  };
+
+  try {
+    systemRecognition.start();
+    setStatus(audioStatus, "System audio LIVE (word-by-word).", "text-green-600");
+  } catch (err) {
+    setStatus(audioStatus, `Failed to start: ${err.message}`, "text-red-600");
+  }
 }
 
 function startSystemSegmentRecorder() {
@@ -2247,8 +2376,6 @@ resumeInput?.addEventListener("change", async () => {
 /* START / STOP                                                                 */
 /* -------------------------------------------------------------------------- */
 async function startAll() {
-  const micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-await startStreamingAsr("mic", micStream);
   hideBanner();
   if (isRunning) return;
 
@@ -2260,54 +2387,28 @@ await startStreamingAsr("mic", micStream);
   lastSpeechAt = 0;
   sentCursor = 0;
   pinnedTop = true;
-
   lastSysTail = "";
   lastMicTail = "";
   lastSysPrinted = "";
   lastSysPrintedAt = 0;
   resetRoleCommitState();
-
-  stopAsrSession("mic");
-  stopAsrSession("sys");
-
   updateTranscript();
 
   isRunning = true;
-
   startBtn.disabled = true;
   stopBtn.disabled = false;
   sysBtn.disabled = false;
   sendBtn.disabled = false;
-
   stopBtn.classList.remove("opacity-50");
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
 
-  if (!micMuted) {
-    const micOk = false;
-    if (!micOk) {
-      setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-      if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
-      if (!micAsr && !micStream) {
-        setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
-        await enableMicRecorderFallback().catch(() => {});
-      }
-    }
-
-    setTimeout(() => {
-      if (!isRunning) return;
-      if (micMuted) return;
-      if (micSrIsHealthy()) return;
-
-      if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
-        enableMicStreamingFallback().catch(() => {});
-        return;
-      }
-      if (!micStream) enableMicRecorderFallback().catch(() => {});
-    }, 2000);
-  } else {
-    setStatus(audioStatus, "Mic is OFF. Press System Audio to capture system audio.", "text-orange-600");
-  }
+  // ⚡ AUTO-START SYSTEM AUDIO IMMEDIATELY
+  setStatus(audioStatus, "Starting system audio capture...", "text-orange-600");
+  
+  setTimeout(async () => {
+    await enableSystemAudio();
+  }, 300);
 
   startCreditTicking();
 }
@@ -2376,12 +2477,19 @@ async function handleSend() {
 
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-  const base = manual || freshInterviewer;
   
+  // ⚡ ALWAYS USE FRESH TEXT (not just interviewer)
+  const freshAll = normalize(getFreshBlocksText());
+  
+  const base = manual || freshAll || freshInterviewer;
+
+  if (!base) {
+    setStatus(sendStatus, "Nothing to send", "text-orange-600");
+    return;
+  }
+
   updateTopicMemory(base);
-  const question = buildDraftQuestion(base);  // ← KEEP THIS
-  
-  if (!base) return;
+  const question = buildDraftQuestion(base);
 
   if (manualQuestion) manualQuestion.value = "";
 
@@ -2389,7 +2497,9 @@ async function handleSend() {
   blockMicUntil = Date.now() + 700;
   removeInterimIfAny();
 
+  // ⚡ MARK CURRENT POSITION (not timeline.length)
   sentCursor = timeline.length;
+  
   pinnedTop = true;
   updateTranscript();
 
@@ -2398,12 +2508,16 @@ async function handleSend() {
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
-  const promptToSend =
-    mode === "interview"
-      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))  // ← KEEP THIS
-      : question;
+  const promptToSend = mode === "interview"
+    ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+    : question;
 
   await startChatStreaming(promptToSend, base);
+  
+  // ⚡ RESET CURSOR AFTER SEND FOR NEXT BATCH
+  setTimeout(() => {
+    sentCursor = timeline.length;
+  }, 100);
 }
 
 sendBtn.onclick = handleSend;
