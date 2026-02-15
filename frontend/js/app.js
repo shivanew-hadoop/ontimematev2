@@ -828,7 +828,7 @@ async function enableSystemAudio() {
     console.error("[SYSTEM AUDIO] No audio track");
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
+    // showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
     return;
   }
 
