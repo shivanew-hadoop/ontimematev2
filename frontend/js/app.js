@@ -1,12 +1,9 @@
 /* ========================================================================== */
-/* app.js — SYSTEM AUDIO WORD-BY-WORD TRANSCRIPTION                          */
+/* app.js — WORKING SYSTEM AUDIO TRANSCRIPTION                               */
 /* ========================================================================== */
 
-const COMMIT_WORDS = 2; // Commit every 2 words for faster display
+const COMMIT_WORDS = 2;
 
-/* -------------------------------------------------------------------------- */
-/* BASIC TEXT HELPERS                                                          */
-/* -------------------------------------------------------------------------- */
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
@@ -29,23 +26,18 @@ function getSessionId() {
   return id;
 }
 
-/* -------------------------------------------------------------------------- */
-/* SIMPLE MARKDOWN (fallback)                                                   */
-/* -------------------------------------------------------------------------- */
 function renderMarkdownLite(md) {
   if (!md) return "";
   let text = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
   text = text.replace(/(Q:[^\n]+?)(\s+\*\*[A-Z])/g, "$1\n$2");
   text = text.replace(/([^\n])(Here's how I handle it in production:?)/gi, "$1\n$2");
   text = text.replace(/([^\n])([1-9]️⃣)/g, "$1\n$2");
-  
   const preParts = text.split(/(```[\s\S]*?```)/g);
   for (let i = 0; i < preParts.length; i++) {
     if (i % 2 === 0) preParts[i] = preParts[i].replace(/ \* /g, "\n* ");
   }
   text = preParts.join("");
   text = text.replace(/([^\n])(\*\*[A-Z][^*\n]{15,}\*\*)(\s*)$/gm, "$1\n$2$3");
-
   const parts = text.split(/(```[\s\S]*?```)/g);
   const processedParts = parts.map((part, i) => {
     if (i % 2 === 1) {
@@ -55,12 +47,10 @@ function renderMarkdownLite(md) {
       const escapedCode = code.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
       return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
     }
-
     let s = part;
     s = s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
     s = s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-
     const lines = s.split("\n");
     const htmlLines = lines.map(line => {
       const trimmed = line.trim();
@@ -133,9 +123,6 @@ document.addEventListener("DOMContentLoaded", () => {
   setupMarkdownRenderer();
 });
 
-/* -------------------------------------------------------------------------- */
-/* DOM                                                                          */
-/* -------------------------------------------------------------------------- */
 const userInfo = document.getElementById("userInfo");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
@@ -156,20 +143,15 @@ const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
 const micMuteBtn = document.getElementById("micMuteBtn");
 
-/* -------------------------------------------------------------------------- */
-/* SESSION + STATE                                                              */
-/* -------------------------------------------------------------------------- */
 let session = null;
 let isRunning = false;
 let hiddenInstructions = "";
 let micMuted = false;
-
 let recognition = null;
 let blockMicUntil = 0;
 let micInterimEntry = null;
 let lastMicResultAt = 0;
 let micWatchdog = null;
-
 let micStream = null;
 let micTrack = null;
 let micRecorder = null;
@@ -178,7 +160,6 @@ let micSegmentTimer = null;
 let micQueue = [];
 let micAbort = null;
 let micInFlight = 0;
-
 let sysStream = null;
 let sysTrack = null;
 let sysRecorder = null;
@@ -189,20 +170,16 @@ let sysAbort = null;
 let sysInFlight = 0;
 let sysErrCount = 0;
 let sysErrBackoffUntil = 0;
-
 let lastSysTail = "";
 let lastMicTail = "";
 let lastSysPrinted = "";
 let lastSysPrintedAt = 0;
-
 let timeline = [];
 let lastSpeechAt = 0;
 let sentCursor = 0;
 let pinnedTop = true;
-
 let creditTimer = null;
 let lastCreditAt = 0;
-
 let chatAbort = null;
 let chatStreamActive = false;
 let chatStreamSeq = 0;
@@ -210,9 +187,6 @@ let chatHistory = [];
 let resumeTextMem = "";
 let transcriptEpoch = 0;
 
-/* -------------------------------------------------------------------------- */
-/* CONSTANTS                                                                    */
-/* -------------------------------------------------------------------------- */
 const PAUSE_NEWLINE_MS = 3000;
 const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
@@ -253,9 +227,6 @@ const MODE_INSTRUCTIONS = {
   sales: "Respond in persuasive, value-driven style. Highlight benefits/outcomes.".trim()
 };
 
-/* -------------------------------------------------------------------------- */
-/* UI HELPERS                                                                   */
-/* -------------------------------------------------------------------------- */
 function showBanner(msg) {
   if (!bannerTop) return;
   bannerTop.textContent = msg;
@@ -306,31 +277,6 @@ function stopMicPipelinesOnly() {
 async function setMicMuted(on) {
   micMuted = !!on;
   updateMicMuteUI();
-  if (!isRunning) return;
-  if (micMuted) {
-    stopMicPipelinesOnly();
-    setStatus(audioStatus, "Mic muted (user OFF). System audio continues.", "text-orange-600");
-    return;
-  }
-  const micOk = startMic();
-  if (!micOk) {
-    setStatus(audioStatus, "Mic SR not available. Trying streaming ASR…", "text-orange-600");
-    if (USE_STREAMING_ASR_MIC_FALLBACK) await enableMicStreamingFallback().catch(() => {});
-    if (!micAsr && !micStream) {
-      setStatus(audioStatus, "Mic streaming ASR not available. Using fallback recorder…", "text-orange-600");
-      await enableMicRecorderFallback().catch(() => {});
-    }
-  } else {
-    setStatus(audioStatus, "Mic unmuted.", "text-green-600");
-  }
-  setTimeout(() => {
-    if (!isRunning || micMuted || micSrIsHealthy()) return;
-    if (USE_STREAMING_ASR_MIC_FALLBACK && !micAsr && !micStream) {
-      enableMicStreamingFallback().catch(() => {});
-      return;
-    }
-    if (!micStream) enableMicRecorderFallback().catch(() => {});
-  }, 2000);
 }
 
 if (micMuteBtn) {
@@ -367,9 +313,6 @@ function getEffectiveInstructions() {
   return (localStorage.getItem("instructions") || "").trim();
 }
 
-/* -------------------------------------------------------------------------- */
-/* TRANSCRIPT RENDER                                                            */
-/* -------------------------------------------------------------------------- */
 if (liveTranscript) {
   const TH = 40;
   liveTranscript.addEventListener("scroll", () => { pinnedTop = liveTranscript.scrollTop <= TH; }, { passive: true });
@@ -400,9 +343,6 @@ function removeInterimIfAny() {
   micInterimEntry = null;
 }
 
-/* -------------------------------------------------------------------------- */
-/* DEDUPE + OVERLAP TRIM                                                        */
-/* -------------------------------------------------------------------------- */
 function canonKey(s) {
   return normalize(String(s || "")).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, "").replace(/\s+/g, " ").trim();
 }
@@ -466,11 +406,9 @@ function addFinalSpeech(txt, role) {
   }
   lastSpeechAt = now;
   updateTranscript();
+  console.log("[TRANSCRIPT] Added:", trimmedRaw.substring(0, 50));
 }
 
-/* -------------------------------------------------------------------------- */
-/* QUESTION HELPERS                                                             */
-/* -------------------------------------------------------------------------- */
 function extractPriorQuestions() {
   const qs = [];
   for (const m of chatHistory.slice(-30)) {
@@ -497,9 +435,6 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   return prompt;
 }
 
-/* -------------------------------------------------------------------------- */
-/* PROFILE                                                                      */
-/* -------------------------------------------------------------------------- */
 async function loadUserProfile() {
   try {
     const res = await apiFetch("user/profile", {}, true);
@@ -515,9 +450,6 @@ async function loadUserProfile() {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* TOKEN + API                                                                  */
-/* -------------------------------------------------------------------------- */
 function isTokenNearExpiry() {
   const exp = Number(session?.expires_at || 0);
   if (!exp) return false;
@@ -560,9 +492,6 @@ async function apiFetch(path, opts = {}, needAuth = true) {
   return res;
 }
 
-/* -------------------------------------------------------------------------- */
-/* DEDUPE UTIL                                                                  */
-/* -------------------------------------------------------------------------- */
 function dedupeByTail(text, tailRef) {
   const t = normalize(text);
   if (!t) return "";
@@ -594,9 +523,6 @@ function looksLikeWhisperHallucination(t) {
   return noise.some(p => s.includes(p));
 }
 
-/* -------------------------------------------------------------------------- */
-/* STREAMING ASR HELPERS                                                        */
-/* -------------------------------------------------------------------------- */
 function base64FromBytes(u8) {
   let binary = "";
   const chunk = 0x8000;
@@ -645,12 +571,14 @@ async function getRealtimeClientSecretCached() {
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data?.value) throw new Error(data?.error || "Failed to get realtime client secret");
   realtimeSecretCache = { value: data.value, expires_at: data.expires_at || 0 };
+  console.log("[ASR] Got client secret, expires at:", new Date(data.expires_at * 1000));
   return data.value;
 }
 
 function stopAsrSession(which) {
   const s = which === "mic" ? micAsr : sysAsr;
   if (!s) return;
+  console.log(`[ASR] Stopping ${which} session`);
   try { s.ws?.close?.(); } catch {}
   try { s.sendTimer && clearInterval(s.sendTimer); } catch {}
   try { s.proc && (s.proc.onaudioprocess = null); } catch {}
@@ -719,7 +647,8 @@ function sendAsrConfig(ws) {
     turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 350 },
     input_audio_noise_reduction: { type: "far_field" }
   };
-  try { ws.send(JSON.stringify(cfgA)); } catch {}
+  console.log("[ASR] Sending config:", cfgA);
+  try { ws.send(JSON.stringify(cfgA)); } catch(e) { console.error("[ASR] Config send failed:", e); }
 }
 
 function sendAsrConfigFallbackSessionUpdate(ws) {
@@ -741,90 +670,116 @@ function sendAsrConfigFallbackSessionUpdate(ws) {
       }
     }
   };
-  try { ws.send(JSON.stringify(cfgB)); } catch {}
+  console.log("[ASR] Sending fallback config:", cfgB);
+  try { ws.send(JSON.stringify(cfgB)); } catch(e) { console.error("[ASR] Fallback config send failed:", e); }
 }
 
 async function startStreamingAsr(which, mediaStream) {
   if (!isRunning) return false;
   if (which === "mic" && micMuted) return false;
   stopAsrSession(which);
-  const secret = await getRealtimeClientSecretCached();
-  const ws = new WebSocket(REALTIME_INTENT_URL, ["realtime", "openai-insecure-api-key." + secret]);
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = ctx.createMediaStreamSource(mediaStream);
-  const gain = ctx.createGain();
-  gain.gain.value = 0;
-  const proc = ctx.createScriptProcessor(4096, 1, 1);
-  const queue = [];
-  const state = { ws, ctx, src, proc, gain, queue, sendTimer: null, itemText: {}, itemEntry: {}, sawConfigError: false };
-  if (which === "mic") micAsr = state;
-  else sysAsr = state;
-  proc.onaudioprocess = (e) => {
-    if (!isRunning) return;
-    if (which === "mic" && micMuted) return;
-    if (ws.readyState !== 1) return;
-    const ch0 = e.inputBuffer.getChannelData(0);
-    const inRate = ctx.sampleRate || 48000;
-    const resampled = resampleFloat32(ch0, inRate, ASR_TARGET_RATE);
-    const bytes = floatToInt16Bytes(resampled);
-    if (bytes.length) queue.push(bytes);
-  };
-  src.connect(proc);
-  proc.connect(gain);
-  gain.connect(ctx.destination);
-  ws.onopen = () => {
-    sendAsrConfig(ws);
-    state.sendTimer = setInterval(() => {
+  console.log(`[ASR] Starting ${which} streaming ASR`);
+  
+  try {
+    const secret = await getRealtimeClientSecretCached();
+    const ws = new WebSocket(REALTIME_INTENT_URL, ["realtime", "openai-insecure-api-key." + secret]);
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(mediaStream);
+    const gain = ctx.createGain();
+    gain.gain.value = 0;
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const queue = [];
+    const state = { ws, ctx, src, proc, gain, queue, sendTimer: null, itemText: {}, itemEntry: {}, sawConfigError: false };
+    if (which === "mic") micAsr = state;
+    else sysAsr = state;
+    
+    proc.onaudioprocess = (e) => {
       if (!isRunning) return;
       if (which === "mic" && micMuted) return;
       if (ws.readyState !== 1) return;
-      if (!queue.length) return;
-      let mergedLen = 0;
-      const parts = [];
-      while (queue.length && mergedLen < 4800 * 2) {
-        const b = queue.shift();
-        mergedLen += b.length;
-        parts.push(b);
+      const ch0 = e.inputBuffer.getChannelData(0);
+      const inRate = ctx.sampleRate || 48000;
+      const resampled = resampleFloat32(ch0, inRate, ASR_TARGET_RATE);
+      const bytes = floatToInt16Bytes(resampled);
+      if (bytes.length) queue.push(bytes);
+    };
+    
+    src.connect(proc);
+    proc.connect(gain);
+    gain.connect(ctx.destination);
+    
+    ws.onopen = () => {
+      console.log(`[ASR] ${which} WebSocket opened`);
+      sendAsrConfig(ws);
+      state.sendTimer = setInterval(() => {
+        if (!isRunning) return;
+        if (which === "mic" && micMuted) return;
+        if (ws.readyState !== 1) return;
+        if (!queue.length) return;
+        let mergedLen = 0;
+        const parts = [];
+        while (queue.length && mergedLen < 4800 * 2) {
+          const b = queue.shift();
+          mergedLen += b.length;
+          parts.push(b);
+        }
+        if (!parts.length) return;
+        const merged = new Uint8Array(mergedLen);
+        let off = 0;
+        for (const p of parts) {
+          merged.set(p, off);
+          off += p.length;
+        }
+        const evt = { type: "input_audio_buffer.append", audio: base64FromBytes(merged) };
+        try { ws.send(JSON.stringify(evt)); } catch(e) { console.error("[ASR] Send audio failed:", e); }
+      }, ASR_SEND_EVERY_MS);
+      setStatus(audioStatus, which === "sys" ? "System audio LIVE (word-by-word)." : "Mic (streaming ASR) enabled.", "text-green-600");
+    };
+    
+    ws.onmessage = (msg) => {
+      let ev = null;
+      try { ev = JSON.parse(msg.data); } catch { return; }
+      if (!ev?.type) return;
+      
+      if (ev.type === "error") {
+        console.error(`[ASR] ${which} error:`, ev);
+        const m = String(ev?.error?.message || ev?.message || "");
+        if (!state.sawConfigError && m.toLowerCase().includes("transcription_session.update")) {
+          state.sawConfigError = true;
+          sendAsrConfigFallbackSessionUpdate(ws);
+        }
+        return;
       }
-      if (!parts.length) return;
-      const merged = new Uint8Array(mergedLen);
-      let off = 0;
-      for (const p of parts) {
-        merged.set(p, off);
-        off += p.length;
+      
+      if (ev.type === "conversation.item.input_audio_transcription.delta") {
+        console.log(`[ASR] ${which} delta:`, ev.delta);
+        asrUpsertDelta(which, ev.item_id, ev.delta || "");
+        return;
       }
-      const evt = { type: "input_audio_buffer.append", audio: base64FromBytes(merged) };
-      try { ws.send(JSON.stringify(evt)); } catch {}
-    }, ASR_SEND_EVERY_MS);
-    setStatus(audioStatus, which === "sys" ? "System audio LIVE (word-by-word)." : "Mic (streaming ASR) enabled.", "text-green-600");
-  };
-  ws.onmessage = (msg) => {
-    let ev = null;
-    try { ev = JSON.parse(msg.data); } catch { return; }
-    if (!ev?.type) return;
-    if (ev.type === "error") {
-      const m = String(ev?.error?.message || ev?.message || "");
-      if (!state.sawConfigError && m.toLowerCase().includes("transcription_session.update")) {
-        state.sawConfigError = true;
-        sendAsrConfigFallbackSessionUpdate(ws);
+      
+      if (ev.type === "conversation.item.input_audio_transcription.completed") {
+        console.log(`[ASR] ${which} completed:`, ev.transcript);
+        asrFinalizeItem(which, ev.item_id, ev.transcript || "");
+        return;
       }
-      return;
-    }
-    if (ev.type === "conversation.item.input_audio_transcription.delta") {
-      asrUpsertDelta(which, ev.item_id, ev.delta || "");
-      return;
-    }
-    if (ev.type === "conversation.item.input_audio_transcription.completed") {
-      asrFinalizeItem(which, ev.item_id, ev.transcript || "");
-      return;
-    }
-  };
-  return true;
+    };
+    
+    ws.onerror = (err) => {
+      console.error(`[ASR] ${which} WebSocket error:`, err);
+      setStatus(audioStatus, `${which} ASR error. Check console.`, "text-red-600");
+    };
+    
+    ws.onclose = () => {
+      console.log(`[ASR] ${which} WebSocket closed`);
+    };
+    
+    return true;
+  } catch (e) {
+    console.error(`[ASR] ${which} setup failed:`, e);
+    return false;
+  }
 }
 
-/* -------------------------------------------------------------------------- */
-/* MIC (not needed for your use case, but kept for completeness)               */
-/* -------------------------------------------------------------------------- */
 function micSrIsHealthy() { return false; }
 function stopMicOnly() {}
 function startMic() { return false; }
@@ -832,9 +787,6 @@ async function enableMicStreamingFallback() {}
 function stopMicRecorderOnly() {}
 async function enableMicRecorderFallback() {}
 
-/* -------------------------------------------------------------------------- */
-/* SYSTEM AUDIO - STREAMING ASR                                                 */
-/* -------------------------------------------------------------------------- */
 function stopSystemAudioOnly() {
   try { sysAbort?.abort(); } catch {}
   sysAbort = null;
@@ -858,6 +810,7 @@ function stopSystemAudioOnly() {
 async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
+  console.log("[SYSTEM AUDIO] Starting capture...");
   
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({ 
@@ -865,36 +818,41 @@ async function enableSystemAudio() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false }
     });
   } catch (err) {
+    console.error("[SYSTEM AUDIO] Permission denied:", err);
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
 
   sysTrack = sysStream.getAudioTracks()[0];
   if (!sysTrack) {
+    console.error("[SYSTEM AUDIO] No audio track");
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
     showBanner("System audio requires selecting a window/tab and enabling "Share audio" in the picker.");
     return;
   }
 
+  console.log("[SYSTEM AUDIO] Audio track acquired");
   sysTrack.onended = () => {
+    console.log("[SYSTEM AUDIO] Track ended");
     stopSystemAudioOnly();
     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
   };
 
   try {
     const ok = await startStreamingAsr("sys", sysStream);
-    if (ok) return;
+    if (ok) {
+      console.log("[SYSTEM AUDIO] Streaming ASR started successfully");
+      return;
+    }
   } catch (e) {
-    console.error("Streaming ASR failed:", e);
+    console.error("[SYSTEM AUDIO] Streaming ASR failed:", e);
   }
 
+  console.error("[SYSTEM AUDIO] All methods failed");
   setStatus(audioStatus, "Streaming ASR unavailable. System audio disabled.", "text-red-600");
 }
 
-/* -------------------------------------------------------------------------- */
-/* CREDITS                                                                      */
-/* -------------------------------------------------------------------------- */
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
     method: "POST",
@@ -929,9 +887,6 @@ function startCreditTicking() {
   }, 500);
 }
 
-/* -------------------------------------------------------------------------- */
-/* CHAT STREAMING                                                               */
-/* -------------------------------------------------------------------------- */
 function abortChatStreamOnly(silent = true) {
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
@@ -1009,9 +964,6 @@ async function startChatStreaming(prompt, userTextForHistory) {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* RESUME UPLOAD                                                                */
-/* -------------------------------------------------------------------------- */
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
@@ -1032,10 +984,8 @@ resumeInput?.addEventListener("change", async () => {
   }
 });
 
-/* -------------------------------------------------------------------------- */
-/* START / STOP                                                                 */
-/* -------------------------------------------------------------------------- */
 async function startAll() {
+  console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
@@ -1065,6 +1015,7 @@ async function startAll() {
 }
 
 function stopAll() {
+  console.log("[STOP] Stopping all...");
   isRunning = false;
   stopMicOnly();
   stopMicRecorderOnly();
@@ -1105,9 +1056,6 @@ function hardClearTranscript() {
   updateTranscript();
 }
 
-/* -------------------------------------------------------------------------- */
-/* SEND / CLEAR / RESET                                                        */
-/* -------------------------------------------------------------------------- */
 async function handleSend() {
   if (sendBtn.disabled) return;
   const manual = normalize(manualQuestion?.value || "");
@@ -1165,6 +1113,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 window.addEventListener("load", async () => {
+  console.log("[LOAD] Page loaded");
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
   if (!session.refresh_token) {
@@ -1198,6 +1147,7 @@ window.addEventListener("load", async () => {
   sendBtn.classList.add("opacity-60");
   setStatus(audioStatus, "Stopped", "text-orange-600");
   updateMicMuteUI();
+  console.log("[LOAD] Initialization complete");
 });
 
 startBtn.onclick = startAll;
