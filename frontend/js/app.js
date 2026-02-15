@@ -148,6 +148,7 @@ let session = null;
 let isRunning = false;
 let hiddenInstructions = "";
 let micMuted = false;
+let currentBlockIndex = -1;
 
 let sysStream = null;
 let sysAudioContext = null;
@@ -295,33 +296,24 @@ function getFreshInterviewerBlocksText() {
 function updateTranscript() {
   if (!liveTranscript) return;
 
-  const beforeSend = timeline
-    .slice(0, sentCursor)
-    .map(x => x.text)
-    .join(" ")
-    .trim();
-
-  const afterSend = timeline
-    .slice(sentCursor)
-    .map(x => x.text)
-    .join(" ")
-    .trim();
-
   let html = "";
 
-  if (afterSend) {
-    html = `
-      <div style="font-weight:700;">${escapeHtml(afterSend)}</div>
-      <div style="margin-top:6px; opacity:0.7;">
-        ${escapeHtml(beforeSend)}
+  timeline.forEach((block, index) => {
+    const isCurrent = index === currentBlockIndex;
+
+    html += `
+      <div style="
+        margin-bottom:12px;
+        font-weight:${isCurrent ? "700" : "400"};
+      ">
+        ${escapeHtml(block.text)}
       </div>
     `;
-  } else {
-    html = `<div>${escapeHtml(beforeSend)}</div>`;
-  }
+  });
 
   liveTranscript.innerHTML = html;
 }
+
 
 
 function canonKey(s) {
@@ -363,36 +355,28 @@ function resetRoleCommitState() {
 function addFinalSpeech(txt, role) {
   const cleanedRaw = normalize(txt);
   if (!cleanedRaw) return;
-  
+
   const r = role === "interviewer" ? "interviewer" : "candidate";
   const now = Date.now();
-  const prev = lastCommittedByRole[r];
-  
-  const trimmedRaw = prev.raw ? trimOverlapWords(prev.raw, cleanedRaw) : cleanedRaw;
-  const trimmedKey = canonKey(trimmedRaw);
-  if (!trimmedKey) return;
-  
-  const tooSoon = now - (prev.at || 0) < 3000;
-  const sameKey = trimmedKey === (prev.key || "");
-  if (sameKey && tooSoon) return;
-  
-  prev.key = trimmedKey;
-  prev.raw = trimmedRaw;
-  prev.at = now;
-  
- if (!timeline.length) {
-  timeline.push({ t: now, text: trimmedRaw, role: r });
-} else {
-  const last = timeline[timeline.length - 1];
-  last.text = normalize((last.text || "") + " " + trimmedRaw);
-  last.t = now;
+
+  // If no active block → create new
+  if (currentBlockIndex === -1 || !timeline[currentBlockIndex]) {
+    timeline.unshift({
+      t: now,
+      text: cleanedRaw,
+      role: r
+    });
+    currentBlockIndex = 0;
+  } else {
+    // Append only inside current block
+    timeline[currentBlockIndex].text =
+      normalize(timeline[currentBlockIndex].text + " " + cleanedRaw);
+    timeline[currentBlockIndex].t = now;
+  }
+
+  updateTranscript();
 }
 
-  
-  lastSpeechAt = now;
-  updateTranscript();
-  console.log("[TRANSCRIPT] Added:", trimmedRaw.substring(0, 50));
-}
 
 function extractPriorQuestions() {
   const qs = [];
@@ -908,10 +892,10 @@ async function handleSend() {
 
   abortChatStreamOnly(true);
 
-  // 🔥 Move cursor AFTER reading text
-  sentCursor = timeline.length;
+// Freeze current block
+currentBlockIndex = -1;
+updateTranscript();
 
-  updateTranscript();
 
   responseBox.innerHTML = renderMarkdownLite(`${question}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
