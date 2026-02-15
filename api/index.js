@@ -755,6 +755,34 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
+    /* DEEPGRAM — API KEY                                      */
+    /* ------------------------------------------------------- */
+    if (path === "deepgram/key") {
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+      const gate = await getUserFromBearer(req);
+      if (!gate.ok) return res.status(401).json({ error: gate.error });
+
+      // Check if user has credits
+      const { data: row } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
+      const credits = Number(row?.credits || 0);
+      if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
+
+      // Return Deepgram API key
+      const apiKey = process.env.DEEPGRAM_API_KEY;
+      if (!apiKey) {
+        return res.status(500).json({ error: "Deepgram API key not configured" });
+      }
+
+      return res.json({ key: apiKey });
+    }
+
+    /* ------------------------------------------------------- */
     /* RESUME EXTRACTION                                       */
     /* ------------------------------------------------------- */
     if (path === "resume/extract") {
