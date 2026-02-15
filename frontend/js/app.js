@@ -303,8 +303,9 @@ function updateTranscript() {
 
     html += `
       <div style="
-        margin-bottom:12px;
         font-weight:${isCurrent ? "700" : "400"};
+        margin:0;
+        padding:0;
       ">
         ${escapeHtml(block.text)}
       </div>
@@ -313,6 +314,7 @@ function updateTranscript() {
 
   liveTranscript.innerHTML = html;
 }
+
 
 
 
@@ -877,25 +879,25 @@ async function handleSend() {
 
   if (sendBtn.disabled) return;
 
-  const manual = normalize(manualQuestion?.value || "");
-  const freshInterviewer = normalize(getFreshInterviewerBlocksText());
-  const freshAll = normalize(getFreshBlocksText());
-  const base = manual || freshAll || freshInterviewer;
+  // 🔥 ONLY send current block
+  if (currentBlockIndex === -1 || !timeline[currentBlockIndex]) {
+    setStatus(sendStatus, "Nothing to send", "text-orange-600");
+    return;
+  }
 
+  const base = normalize(timeline[currentBlockIndex].text);
   if (!base) {
     setStatus(sendStatus, "Nothing to send", "text-orange-600");
     return;
   }
 
   const question = buildDraftQuestion(base);
-  if (manualQuestion) manualQuestion.value = "";
 
   abortChatStreamOnly(true);
 
-// Freeze current block
-currentBlockIndex = -1;
-updateTranscript();
-
+  // Freeze this block
+  currentBlockIndex = -1;
+  updateTranscript();
 
   responseBox.innerHTML = renderMarkdownLite(`${question}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
@@ -908,6 +910,7 @@ updateTranscript();
 
   await startChatStreaming(promptToSend, base);
 }
+
 
 
 sendBtn.onclick = handleSend;
