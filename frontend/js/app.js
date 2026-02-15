@@ -10,6 +10,7 @@
 /* -------------------------------------------------------------------------- */
 /* BASIC TEXT HELPERS                                                          */
 /* -------------------------------------------------------------------------- */
+const COMMIT_WORDS = 3;
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
@@ -352,9 +353,9 @@ const MIC_SEGMENT_MS = 1200;
 const MIC_MIN_BYTES = 1800;
 const MIC_MAX_CONCURRENT = 2;
 
-const SYS_SEGMENT_MS = 2800;
-const SYS_MIN_BYTES = 6000;
-const SYS_MAX_CONCURRENT = 1;
+const SYS_SEGMENT_MS = 800;
+const SYS_MIN_BYTES = 2000;
+const SYS_MAX_CONCURRENT = 2;
 const SYS_TYPE_MS_PER_WORD = 18;
 
 const SYS_ERR_MAX = 3;
@@ -1309,11 +1310,15 @@ function asrUpsertDelta(which, itemId, deltaText) {
   const now = Date.now();
   if (!s.itemText[itemId]) s.itemText[itemId] = "";
   s.itemText[itemId] += String(deltaText || "");
- const words = normalize(s.itemText[itemId]).split(" ");
-if (words.length >= COMMIT_WORDS) {
-  asrFinalizeItem(which, itemId, s.itemText[itemId]);
-}
 
+  // ⚡ Auto-commit every N words for immediate feedback
+  const words = normalize(s.itemText[itemId]).split(" ");
+  if (words.length >= COMMIT_WORDS) {
+    asrFinalizeItem(which, itemId, s.itemText[itemId]);
+    return;
+  }
+
+  // Show preview in live transcript
   const cur = normalize(s.itemText[itemId]);
   if (!cur) return;
 
@@ -2013,7 +2018,6 @@ async function transcribeSysBlob(blob, myEpoch) {
     sysErrCount++;
     const errText = await res.text().catch(() => "");
     setStatus(audioStatus, `System transcribe failed (${res.status}). ${errText.slice(0, 160)}`, "text-red-600");
-
     if (sysErrCount >= SYS_ERR_MAX) {
       sysErrBackoffUntil = Date.now() + SYS_ERR_BACKOFF_MS;
       stopSystemAudioOnly();
@@ -2033,13 +2037,12 @@ async function transcribeSysBlob(blob, myEpoch) {
     get value() { return lastSysTail; },
     set value(v) { lastSysTail = v; }
   });
-
   if (!cleaned) return;
 
   const now = Date.now();
   const text = normalize(cleaned);
 
-  // FIX: compute trimmed BEFORE overwriting lastSysPrinted
+  // Compute trimmed BEFORE overwriting lastSysPrinted
   const trimmed = trimOverlap(lastSysPrinted, text);
   if (!trimmed) return;
 
@@ -2047,7 +2050,8 @@ async function transcribeSysBlob(blob, myEpoch) {
   lastSysPrinted = normalize((lastSysPrinted + " " + trimmed).trim());
   lastSysPrintedAt = now;
 
-  addTypewriterSpeech(trimmed, SYS_TYPE_MS_PER_WORD, "interviewer");
+  // ⚡ SHOW IMMEDIATELY (no typewriter delay for system audio)
+  addFinalSpeech(trimmed, "interviewer");
 }
 
 /* -------------------------------------------------------------------------- */
