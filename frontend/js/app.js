@@ -170,8 +170,12 @@ let chatStreamSeq = 0;
 let chatHistory = [];
 let resumeTextMem = "";
 let transcriptEpoch = 0;
+let silenceStart = null;
+const RMS_THRESHOLD = 0.015;
+const SILENCE_MS = 4000;
 
-const PAUSE_NEWLINE_MS = 3000;
+
+const PAUSE_NEWLINE_MS = Infinity;
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
@@ -290,9 +294,35 @@ function getFreshInterviewerBlocksText() {
 
 function updateTranscript() {
   if (!liveTranscript) return;
-  liveTranscript.innerText = getAllBlocksNewestFirst().join("\n\n").trim();
-  if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+
+  const beforeSend = timeline
+    .slice(0, sentCursor)
+    .map(x => x.text)
+    .join(" ")
+    .trim();
+
+  const afterSend = timeline
+    .slice(sentCursor)
+    .map(x => x.text)
+    .join(" ")
+    .trim();
+
+  let html = "";
+
+  if (afterSend) {
+    html = `
+      <div style="font-weight:700;">${escapeHtml(afterSend)}</div>
+      <div style="margin-top:6px; opacity:0.7;">
+        ${escapeHtml(beforeSend)}
+      </div>
+    `;
+  } else {
+    html = `<div>${escapeHtml(beforeSend)}</div>`;
+  }
+
+  liveTranscript.innerHTML = html;
 }
+
 
 function canonKey(s) {
   return normalize(String(s || ""))
@@ -350,19 +380,14 @@ function addFinalSpeech(txt, role) {
   prev.raw = trimmedRaw;
   prev.at = now;
   
-  const gap = now - (lastSpeechAt || 0);
-  if (!timeline.length || gap >= PAUSE_NEWLINE_MS) {
-    timeline.push({ t: now, text: trimmedRaw, role: r });
-  } else {
-    const last = timeline[timeline.length - 1];
-    if (last.role && last.role !== r) {
-      timeline.push({ t: now, text: trimmedRaw, role: r });
-    } else {
-      last.text = normalize((last.text || "") + " " + trimmedRaw);
-      last.t = now;
-      last.role = r;
-    }
-  }
+ if (!timeline.length) {
+  timeline.push({ t: now, text: trimmedRaw, role: r });
+} else {
+  const last = timeline[timeline.length - 1];
+  last.text = normalize((last.text || "") + " " + trimmedRaw);
+  last.t = now;
+}
+
   
   lastSpeechAt = now;
   updateTranscript();
@@ -578,33 +603,62 @@ async function enableSystemAudio() {
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
     
-    sysWebSocket.onclose = () => {
-      console.log("[DEEPGRAM] WebSocket closed");
-      if (isRunning) {
-        setStatus(audioStatus, "Reconnecting...", "text-orange-600");
-        sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
-      }
-    };
+   sysWebSocket.onclose = () => {
+  console.log("[DEEPGRAM] WebSocket closed (silence)");
+  setStatus(audioStatus, "Waiting for speech...", "text-orange-600");
+};
+
     
     sysAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     const source = sysAudioContext.createMediaStreamSource(sysStream);
     sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
     
-    sysProcessor.onaudioprocess = (e) => {
-      if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
-      
-      const inputData = e.inputBuffer.getChannelData(0);
-      
-      const int16Data = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+   sysProcessor.onaudioprocess = (e) => {
+  if (!isRunning) return;
+
+  const inputData = e.inputBuffer.getChannelData(0);
+
+  let sum = 0;
+  for (let i = 0; i < inputData.length; i++) {
+    sum += inputData[i] * inputData[i];
+  }
+  const rms = Math.sqrt(sum / inputData.length);
+
+  const now = Date.now();
+
+  // Speech detected
+  if (rms > RMS_THRESHOLD) {
+    silenceStart = null;
+
+    if (!sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) {
+      console.log("[VOICE] Speech → open WS");
+      enableSystemAudio();
+      return;
+    }
+  }
+
+  // Silence detected
+  if (rms <= RMS_THRESHOLD) {
+    if (!silenceStart) silenceStart = now;
+
+    if (now - silenceStart > SILENCE_MS) {
+      if (sysWebSocket && sysWebSocket.readyState === WebSocket.OPEN) {
+        console.log("[VOICE] Silence → close WS");
+        sysWebSocket.close();
       }
-      
-      if (sysWebSocket.readyState === WebSocket.OPEN) {
-        sysWebSocket.send(int16Data.buffer);
-      }
-    };
+    }
+  }
+
+  if (sysWebSocket && sysWebSocket.readyState === WebSocket.OPEN) {
+    const int16Data = new Int16Array(inputData.length);
+    for (let i = 0; i < inputData.length; i++) {
+      const s = Math.max(-1, Math.min(1, inputData[i]));
+      int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    }
+    sysWebSocket.send(int16Data.buffer);
+  }
+};
+
     
     source.connect(sysProcessor);
     sysProcessor.connect(sysAudioContext.destination);
@@ -828,53 +882,49 @@ function hardClearTranscript() {
 
 async function handleSend() {
 
-    // 🔒 1. Force commit visible interim text
+  // Force commit interim text
   if (currentInterimEntry) {
     const tmp = currentInterimEntry;
     currentInterimEntry = null;
     addFinalSpeech(tmp.text, tmp.role);
   }
 
-  // ⏳ 2. Small wait to allow Deepgram final to land
   await new Promise(r => setTimeout(r, 120));
-  
+
   if (sendBtn.disabled) return;
 
-  if (currentInterimEntry) {
-  const tmp = currentInterimEntry;
-  currentInterimEntry = null;
-  addFinalSpeech(tmp.text, tmp.role);
-}
-
-  
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
   const freshAll = normalize(getFreshBlocksText());
   const base = manual || freshAll || freshInterviewer;
-  
+
   if (!base) {
     setStatus(sendStatus, "Nothing to send", "text-orange-600");
     return;
   }
-  
+
   const question = buildDraftQuestion(base);
   if (manualQuestion) manualQuestion.value = "";
-  
+
   abortChatStreamOnly(true);
+
+  // 🔥 Move cursor AFTER reading text
   sentCursor = timeline.length;
-  pinnedTop = true;
+
   updateTranscript();
-  
-  const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
+
+  responseBox.innerHTML = renderMarkdownLite(`${question}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
-  
+
   const mode = modeSelect?.value || "interview";
-  const promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
-  
+  const promptToSend =
+    mode === "interview"
+      ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+      : question;
+
   await startChatStreaming(promptToSend, base);
-  setTimeout(() => { sentCursor = timeline.length; }, 100);
 }
+
 
 sendBtn.onclick = handleSend;
 
