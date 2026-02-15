@@ -827,7 +827,25 @@ function hardClearTranscript() {
 }
 
 async function handleSend() {
+
+    // 🔒 1. Force commit visible interim text
+  if (currentInterimEntry) {
+    const tmp = currentInterimEntry;
+    currentInterimEntry = null;
+    addFinalSpeech(tmp.text, tmp.role);
+  }
+
+  // ⏳ 2. Small wait to allow Deepgram final to land
+  await new Promise(r => setTimeout(r, 120));
+  
   if (sendBtn.disabled) return;
+
+  if (currentInterimEntry) {
+  const tmp = currentInterimEntry;
+  currentInterimEntry = null;
+  addFinalSpeech(tmp.text, tmp.role);
+}
+
   
   const manual = normalize(manualQuestion?.value || "");
   const freshInterviewer = normalize(getFreshInterviewerBlocksText());
