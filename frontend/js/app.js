@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: Immediate word-by-word display with Deepgram             */
+/* app.js — FIXED: Word-by-word + Keep all text + No duplicates            */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
@@ -157,8 +157,8 @@ let sysReconnectTimer = null;
 let currentBlock = { text: "", sent: false, t: Date.now() };
 let sentBlocks = [];
 let pinnedTop = true;
-let interimWordCount = 0;
-let accumulatedText = "";
+let lastCommittedText = "";
+let lastInterimWords = 0;
 
 let creditTimer = null;
 let lastCreditAt = 0;
@@ -284,12 +284,24 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-function canonKey(s) {
-  return normalize(String(s || ""))
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}\s]/gu, "")
-    .replace(/\s+/g, " ")
-    .trim();
+function trimOverlapWords(prevRaw, nextRaw) {
+  const p = normalize(prevRaw).toLowerCase();
+  const n = normalize(nextRaw).toLowerCase();
+  if (!p || !n) return nextRaw;
+  
+  const pWords = p.split(" ");
+  const nWords = n.split(" ");
+  const maxCheck = Math.min(10, pWords.length, nWords.length);
+  
+  for (let k = maxCheck; k >= 2; k--) {
+    const pTail = pWords.slice(-k).join(" ");
+    const nHead = nWords.slice(0, k).join(" ");
+    if (pTail === nHead) {
+      const origWords = normalize(nextRaw).split(" ");
+      return origWords.slice(k).join(" ").trim();
+    }
+  }
+  return nextRaw;
 }
 
 function extractPriorQuestions() {
@@ -454,8 +466,8 @@ async function enableSystemAudio() {
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
-      interimWordCount = 0;
-      accumulatedText = "";
+      lastCommittedText = "";
+      lastInterimWords = 0;
     };
     
     sysWebSocket.onmessage = (event) => {
@@ -471,31 +483,34 @@ async function enableSystemAudio() {
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, transcript);
           
           if (isFinal) {
-            // Commit final text
+            // Finalize - trim overlap and append
             const finalText = normalize(transcript);
             if (finalText) {
-              if (accumulatedText) {
-                currentBlock.text = accumulatedText + " " + finalText;
-              } else {
-                currentBlock.text = currentBlock.text ? currentBlock.text + " " + finalText : finalText;
+              const trimmed = lastCommittedText ? trimOverlapWords(lastCommittedText, finalText) : finalText;
+              if (trimmed) {
+                currentBlock.text = currentBlock.text ? currentBlock.text + " " + trimmed : trimmed;
+                currentBlock.t = Date.now();
+                lastCommittedText = finalText;
               }
-              currentBlock.t = Date.now();
-              accumulatedText = "";
-              interimWordCount = 0;
             }
+            lastInterimWords = 0;
             updateTranscript();
           } else {
-            // Show interim - commit every 2 words
+            // Interim - commit every 2 words
             const words = normalize(transcript).split(" ");
             const currentWordCount = words.length;
             
-            if (currentWordCount >= COMMIT_WORDS && currentWordCount > interimWordCount) {
-              // Commit these words
-              accumulatedText = normalize(transcript);
-              currentBlock.text = currentBlock.text ? currentBlock.text + " " + accumulatedText : accumulatedText;
-              currentBlock.t = Date.now();
-              interimWordCount = currentWordCount;
-              updateTranscript();
+            if (currentWordCount >= COMMIT_WORDS && currentWordCount > lastInterimWords) {
+              const newText = normalize(transcript);
+              const trimmed = lastCommittedText ? trimOverlapWords(lastCommittedText, newText) : newText;
+              
+              if (trimmed) {
+                currentBlock.text = currentBlock.text ? currentBlock.text + " " + trimmed : trimmed;
+                currentBlock.t = Date.now();
+                lastCommittedText = newText;
+                lastInterimWords = currentWordCount;
+                updateTranscript();
+              }
             }
           }
         }
@@ -708,8 +723,8 @@ async function startAll() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  interimWordCount = 0;
-  accumulatedText = "";
+  lastCommittedText = "";
+  lastInterimWords = 0;
   pinnedTop = true;
   updateTranscript();
   
@@ -749,8 +764,8 @@ function hardClearTranscript() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  interimWordCount = 0;
-  accumulatedText = "";
+  lastCommittedText = "";
+  lastInterimWords = 0;
   pinnedTop = true;
   updateTranscript();
 }
@@ -777,8 +792,8 @@ async function handleSend() {
   }
   
   currentBlock = { text: "", sent: false, t: Date.now() };
-  interimWordCount = 0;
-  accumulatedText = "";
+  lastCommittedText = "";
+  lastInterimWords = 0;
   
   abortChatStreamOnly(true);
   pinnedTop = true;
@@ -842,8 +857,8 @@ window.addEventListener("load", async () => {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  interimWordCount = 0;
-  accumulatedText = "";
+  lastCommittedText = "";
+  lastInterimWords = 0;
   pinnedTop = true;
   stopSystemAudioOnly();
   updateTranscript();
