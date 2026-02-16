@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: Word-by-word display + No duplicates                     */
+/* app.js — FIXED: All blocks captured + No duplicates + Smart deduplication */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
@@ -178,7 +178,6 @@ let currentBlock = { text: "", sent: false, t: Date.now() };
 let sentBlocks = [];
 let pinnedTop = true;
 
-let lastFinalText = "";
 let currentInterimText = "";
 
 let creditTimer = null;
@@ -304,6 +303,36 @@ function updateTranscript() {
   
   liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+}
+
+// Smart deduplication - removes overlap from new text based on existing text
+function removeOverlap(existingText, newText) {
+  const existing = normalize(existingText).toLowerCase();
+  const incoming = normalize(newText).toLowerCase();
+  
+  if (!existing || !incoming) return newText;
+  
+  const existingWords = existing.split(" ");
+  const incomingWords = incoming.split(" ");
+  
+  // Check if incoming starts with end of existing (overlap)
+  const maxCheck = Math.min(15, existingWords.length, incomingWords.length);
+  
+  for (let overlapSize = maxCheck; overlapSize >= 3; overlapSize--) {
+    const existingTail = existingWords.slice(-overlapSize).join(" ");
+    const incomingHead = incomingWords.slice(0, overlapSize).join(" ");
+    
+    if (existingTail === incomingHead) {
+      // Found overlap - return only the new part
+      const originalIncomingWords = normalize(newText).split(" ");
+      const newPart = originalIncomingWords.slice(overlapSize).join(" ");
+      console.log(`[DEDUP] Removed ${overlapSize} overlapping words`);
+      return newPart;
+    }
+  }
+  
+  // No overlap found
+  return newText;
 }
 
 function extractPriorQuestions() {
@@ -468,7 +497,6 @@ async function enableSystemAudio() {
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
-      lastFinalText = "";
       currentInterimText = "";
     };
     
@@ -487,26 +515,26 @@ async function enableSystemAudio() {
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
           
           if (isFinal) {
-            // Check duplicate
-            if (normalizedTranscript === lastFinalText) {
-              console.log("[DEEPGRAM] Skipping duplicate final");
-              return;
+            // Remove overlap from new final text
+            const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
+            
+            if (newPart.trim()) {
+              // Append only the new part
+              if (currentBlock.text) {
+                currentBlock.text += " " + newPart;
+              } else {
+                currentBlock.text = newPart;
+              }
+              
+              currentBlock.t = Date.now();
+              console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
             }
             
-            // Commit to currentBlock
-            if (currentBlock.text) {
-              currentBlock.text += " " + normalizedTranscript;
-            } else {
-              currentBlock.text = normalizedTranscript;
-            }
-            
-            currentBlock.t = Date.now();
-            lastFinalText = normalizedTranscript;
             currentInterimText = ""; // Clear interim
             updateTranscript();
             
           } else {
-            // Show interim immediately
+            // Show interim immediately (word-by-word display)
             currentInterimText = normalizedTranscript;
             updateTranscript();
           }
@@ -720,7 +748,6 @@ async function startAll() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalText = "";
   currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
@@ -761,7 +788,6 @@ function hardClearTranscript() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalText = "";
   currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
@@ -772,10 +798,13 @@ async function handleSend() {
 
   // Commit any pending interim
   if (currentInterimText) {
-    if (currentBlock.text) {
-      currentBlock.text += " " + currentInterimText;
-    } else {
-      currentBlock.text = currentInterimText;
+    const newPart = removeOverlap(currentBlock.text, currentInterimText);
+    if (newPart.trim()) {
+      if (currentBlock.text) {
+        currentBlock.text += " " + newPart;
+      } else {
+        currentBlock.text = newPart;
+      }
     }
     currentInterimText = "";
   }
@@ -799,7 +828,6 @@ async function handleSend() {
   }
   
   currentBlock = { text: "", sent: false, t: Date.now() };
-  lastFinalText = "";
   currentInterimText = "";
   
   abortChatStreamOnly(true);
@@ -864,7 +892,6 @@ window.addEventListener("load", async () => {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalText = "";
   currentInterimText = "";
   pinnedTop = true;
   stopSystemAudioOnly();
