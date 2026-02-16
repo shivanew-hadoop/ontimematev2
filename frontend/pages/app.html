@@ -95,25 +95,34 @@
       background: #f3f4f6;
       border: 1px solid #ccc;
       border-radius: 6px;
-      padding: 12px;
-      font-size: 14px;
-      line-height: 1.6;
+      padding: 10px;
+      font-size: 12px;
+      line-height: 1.4;
       white-space: pre-wrap;
+      word-wrap: break-word;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
     }
 
-    /* Bold unsent blocks */
-    .unsent-block {
+    /* Transcript blocks */
+    .transcript-block {
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid #d1d5db;
+    }
+
+    .transcript-block:last-child {
+      border-bottom: none;
+    }
+
+    .transcript-block.unsent {
       font-weight: 700;
       color: #1f2937;
     }
 
-    /* Block separator */
-    .block-separator {
-      height: 12px;
-      border-bottom: 1px solid #d1d5db;
-      margin: 8px 0;
+    .transcript-block.sent {
+      font-weight: 400;
+      color: #4b5563;
     }
   </style>
 </head>
@@ -138,14 +147,14 @@
 
         <div class="flex flex-col flex-1 min-h-0 gap-3">
           <div class="flex items-center justify-between">
-            <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
-            <span class="text-[11px] text-gray-500">Bold = Unsent, Normal = Sent</span>
+            <h3 class="font-semibold text-sm">Live Transcript</h3>
+            <span class="text-[10px] text-gray-500">Bold=Unsent | Normal=Sent</span>
           </div>
 
           <div id="liveTranscript"
      tabindex="0"
      role="textbox"
-     aria-label="Live transcript (press Enter to send)">
+     aria-label="Live transcript">
 </div>
 
           <div>
@@ -153,14 +162,14 @@
             <textarea id="manualQuestion"
           rows="2"
           class="w-full border p-2 text-sm bg-white rounded resize-none"
-          placeholder="Optional manual refinement… (Enter = Send, Shift+Enter = New line)">
+          placeholder="Optional manual refinement…">
 </textarea>
 
           </div>
 
           <div>
             <div class="grid grid-cols-3 gap-2">
-              <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Press Enter or Click Here</button>
+              <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Send</button>
               <button id="clearBtn" class="px-3 py-2 bg-gray-600 text-white text-sm rounded">Clear</button>
               <button id="resetBtn" class="px-3 py-2 bg-gray-900 text-white text-sm rounded">Reset</button>
             </div>
@@ -169,7 +178,7 @@
         </div>
 
         <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Controls</h3>
+          <h3 class="font-semibold mb-2 text-sm">Controls</h3>
           <div class="grid grid-cols-3 gap-2">
             <button id="startBtn" class="px-3 py-2 bg-green-600 text-white text-sm rounded">Start</button>
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
@@ -185,7 +194,7 @@
         </div>
 
         <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Mode</h3>
+          <h3 class="font-semibold mb-2 text-sm">Mode</h3>
           <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
             <option value="interview" selected>Interview Mode</option>
             <option value="sales">Sales Mode</option>
@@ -199,7 +208,7 @@
         </div>
 
         <div class="shrink-0">
-          <h3 class="font-semibold mb-2">Resume Upload</h3>
+          <h3 class="font-semibold mb-2 text-sm">Resume Upload</h3>
           <input type="file" id="resumeInput" class="text-sm">
           <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
         </div>

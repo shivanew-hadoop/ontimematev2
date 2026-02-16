@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: All blocks captured + Bold unsent + No 3s pause         */
+/* app.js — FIXED: Continuous text until Send, then new block              */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
@@ -155,7 +155,8 @@ let sysWebSocket = null;
 let sysReconnectTimer = null;
 let currentInterimEntry = null;
 
-let timeline = [];
+let currentBlock = { text: "", sent: false, t: Date.now() };
+let sentBlocks = [];
 let pinnedTop = true;
 
 let creditTimer = null;
@@ -260,44 +261,25 @@ if (liveTranscript) {
   }, { passive: true });
 }
 
-function getAllBlocksNewestFirst() {
-  return timeline.slice()
-    .sort((a, b) => (b.t || 0) - (a.t || 0))
-    .map((x) => {
-      const text = String(x.text || "").trim();
-      if (!text) return "";
-      
-      const isSent = x.sent === true;
-      if (isSent) {
-        return escapeHtml(text);
-      } else {
-        return `<span class="unsent-block">${escapeHtml(text)}</span>`;
-      }
-    })
-    .filter(Boolean);
-}
-
-function getFreshBlocksText() {
-  return timeline
-    .filter(x => x && x.sent !== true)
-    .map(x => String(x.text || "").trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-function getFreshInterviewerBlocksText() {
-  return timeline
-    .filter(x => x && x.role === "interviewer" && x.sent !== true)
-    .map(x => String(x.text || "").trim())
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
 function updateTranscript() {
   if (!liveTranscript) return;
-  liveTranscript.innerHTML = getAllBlocksNewestFirst().join("<div class='block-separator'></div>").trim();
+  
+  let html = "";
+  
+  // Current unsent block (bold, on top)
+  if (currentBlock.text.trim()) {
+    html += `<div class="transcript-block unsent">${escapeHtml(currentBlock.text.trim())}</div>`;
+  }
+  
+  // Sent blocks (newest first, normal weight)
+  for (let i = sentBlocks.length - 1; i >= 0; i--) {
+    const block = sentBlocks[i];
+    if (block.text.trim()) {
+      html += `<div class="transcript-block sent">${escapeHtml(block.text.trim())}</div>`;
+    }
+  }
+  
+  liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
@@ -357,11 +339,16 @@ function addFinalSpeech(txt, role) {
   prev.raw = trimmedRaw;
   prev.at = now;
   
-  // Always create NEW block - no merging
-  timeline.push({ t: now, text: trimmedRaw, role: r, sent: false });
+  // Append to current block
+  if (currentBlock.text) {
+    currentBlock.text += " " + trimmedRaw;
+  } else {
+    currentBlock.text = trimmedRaw;
+  }
+  currentBlock.t = now;
   
   updateTranscript();
-  // console.log("[TRANSCRIPT] Added new block:", trimmedRaw.substring(0, 50));
+  console.log("[TRANSCRIPT] Appended to current block:", trimmedRaw.substring(0, 50));
 }
 
 function extractPriorQuestions() {
@@ -482,7 +469,7 @@ async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
   
-  // console.log("[DEEPGRAM] Starting system audio capture...");
+  console.log("[DEEPGRAM] Starting system audio capture...");
   
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({ 
@@ -495,23 +482,23 @@ async function enableSystemAudio() {
       }
     });
   } catch (err) {
-    // console.error("[DEEPGRAM] Permission denied:", err);
+    console.error("[DEEPGRAM] Permission denied:", err);
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
-    // console.error("[DEEPGRAM] No audio track");
+    console.error("[DEEPGRAM] No audio track");
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
     showBanner("System audio requires selecting a window/tab and enabling 'Share audio' in the picker.");
     return;
   }
 
-  // console.log("[DEEPGRAM] Audio track acquired");
+  console.log("[DEEPGRAM] Audio track acquired");
   audioTrack.onended = () => {
-    // console.log("[DEEPGRAM] Track ended");
+    console.log("[DEEPGRAM] Track ended");
     stopSystemAudioOnly();
     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
   };
@@ -524,7 +511,7 @@ async function enableSystemAudio() {
     sysWebSocket = new WebSocket(wsUrl, ["token", apiKey]);
     
     sysWebSocket.onopen = () => {
-      // console.log("[DEEPGRAM] WebSocket connected");
+      console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
     };
     
@@ -538,44 +525,38 @@ async function enableSystemAudio() {
           
           if (!transcript.trim()) return;
           
-          // console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, transcript);
+          console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, transcript);
           
           if (isFinal) {
             if (currentInterimEntry) {
-              const idx = timeline.indexOf(currentInterimEntry);
-              if (idx >= 0) timeline.splice(idx, 1);
               currentInterimEntry = null;
             }
             
             addFinalSpeech(transcript, "interviewer");
           } else {
-            if (currentInterimEntry) {
-              currentInterimEntry.text = normalize(transcript);
-              currentInterimEntry.t = Date.now();
+            // Update current block with interim
+            if (currentBlock.text) {
+              // Show interim appended
+              const tempText = currentBlock.text + " " + normalize(transcript);
+              currentInterimEntry = tempText;
             } else {
-              currentInterimEntry = { 
-                t: Date.now(), 
-                text: normalize(transcript), 
-                role: "interviewer",
-                sent: false
-              };
-              timeline.push(currentInterimEntry);
+              currentInterimEntry = normalize(transcript);
             }
             updateTranscript();
           }
         }
       } catch (e) {
-        // console.error("[DEEPGRAM] Message parse error:", e);
+        console.error("[DEEPGRAM] Message parse error:", e);
       }
     };
     
     sysWebSocket.onerror = (err) => {
-      // console.error("[DEEPGRAM] WebSocket error:", err);
+      console.error("[DEEPGRAM] WebSocket error:", err);
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
     
     sysWebSocket.onclose = () => {
-      // console.log("[DEEPGRAM] WebSocket closed");
+      console.log("[DEEPGRAM] WebSocket closed");
       if (isRunning) {
         setStatus(audioStatus, "Reconnecting...", "text-orange-600");
         sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
@@ -606,7 +587,7 @@ async function enableSystemAudio() {
     sysProcessor.connect(sysAudioContext.destination);
     
   } catch (e) {
-    // console.error("[DEEPGRAM] Setup failed:", e);
+    console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
   }
 }
@@ -734,7 +715,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
     }
   } catch (e) {
     if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;
-    // console.error(e);
+    console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
     responseBox.innerHTML = `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
   } finally {
@@ -764,14 +745,15 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 async function startAll() {
-  // console.log("[START] Initializing...");
+  console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
   
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
   
   transcriptEpoch++;
-  timeline = [];
+  currentBlock = { text: "", sent: false, t: Date.now() };
+  sentBlocks = [];
   currentInterimEntry = null;
   pinnedTop = true;
   resetRoleCommitState();
@@ -792,7 +774,7 @@ async function startAll() {
 }
 
 function stopAll() {
-  // console.log("[STOP] Stopping all...");
+  console.log("[STOP] Stopping all...");
   isRunning = false;
   stopSystemAudioOnly();
   
@@ -811,7 +793,8 @@ function stopAll() {
 
 function hardClearTranscript() {
   transcriptEpoch++;
-  timeline = [];
+  currentBlock = { text: "", sent: false, t: Date.now() };
+  sentBlocks = [];
   currentInterimEntry = null;
   pinnedTop = true;
   resetRoleCommitState();
@@ -821,20 +804,12 @@ function hardClearTranscript() {
 async function handleSend() {
   if (sendBtn.disabled) return;
 
-  // 1. Commit any interim text
-  if (currentInterimEntry) {
-    const tmp = currentInterimEntry;
-    currentInterimEntry = null;
-    addFinalSpeech(tmp.text, tmp.role);
-  }
-
-  // 2. Small wait for Deepgram final
+  // Wait for final
   await new Promise(r => setTimeout(r, 150));
   
-  // 3. Get ALL unsent text
   const manual = normalize(manualQuestion?.value || "");
-  const freshAll = normalize(getFreshBlocksText());
-  const base = manual || freshAll;
+  const current = normalize(currentBlock.text);
+  const base = manual || current;
   
   if (!base) {
     setStatus(sendStatus, "Nothing to send", "text-orange-600");
@@ -844,12 +819,14 @@ async function handleSend() {
   const question = buildDraftQuestion(base);
   if (manualQuestion) manualQuestion.value = "";
   
-  // 4. Mark ALL current blocks as sent BEFORE creating new ones
-  for (const block of timeline) {
-    if (block.sent !== true) {
-      block.sent = true;
-    }
+  // Move current block to sent
+  if (currentBlock.text.trim()) {
+    sentBlocks.push({ ...currentBlock, sent: true });
   }
+  
+  // Start fresh block
+  currentBlock = { text: "", sent: false, t: Date.now() };
+  currentInterimEntry = null;
   
   abortChatStreamOnly(true);
   pinnedTop = true;
@@ -895,7 +872,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 window.addEventListener("load", async () => {
-  // console.log("[LOAD] Page loaded");
+  console.log("[LOAD] Page loaded");
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
   if (!session.refresh_token) {
@@ -911,7 +888,8 @@ window.addEventListener("load", async () => {
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
   
   transcriptEpoch++;
-  timeline = [];
+  currentBlock = { text: "", sent: false, t: Date.now() };
+  sentBlocks = [];
   currentInterimEntry = null;
   pinnedTop = true;
   resetRoleCommitState();
@@ -927,7 +905,7 @@ window.addEventListener("load", async () => {
   
   setStatus(audioStatus, "Stopped", "text-orange-600");
   updateMicMuteUI();
-  // console.log("[LOAD] Initialization complete");
+  console.log("[LOAD] Initialization complete");
 });
 
 startBtn.onclick = startAll;
