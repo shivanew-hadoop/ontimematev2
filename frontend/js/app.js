@@ -1,8 +1,28 @@
 /* ========================================================================== */
-/* app.js — FIXED: Word-by-word + Keep all text + No duplicates            */
+/* app.js — FIXED: No duplicates, clean word-by-word display                */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
+// TEMP CLIPBOARD BUTTONS
+
+function copyToClipboard(text) {
+  navigator.clipboard.writeText(text).then(() => {
+    console.log("Copied:", text);
+  });
+}
+
+document.getElementById("emptyBtn")?.addEventListener("click", () => {
+  copyToClipboard("");
+});
+
+document.getElementById("notCodeBtn")?.addEventListener("click", () => {
+  copyToClipboard("not code..explain in detailed way please");
+});
+
+document.getElementById("codeSameBtn")?.addEventListener("click", () => {
+  copyToClipboard("code same for this please..not theory");
+});
+
 
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
@@ -157,8 +177,9 @@ let sysReconnectTimer = null;
 let currentBlock = { text: "", sent: false, t: Date.now() };
 let sentBlocks = [];
 let pinnedTop = true;
-let lastCommittedText = "";
-let lastInterimWords = 0;
+
+// Track last finalized transcript to avoid duplicates
+let lastFinalTranscript = "";
 
 let creditTimer = null;
 let lastCreditAt = 0;
@@ -282,26 +303,6 @@ function updateTranscript() {
   
   liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
-}
-
-function trimOverlapWords(prevRaw, nextRaw) {
-  const p = normalize(prevRaw).toLowerCase();
-  const n = normalize(nextRaw).toLowerCase();
-  if (!p || !n) return nextRaw;
-  
-  const pWords = p.split(" ");
-  const nWords = n.split(" ");
-  const maxCheck = Math.min(10, pWords.length, nWords.length);
-  
-  for (let k = maxCheck; k >= 2; k--) {
-    const pTail = pWords.slice(-k).join(" ");
-    const nHead = nWords.slice(0, k).join(" ");
-    if (pTail === nHead) {
-      const origWords = normalize(nextRaw).split(" ");
-      return origWords.slice(k).join(" ").trim();
-    }
-  }
-  return nextRaw;
 }
 
 function extractPriorQuestions() {
@@ -466,8 +467,7 @@ async function enableSystemAudio() {
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
-      lastCommittedText = "";
-      lastInterimWords = 0;
+      lastFinalTranscript = "";
     };
     
     sysWebSocket.onmessage = (event) => {
@@ -480,38 +480,31 @@ async function enableSystemAudio() {
           
           if (!transcript.trim()) return;
           
-          console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, transcript);
+          const normalizedTranscript = normalize(transcript);
+          
+          console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
           
           if (isFinal) {
-            // Finalize - trim overlap and append
-            const finalText = normalize(transcript);
-            if (finalText) {
-              const trimmed = lastCommittedText ? trimOverlapWords(lastCommittedText, finalText) : finalText;
-              if (trimmed) {
-                currentBlock.text = currentBlock.text ? currentBlock.text + " " + trimmed : trimmed;
-                currentBlock.t = Date.now();
-                lastCommittedText = finalText;
-              }
+            // Check if this is a duplicate of the last final
+            if (normalizedTranscript === lastFinalTranscript) {
+              console.log("[DEEPGRAM] Skipping duplicate final");
+              return;
             }
-            lastInterimWords = 0;
-            updateTranscript();
-          } else {
-            // Interim - commit every 2 words
-            const words = normalize(transcript).split(" ");
-            const currentWordCount = words.length;
             
-            if (currentWordCount >= COMMIT_WORDS && currentWordCount > lastInterimWords) {
-              const newText = normalize(transcript);
-              const trimmed = lastCommittedText ? trimOverlapWords(lastCommittedText, newText) : newText;
-              
-              if (trimmed) {
-                currentBlock.text = currentBlock.text ? currentBlock.text + " " + trimmed : trimmed;
-                currentBlock.t = Date.now();
-                lastCommittedText = newText;
-                lastInterimWords = currentWordCount;
-                updateTranscript();
-              }
+            // This is new - append it
+            if (currentBlock.text) {
+              currentBlock.text += " " + normalizedTranscript;
+            } else {
+              currentBlock.text = normalizedTranscript;
             }
+            
+            currentBlock.t = Date.now();
+            lastFinalTranscript = normalizedTranscript;
+            updateTranscript();
+            
+          } else {
+            // Interim - just show it (don't commit yet)
+            // We'll let finals do the real work
           }
         }
       } catch (e) {
@@ -723,8 +716,7 @@ async function startAll() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastCommittedText = "";
-  lastInterimWords = 0;
+  lastFinalTranscript = "";
   pinnedTop = true;
   updateTranscript();
   
@@ -764,8 +756,7 @@ function hardClearTranscript() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastCommittedText = "";
-  lastInterimWords = 0;
+  lastFinalTranscript = "";
   pinnedTop = true;
   updateTranscript();
 }
@@ -773,7 +764,7 @@ function hardClearTranscript() {
 async function handleSend() {
   if (sendBtn.disabled) return;
 
-  await new Promise(r => setTimeout(r, 150));
+  await new Promise(r => setTimeout(r, 200));
   
   const manual = normalize(manualQuestion?.value || "");
   const current = normalize(currentBlock.text);
@@ -792,8 +783,7 @@ async function handleSend() {
   }
   
   currentBlock = { text: "", sent: false, t: Date.now() };
-  lastCommittedText = "";
-  lastInterimWords = 0;
+  lastFinalTranscript = "";
   
   abortChatStreamOnly(true);
   pinnedTop = true;
@@ -857,8 +847,7 @@ window.addEventListener("load", async () => {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastCommittedText = "";
-  lastInterimWords = 0;
+  lastFinalTranscript = "";
   pinnedTop = true;
   stopSystemAudioOnly();
   updateTranscript();
