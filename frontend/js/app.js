@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: No duplicates, clean word-by-word display                */
+/* app.js — FIXED: Word-by-word display + No duplicates                     */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
@@ -178,8 +178,8 @@ let currentBlock = { text: "", sent: false, t: Date.now() };
 let sentBlocks = [];
 let pinnedTop = true;
 
-// Track last finalized transcript to avoid duplicates
-let lastFinalTranscript = "";
+let lastFinalText = "";
+let currentInterimText = "";
 
 let creditTimer = null;
 let lastCreditAt = 0;
@@ -288,9 +288,10 @@ function updateTranscript() {
   
   let html = "";
   
-  // Current unsent block (bold, on top)
-  if (currentBlock.text.trim()) {
-    html += `<div class="transcript-block unsent">${escapeHtml(currentBlock.text.trim())}</div>`;
+  // Current unsent block (bold, on top) - includes interim
+  const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
+  if (displayText.trim()) {
+    html += `<div class="transcript-block unsent">${escapeHtml(displayText.trim())}</div>`;
   }
   
   // Sent blocks (newest first, normal weight)
@@ -467,7 +468,8 @@ async function enableSystemAudio() {
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
-      lastFinalTranscript = "";
+      lastFinalText = "";
+      currentInterimText = "";
     };
     
     sysWebSocket.onmessage = (event) => {
@@ -485,13 +487,13 @@ async function enableSystemAudio() {
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
           
           if (isFinal) {
-            // Check if this is a duplicate of the last final
-            if (normalizedTranscript === lastFinalTranscript) {
+            // Check duplicate
+            if (normalizedTranscript === lastFinalText) {
               console.log("[DEEPGRAM] Skipping duplicate final");
               return;
             }
             
-            // This is new - append it
+            // Commit to currentBlock
             if (currentBlock.text) {
               currentBlock.text += " " + normalizedTranscript;
             } else {
@@ -499,12 +501,14 @@ async function enableSystemAudio() {
             }
             
             currentBlock.t = Date.now();
-            lastFinalTranscript = normalizedTranscript;
+            lastFinalText = normalizedTranscript;
+            currentInterimText = ""; // Clear interim
             updateTranscript();
             
           } else {
-            // Interim - just show it (don't commit yet)
-            // We'll let finals do the real work
+            // Show interim immediately
+            currentInterimText = normalizedTranscript;
+            updateTranscript();
           }
         }
       } catch (e) {
@@ -716,7 +720,8 @@ async function startAll() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalTranscript = "";
+  lastFinalText = "";
+  currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
   
@@ -756,13 +761,24 @@ function hardClearTranscript() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalTranscript = "";
+  lastFinalText = "";
+  currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
 }
 
 async function handleSend() {
   if (sendBtn.disabled) return;
+
+  // Commit any pending interim
+  if (currentInterimText) {
+    if (currentBlock.text) {
+      currentBlock.text += " " + currentInterimText;
+    } else {
+      currentBlock.text = currentInterimText;
+    }
+    currentInterimText = "";
+  }
 
   await new Promise(r => setTimeout(r, 200));
   
@@ -783,7 +799,8 @@ async function handleSend() {
   }
   
   currentBlock = { text: "", sent: false, t: Date.now() };
-  lastFinalTranscript = "";
+  lastFinalText = "";
+  currentInterimText = "";
   
   abortChatStreamOnly(true);
   pinnedTop = true;
@@ -847,7 +864,8 @@ window.addEventListener("load", async () => {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  lastFinalTranscript = "";
+  lastFinalText = "";
+  currentInterimText = "";
   pinnedTop = true;
   stopSystemAudioOnly();
   updateTranscript();
