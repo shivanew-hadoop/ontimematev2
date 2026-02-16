@@ -6,13 +6,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <script src="https://cdn.tailwindcss.com"></script>
 
-  <!-- Code highlighting theme -->
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github-dark.min.css">
 
   <style>
     body { background: #f7f7f7; }
 
-    /* AI response container */
     #responseBox{
       flex: 1 1 0%;
       min-height: 0;
@@ -23,11 +21,10 @@
       padding: 14px;
       font-size: 14px;
       line-height: 1.55;
-      white-space: normal; /* IMPORTANT: let markdown control wrapping */
+      white-space: normal;
       color: #111827;
     }
 
-    /* Markdown typography inside AI response */
     #responseBox p { margin: 10px 0; }
     #responseBox ul, #responseBox ol { margin: 10px 0 10px 18px; }
     #responseBox li { margin: 6px 0; }
@@ -41,7 +38,6 @@
       color: #374151;
     }
 
-    /* Inline code */
     #responseBox code{
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
@@ -55,7 +51,6 @@
       color: #111827;
     }
 
-    /* Code blocks */
     #responseBox pre{
       position: relative;
       margin: 12px 0;
@@ -66,14 +61,13 @@
     }
     #responseBox pre code{
       display: block;
-      padding: 0;           /* highlight.js styles handle background */
+      padding: 0;
       background: transparent;
-      white-space: pre;     /* keep code formatting */
+      white-space: pre;
       line-height: 1.5;
       font-size: 13px;
     }
 
-    /* Copy button overlay */
     .code-actions{
       position: absolute;
       top: 8px;
@@ -94,7 +88,6 @@
     }
     .code-btn:hover{ background: rgba(17,24,39,0.98); }
 
-    /* Edge-safe transcript sizing in flex */
     #liveTranscript{
       flex: 1 1 0%;
       min-height: 0;
@@ -104,10 +97,23 @@
       border-radius: 6px;
       padding: 12px;
       font-size: 14px;
-      line-height: 1.45;
+      line-height: 1.6;
       white-space: pre-wrap;
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
                    "Liberation Mono", "Courier New", monospace;
+    }
+
+    /* Bold unsent blocks */
+    .unsent-block {
+      font-weight: 700;
+      color: #1f2937;
+    }
+
+    /* Block separator */
+    .block-separator {
+      height: 12px;
+      border-bottom: 1px solid #d1d5db;
+      margin: 8px 0;
     }
   </style>
 </head>
@@ -115,10 +121,8 @@
 <body>
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
-  <!-- App shell -->
   <div class="flex flex-col h-screen overflow-hidden">
 
-    <!-- TOP BAR (User + Credits + Logout) -->
     <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3 min-w-0">
         <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
@@ -128,17 +132,14 @@
       </div>
     </div>
 
-    <!-- CONTENT: stack on mobile, split on desktop -->
     <div class="flex flex-col lg:flex-row flex-1 min-h-0 overflow-hidden">
 
-      <!-- LEFT PANEL -->
       <div class="lg:w-5/12 w-full bg-white border-r p-4 flex flex-col gap-4 min-h-0 overflow-y-auto">
 
-        <!-- Transcript area (bigger) -->
         <div class="flex flex-col flex-1 min-h-0 gap-3">
           <div class="flex items-center justify-between">
             <h3 class="font-semibold">Live Transcript (Read-Only)</h3>
-            <span class="text-[11px] text-gray-500">Auto new line on 3s pause</span>
+            <span class="text-[11px] text-gray-500">Bold = Unsent, Normal = Sent</span>
           </div>
 
           <div id="liveTranscript"
@@ -157,7 +158,6 @@
 
           </div>
 
-          <!-- Send/Clear/Reset -->
           <div>
             <div class="grid grid-cols-3 gap-2">
               <button id="sendBtn" disabled class="px-3 py-2 bg-blue-600 text-white text-sm rounded opacity-60">Press Enter or Click Here</button>
@@ -168,7 +168,6 @@
           </div>
         </div>
 
-        <!-- Controls -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Controls</h3>
           <div class="grid grid-cols-3 gap-2">
@@ -185,7 +184,6 @@
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
 
-        <!-- Mode -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Mode</h3>
           <select id="modeSelect" class="w-full border p-2 text-sm bg-white rounded">
@@ -195,13 +193,11 @@
           </select>
         </div>
 
-        <!-- Hidden custom instructions -->
         <div class="hidden">
           <textarea id="instructionsBox"></textarea>
           <div id="instrStatus"></div>
         </div>
 
-        <!-- Resume -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2">Resume Upload</h3>
           <input type="file" id="resumeInput" class="text-sm">
@@ -210,7 +206,6 @@
 
       </div>
 
-      <!-- RIGHT PANEL -->
       <div class="lg:w-7/12 w-full p-4 flex flex-col min-h-0">
         <div class="flex items-center justify-between mb-2">
           <h3 class="text-lg font-semibold">AI Response</h3>
@@ -221,7 +216,6 @@
     </div>
   </div>
 
-  <!-- Markdown + Sanitizer + Code Highlight -->
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
