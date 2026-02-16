@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: Continuous text until Send, then new block              */
+/* app.js — FIXED: Immediate word-by-word display with Deepgram             */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
@@ -153,11 +153,12 @@ let sysAudioContext = null;
 let sysProcessor = null;
 let sysWebSocket = null;
 let sysReconnectTimer = null;
-let currentInterimEntry = null;
 
 let currentBlock = { text: "", sent: false, t: Date.now() };
 let sentBlocks = [];
 let pinnedTop = true;
+let interimWordCount = 0;
+let accumulatedText = "";
 
 let creditTimer = null;
 let lastCreditAt = 0;
@@ -289,66 +290,6 @@ function canonKey(s) {
     .replace(/[^\p{L}\p{N}\s]/gu, "")
     .replace(/\s+/g, " ")
     .trim();
-}
-
-function trimOverlapWords(prevRaw, nextRaw) {
-  const p = canonKey(prevRaw);
-  const n = canonKey(nextRaw);
-  if (!p || !n) return nextRaw;
-  const pWords = p.split(" ");
-  const nextCanonWords = canonKey(nextRaw).split(" ");
-  const maxCheck = Math.min(14, pWords.length, nextCanonWords.length);
-  for (let k = maxCheck; k >= 3; k--) {
-    const pTail = pWords.slice(-k).join(" ");
-    const nHead = nextCanonWords.slice(0, k).join(" ");
-    if (pTail === nHead) {
-      const origWords = normalize(nextRaw).split(" ");
-      return origWords.slice(k).join(" ").trim();
-    }
-  }
-  return nextRaw;
-}
-
-const lastCommittedByRole = {
-  interviewer: { key: "", at: 0, raw: "" },
-  candidate: { key: "", at: 0, raw: "" }
-};
-
-function resetRoleCommitState() {
-  lastCommittedByRole.interviewer = { key: "", at: 0, raw: "" };
-  lastCommittedByRole.candidate = { key: "", at: 0, raw: "" };
-}
-
-function addFinalSpeech(txt, role) {
-  const cleanedRaw = normalize(txt);
-  if (!cleanedRaw) return;
-  
-  const r = role === "interviewer" ? "interviewer" : "candidate";
-  const now = Date.now();
-  const prev = lastCommittedByRole[r];
-  
-  const trimmedRaw = prev.raw ? trimOverlapWords(prev.raw, cleanedRaw) : cleanedRaw;
-  const trimmedKey = canonKey(trimmedRaw);
-  if (!trimmedKey) return;
-  
-  const tooSoon = now - (prev.at || 0) < 3000;
-  const sameKey = trimmedKey === (prev.key || "");
-  if (sameKey && tooSoon) return;
-  
-  prev.key = trimmedKey;
-  prev.raw = trimmedRaw;
-  prev.at = now;
-  
-  // Append to current block
-  if (currentBlock.text) {
-    currentBlock.text += " " + trimmedRaw;
-  } else {
-    currentBlock.text = trimmedRaw;
-  }
-  currentBlock.t = now;
-  
-  updateTranscript();
-  console.log("[TRANSCRIPT] Appended to current block:", trimmedRaw.substring(0, 50));
 }
 
 function extractPriorQuestions() {
@@ -513,6 +454,8 @@ async function enableSystemAudio() {
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
+      interimWordCount = 0;
+      accumulatedText = "";
     };
     
     sysWebSocket.onmessage = (event) => {
@@ -528,21 +471,32 @@ async function enableSystemAudio() {
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, transcript);
           
           if (isFinal) {
-            if (currentInterimEntry) {
-              currentInterimEntry = null;
-            }
-            
-            addFinalSpeech(transcript, "interviewer");
-          } else {
-            // Update current block with interim
-            if (currentBlock.text) {
-              // Show interim appended
-              const tempText = currentBlock.text + " " + normalize(transcript);
-              currentInterimEntry = tempText;
-            } else {
-              currentInterimEntry = normalize(transcript);
+            // Commit final text
+            const finalText = normalize(transcript);
+            if (finalText) {
+              if (accumulatedText) {
+                currentBlock.text = accumulatedText + " " + finalText;
+              } else {
+                currentBlock.text = currentBlock.text ? currentBlock.text + " " + finalText : finalText;
+              }
+              currentBlock.t = Date.now();
+              accumulatedText = "";
+              interimWordCount = 0;
             }
             updateTranscript();
+          } else {
+            // Show interim - commit every 2 words
+            const words = normalize(transcript).split(" ");
+            const currentWordCount = words.length;
+            
+            if (currentWordCount >= COMMIT_WORDS && currentWordCount > interimWordCount) {
+              // Commit these words
+              accumulatedText = normalize(transcript);
+              currentBlock.text = currentBlock.text ? currentBlock.text + " " + accumulatedText : accumulatedText;
+              currentBlock.t = Date.now();
+              interimWordCount = currentWordCount;
+              updateTranscript();
+            }
           }
         }
       } catch (e) {
@@ -754,9 +708,9 @@ async function startAll() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  currentInterimEntry = null;
+  interimWordCount = 0;
+  accumulatedText = "";
   pinnedTop = true;
-  resetRoleCommitState();
   updateTranscript();
   
   isRunning = true;
@@ -795,16 +749,15 @@ function hardClearTranscript() {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  currentInterimEntry = null;
+  interimWordCount = 0;
+  accumulatedText = "";
   pinnedTop = true;
-  resetRoleCommitState();
   updateTranscript();
 }
 
 async function handleSend() {
   if (sendBtn.disabled) return;
 
-  // Wait for final
   await new Promise(r => setTimeout(r, 150));
   
   const manual = normalize(manualQuestion?.value || "");
@@ -819,14 +772,13 @@ async function handleSend() {
   const question = buildDraftQuestion(base);
   if (manualQuestion) manualQuestion.value = "";
   
-  // Move current block to sent
   if (currentBlock.text.trim()) {
     sentBlocks.push({ ...currentBlock, sent: true });
   }
   
-  // Start fresh block
   currentBlock = { text: "", sent: false, t: Date.now() };
-  currentInterimEntry = null;
+  interimWordCount = 0;
+  accumulatedText = "";
   
   abortChatStreamOnly(true);
   pinnedTop = true;
@@ -890,9 +842,9 @@ window.addEventListener("load", async () => {
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
-  currentInterimEntry = null;
+  interimWordCount = 0;
+  accumulatedText = "";
   pinnedTop = true;
-  resetRoleCommitState();
   stopSystemAudioOnly();
   updateTranscript();
   
