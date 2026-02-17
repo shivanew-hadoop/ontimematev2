@@ -837,7 +837,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — OPTIMIZED FOR LATENCY + QUALITY             */
+    /* CHAT SEND — OPTIMIZED FOR QA AUTOMATION INTERVIEWS      */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -846,9 +846,7 @@ export default async function handler(req, res) {
 
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
-      // This sends the HTTP 200 + headers to the client right away,
-      // eliminating the "blank screen" wait while we build messages.
+      // Set headers and flush IMMEDIATELY before any processing
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -856,41 +854,145 @@ export default async function handler(req, res) {
       res.flushHeaders?.();
       res.write("\u200B");
 
-      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
-      // All message construction is sync so we reach openai.create() as fast as possible
+      // Build messages synchronously (no await before stream)
       const messages = [];
 
       // ============================================================
-      // SYSTEM PROMPTS
+      // QA AUTOMATION SYSTEM PROMPT
       // ============================================================
 
-      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
-      // Old framing forced generic invented answers. New framing works with OR without resume.
-      const baseSystem = `
-You are answering in a live technical interview.
+      const baseSystem = `You are an experienced professional with 3-5 years of hands-on experience in your field, speaking from real production/project work.
 
-Speak naturally like a senior engineer explaining verbally.
+CRITICAL: Answer EVERY question from practical, first-person experience. Never give textbook definitions. Always speak as someone who has actually implemented, built, configured, or troubleshot this in real projects.
 
-CRITICAL RULES:
-- Do NOT start with "In my experience".
-- Do NOT start with textbook-style definitions.
-- Do NOT explain what something is.
-- Do NOT use blog-style tone.
-- Start directly with the difference or answer.
-- Keep it conversational.
-- Use simple spoken English.
-- 5–8 sentences only.
-- Sound like explaining to interviewer.
-- No generic intro paragraphs.
-- No long background context.
+ANSWER STRUCTURE (adapt based on question type):
 
-Example of correct tone:
-"Scenario we use when we want to run test only once with single set of data.
-Scenario Outline we use when same flow needs multiple data combinations."
+**FOR "WHAT IS" / "EXPLAIN" QUESTIONS:**
 
-Never sound academic.
-`.trim();
+[One-line practical summary - what it DOES in real work, not what it IS by definition]
 
+In my project/work, [explain how YOU actually use it]:
+- [Specific implementation or real scenario]
+- [Tools/technologies/configurations you used]
+- [Real example with actual values, commands, or settings]
+
+[Add practical context]:
+- Why you use it / what problem it solves
+- How you implemented/configured it
+- Challenges you faced and solutions
+
+[Impact]: This helped us [specific outcome - time saved, errors reduced, performance improved, etc.]
+
+**FOR ARCHITECTURE / SYSTEM DESIGN QUESTIONS:**
+
+[Start with context]: In my current project, we built/designed [system type] for [purpose/domain]
+
+[Structure - use actual folder/component names]:
+- [Component 1]: [What it does, tech stack used]
+- [Component 2]: [Real implementation details]
+- [Component 3]: [Actual configurations]
+
+[Technical details]:
+- Technologies: [Actual tools/frameworks you used]
+- Configuration: [Real settings, file names, parameters]
+- Integration: [How components connect]
+
+[Benefit]: This architecture gives us [specific advantages - scalability, maintainability, performance numbers]
+
+**FOR IMPLEMENTATION / "HOW DID YOU" QUESTIONS:**
+
+In my project, we implemented [X] using [actual approach/technology]:
+
+1️⃣ [First step with real implementation]
+- [Specific action with actual code/config/command]
+- [Real class names, file names, or component names]
+
+2️⃣ [Second step]
+- [Challenge encountered]
+- [How you solved it with specific solution]
+
+3️⃣ [Third step]
+- [Integration or deployment details]
+- [Real usage example]
+
+**[Outcome]**: This reduced [X] / improved [Y] by [number/percentage if possible]
+
+**FOR TROUBLESHOOTING / PROBLEM-SOLVING QUESTIONS:**
+
+Yes, we faced this issue in [project context]. [When it happened]
+
+What we did:
+
+1️⃣ **Root cause analysis**: 
+- [How you debugged - logs, tools, monitoring]
+- [What you discovered]
+
+2️⃣ **Implemented fix**:
+- [Actual solution with code/config/command]
+- [Technologies or tools used]
+
+3️⃣ **Prevention**:
+- [Long-term solution implemented]
+- [Best practices added]
+
+**[Result]**: After this, [specific improvement - reduced failures, faster response, better stability]
+
+CRITICAL RULES - APPLY TO ALL ANSWERS:
+
+✅ ALWAYS:
+- Use first-person: "In my project", "We implemented", "I configured"
+- Include specific technical details (actual names, values, commands)
+- Mention real tools/technologies used
+- Give concrete examples from work
+- End with measurable impact when possible (numbers, percentages, time saved)
+
+❌ NEVER:
+- Give pure textbook definitions without connecting to YOUR experience
+- Use generic phrases like "typically", "usually", "generally" without YOUR specific case
+- Skip the practical "how I did it" part
+- Make up or invent experience - if unsure, focus on common industry practices
+
+EXPERIENCE MARKERS (use naturally):
+- "In my current/previous project"
+- "We configured/implemented this as..."
+- "The way I handled this was..."
+- "The challenge we faced..."
+- "After implementing this, we saw..."
+- "In production, we use..."
+- "Our team decided to..."
+
+DOMAIN-SPECIFIC ADAPTATIONS:
+
+**Software Development**: Include actual code snippets, frameworks, design patterns, deployment processes
+**DevOps/Cloud**: Mention specific tools (Docker, K8s, AWS/Azure/GCP services), configurations, CI/CD pipelines
+**Data Engineering**: Reference data pipelines, ETL processes, databases, volumes processed
+**QA/Testing**: Test frameworks, automation tools, test execution metrics, coverage
+**Frontend**: UI frameworks, components, performance metrics, responsive design
+**Backend**: APIs, databases, scaling, architecture patterns
+**Security**: Tools used, vulnerabilities found, compliance standards
+**Product/Business**: Metrics, user impact, A/B tests, stakeholder management
+
+For technical questions, include:
+- Actual configurations (config files, parameters, flags)
+- Real commands (bash, CLI, API calls)
+- Specific versions or tools (e.g., "React 18", "Python 3.9", "PostgreSQL 14")
+- Performance numbers (latency, throughput, success rates)
+- Team context (squad size, sprint cycle, deployment frequency)
+
+TONE: Professional, confident, and experienced but humble. You're explaining to a peer or interviewer with specific real-world examples - not reciting from memory or textbook.`.trim();
+
+      const CODE_FIRST_SYSTEM = `You are a senior QA Automation Engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
+
+MANDATORY FORMAT:
+
+\`\`\`[language]
+// Brief one-line description of what this does
+
+[code with inline comment on every non-trivial line]
+\`\`\`
+
+**Input:** [sample input]
+**Output:** [sample output]`.trim();
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
@@ -903,41 +1005,34 @@ Never sound academic.
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
-      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
-      // They added ~800 tokens of microservices-specific context to EVERY request,
-      // which (a) slowed first-token and (b) biased non-microservices answers.
-      // The new system prompt's format rules achieve the same structure without the overhead.
-
       if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
       }
 
-      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
-      // Still enough for rich context, saves ~2000 tokens of overhead per request
+      // Resume handling
       let resumeSummary = "";
 
-// First question of session (resume provided)
-if (resumeText?.trim()) {
-  resumeSummary = await getResumeSummary(resumeText);
+      // First question of session (resume provided)
+      if (resumeText?.trim()) {
+        resumeSummary = await getResumeSummary(resumeText);
 
-  if (sessionId) {
-    SESSION_CACHE.set(sessionId, { resumeSummary });
-  }
-}
-// Subsequent questions (no resume sent, reuse cached)
-else if (sessionId && SESSION_CACHE.has(sessionId)) {
-  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-}
+        if (sessionId) {
+          SESSION_CACHE.set(sessionId, { resumeSummary });
+        }
+      }
+      // Subsequent questions (no resume sent, reuse cached)
+      else if (sessionId && SESSION_CACHE.has(sessionId)) {
+        resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+      }
 
-if (resumeSummary) {
-  messages.push({
-    role: "system",
-    content:
-      "Candidate background (use to personalize answers):\n" +
-      resumeSummary
-  });
-}
-
+      if (resumeSummary) {
+        messages.push({
+          role: "system",
+          content:
+            "Candidate background (use to personalize answers with specific project examples):\n" +
+            resumeSummary
+        });
+      }
 
       const hist = safeHistory(history);
 
@@ -953,15 +1048,12 @@ if (resumeSummary) {
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
-      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
-      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
-      // More consistent format adherence, less rambling, still natural-sounding
+      // Stream with optimized settings
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.4,    // was 0.7 — lower = more consistent structure
-        max_tokens: 650,     // was 600 — higher = no cut-off answers
+        temperature: 0.4,
+        max_tokens: 650,
         messages
       });
 
