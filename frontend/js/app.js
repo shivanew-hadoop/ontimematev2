@@ -48,46 +48,37 @@ function getSessionId() {
 
 function renderMarkdownLite(md) {
   if (!md) return "";
-  let text = String(md).replace(/<br\s*\/?>/gi, "\n").replace(/\r\n/g, "\n");
-  text = text.replace(/(Q:[^\n]+?)(\s+\*\*[A-Z])/g, "$1\n$2");
-  text = text.replace(/([^\n])(Here's how I handle it in production:?)/gi, "$1\n$2");
-  text = text.replace(/([^\n])([1-9]️⃣)/g, "$1\n$2");
-  const preParts = text.split(/(```[\s\S]*?```)/g);
-  for (let i = 0; i < preParts.length; i++) {
-    if (i % 2 === 0) preParts[i] = preParts[i].replace(/ \* /g, "\n* ");
-  }
-  text = preParts.join("");
-  text = text.replace(/([^\n])(\*\*[A-Z][^*\n]{15,}\*\*)(\s*)$/gm, "$1\n$2$3");
+
+  let text = String(md)
+    .replace(/\r\n/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n");
+
   const parts = text.split(/(```[\s\S]*?```)/g);
-  const processedParts = parts.map((part, i) => {
+
+  return parts.map((part, i) => {
     if (i % 2 === 1) {
       const fenceMatch = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
       const lang = fenceMatch?.[1] || "";
       const code = fenceMatch?.[2] ?? part.replace(/^```\w*\n?/, "").replace(/```$/, "");
-      const escapedCode = code.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
-      return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
+      const escaped = escapeHtml(code);
+      return `<pre><code class="language-${lang}">${escaped}</code></pre>`;
     }
-    let s = part;
-    s = s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+
+    let s = escapeHtml(part);
     s = s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
-    const lines = s.split("\n");
-    const htmlLines = lines.map(line => {
-      const trimmed = line.trim();
-      if (/^[1-9]️⃣/.test(trimmed)) return `<div style="margin-top:12px;margin-bottom:4px;font-weight:600">${trimmed}</div>`;
-      if (/^\*\s+/.test(trimmed)) {
-        const content = trimmed.replace(/^\*\s+/, "");
-        return `<div style="margin-left:18px;margin-top:3px;line-height:1.55">• ${content}</div>`;
-      }
-      if (/^Q:\s/.test(trimmed)) return `<div style="margin-bottom:8px;font-weight:600">${trimmed}</div>`;
-      if (/^here'?s how i handle it in production/i.test(trimmed)) return `<div style="margin-top:8px;margin-bottom:6px;font-style:italic">${trimmed}</div>`;
-      if (!trimmed) return `<div style="height:6px"></div>`;
-      return `<div style="line-height:1.6">${trimmed}</div>`;
-    });
-    return htmlLines.join("");
-  });
-  return processedParts.join("");
+
+    return s
+      .split("\n")
+      .map(line =>
+        line.trim()
+          ? `<div style="line-height:1.6">${line}</div>`
+          : `<div style="height:6px"></div>`
+      )
+      .join("");
+  }).join("");
 }
+
 
 let aiRawBuffer = "";
 
