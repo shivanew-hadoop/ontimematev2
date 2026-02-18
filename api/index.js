@@ -490,6 +490,137 @@ async function extractResumeText(file) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* CODE BLOCK FIXER — POST-PROCESSOR                                          */
+/* Guarantees YAML/JSON/config inside fenced blocks is always multiline.      */
+/* Runs on the COMPLETE response after streaming finishes.                    */
+/* -------------------------------------------------------------------------- */
+
+function fixCodeBlocks(text) {
+  if (!text) return text;
+  // Match fenced code blocks
+  return text.replace(/\x60\x60\x60([\w.-]*)\n?([\s\S]*?)\x60\x60\x60/g, function(match, lang, body) {
+    const trimmedBody = body.trim();
+    // If already multiline, leave it alone
+    if (trimmedBody.includes('\n')) return match;
+    const langLower = (lang || '').toLowerCase();
+    let expanded = trimmedBody;
+    if (langLower === 'yaml' || langLower === 'yml') {
+      expanded = expandYaml(trimmedBody);
+    } else if (langLower === 'json') {
+      expanded = expandJson(trimmedBody);
+    } else if (langLower === 'bash' || langLower === 'sh' || langLower === 'shell') {
+      expanded = expandShell(trimmedBody);
+    } else if (langLower === 'dockerfile') {
+      expanded = expandDockerfile(trimmedBody);
+    } else if (/\w+: /.test(trimmedBody) && trimmedBody[0] !== '{') {
+      // Generic: looks like YAML key-value
+      expanded = expandYaml(trimmedBody);
+    }
+    return '\x60\x60\x60' + lang + '\n' + expanded + '\n\x60\x60\x60';
+  });
+}
+
+/**
+ * FSM-based YAML expander.
+ * Walks the collapsed single-line YAML and re-inserts newlines at
+ * every real key: boundary and list-item boundary.
+ */
+function expandYaml(line) {
+  line = (line || '').trim();
+  const output = [];
+  let i = 0;
+  const len = line.length;
+
+  while (i < len) {
+    // Skip leading spaces
+    while (i < len && line[i] === ' ') i++;
+    if (i >= len) break;
+
+    if (line[i] === '-' && i + 1 < len && line[i + 1] === ' ') {
+      // List item: '- key: val' or '- val'
+      i += 2;
+      const keyStart = i;
+      // Read until colon or space
+      while (i < len && line[i] !== ':' && line[i] !== ' ') i++;
+      if (i < len && line[i] === ':') {
+        const key = line.slice(keyStart, i);
+        i++; // skip ':'
+        const valEnd = findValueEnd(line, i);
+        const val = line.slice(i, valEnd).trim();
+        output.push('- ' + key + ': ' + val);
+        i = valEnd;
+      } else {
+        const valEnd = findValueEnd(line, keyStart);
+        output.push('- ' + line.slice(keyStart, valEnd).trim());
+        i = valEnd;
+      }
+    } else {
+      // Regular key: value
+      const keyStart = i;
+      while (i < len && line[i] !== ':' && line[i] !== ' ') i++;
+      if (i >= len || line[i] !== ':') {
+        // Not a key — just a bare word, skip to next space
+        while (i < len && line[i] !== ' ') i++;
+        continue;
+      }
+      const key = line.slice(keyStart, i);
+      i++; // skip ':'
+      const valEnd = findValueEnd(line, i);
+      const val = line.slice(i, valEnd).trim();
+      output.push(key + ': ' + val);
+      i = valEnd;
+    }
+  }
+
+  return output.filter(l => l.trim()).join('\n');
+}
+
+/**
+ * Find where the current value ends.
+ * Value ends before: the next ' - ' (list item) or ' word: ' (next key).
+ */
+function findValueEnd(line, start) {
+  let i = start;
+  const len = line.length;
+  while (i < len) {
+    if (line[i] === ' ') {
+      let j = i + 1;
+      while (j < len && line[j] === ' ') j++;
+      // Check for list item
+      if (j < len && line[j] === '-' && j + 1 < len && line[j + 1] === ' ') return i;
+      // Check for 'word: ' or 'word:' at end
+      let k = j;
+      while (k < len && line[k] !== ':' && line[k] !== ' ') k++;
+      if (k < len && line[k] === ':' && (k + 1 >= len || line[k + 1] === ' ')) return i;
+    }
+    i++;
+  }
+  return len;
+}
+
+function expandJson(line) {
+  try { return JSON.stringify(JSON.parse(line), null, 2); }
+  catch (e) {
+    return line
+      .replace(/\{/g, '{\n  ').replace(/\}/g, '\n}')
+      .replace(/, /g, ',\n  ').trim();
+  }
+}
+
+function expandShell(line) {
+  return line
+    .replace(/\s*&&\s*/g, ' &&\\n  ')
+    .replace(/\s*;\s*/g, '\n')
+    .trim();
+}
+
+function expandDockerfile(line) {
+  return line
+    .replace(/\s+(FROM|RUN|CMD|ENTRYPOINT|ENV|COPY|ADD|WORKDIR|EXPOSE|LABEL|ARG|VOLUME|USER) /g, '\n$1 ')
+    .trim();
+}
+
+/* -------------------------------------------------------------------------- */
 /* MAIN HANDLER                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -946,26 +1077,18 @@ spec:
 - Shell commands with flags: one command per line, flags on same line as command
 - If a config is long, show the MOST CRITICAL fields only — never truncate mid-block`.trim();
 
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
 
-**BLOCK 1: Simple Logic (Core algorithm only)**
+MANDATORY FORMAT:
+
 \`\`\`[language]
-// Core logic - what interviewer initially asks for
-// Inline comment on EVERY line explaining the step
+// Brief one-line description of what this does
 
-[Only essential algorithm/logic - minimal, focused]
+[code with inline comment on every non-trivial line]
 \`\`\`
 
-**BLOCK 2: Complete Implementation (If they ask for full solution)**
-\`\`\`[language]
-// Complete solution with edge cases
-// Inline comment on every non-trivial line
-
-[Full implementation with validation, edge cases, main method]
-\`\`\`
-
-**Input:** [sample]
-**Output:** [sample]
+**Input:** [sample input]
+**Output:** [sample output]
 
 CODE FORMATTING RULES — NON-NEGOTIABLE:
 - EVERY statement, field, key, or config entry MUST be on its OWN LINE — never compress onto one horizontal line
@@ -1036,13 +1159,20 @@ CODE FORMATTING RULES — NON-NEGOTIABLE:
         messages
       });
 
+      // COLLECT full response first, then fix code blocks, then flush
+      // This guarantees YAML/JSON/config is always properly multiline — no horizontal scroll
+      let fullResponse = "";
       try {
         for await (const chunk of stream) {
           const t = chunk?.choices?.[0]?.delta?.content || "";
-          if (t) res.write(t);
+          if (t) fullResponse += t;
         }
       } catch {}
 
+      // Post-process: fix any collapsed single-line code blocks before sending to client
+      fullResponse = fixCodeBlocks(fullResponse);
+
+      res.write(fullResponse);
       return res.end();
     }
 
