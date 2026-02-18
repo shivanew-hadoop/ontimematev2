@@ -921,20 +921,59 @@ GENERAL RULES:
 - Include real values: timeout ms, retry counts, threshold %, latency numbers, error rates
 - For architecture questions: show call chain inline → UI → Gateway → Service → DB
 - For calculation questions: show formula first, then plug in real numbers
-- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
+- For failure/incident questions: steps = detect → contain → fix → verify
 
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
+CODE BLOCKS INSIDE ANSWERS — CRITICAL FORMATTING RULES:
+- ANY code snippet, YAML, JSON, config, or command MUST be in a fenced code block: \`\`\`yaml / \`\`\`bash / \`\`\`json etc.
+- EVERY field, key, or statement MUST be on its OWN LINE — never inline on one horizontal line
+- YAML example — CORRECT (each key on new line):
+\`\`\`yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: app-a
+spec:
+  replicas: 3
+  template:
+    spec:
+      containers:
+        - name: app
+          image: myapp:v1
+\`\`\`
+- YAML example — WRONG (never do this): apiVersion: apps/v1 kind: Deployment metadata: name: app-a spec: replicas: 3
+- Indentation MUST be preserved exactly — 2 spaces per YAML level, 4 spaces per code block level
+- Never compress multi-line configs into a single line to save tokens — always expand fully
+- Shell commands with flags: one command per line, flags on same line as command
+- If a config is long, show the MOST CRITICAL fields only — never truncate mid-block`.trim();
 
-MANDATORY FORMAT:
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
+**BLOCK 1: Simple Logic (Core algorithm only)**
 \`\`\`[language]
-// Brief one-line description of what this does
+// Core logic - what interviewer initially asks for
+// Inline comment on EVERY line explaining the step
 
-[code with inline comment on every non-trivial line]
+[Only essential algorithm/logic - minimal, focused]
 \`\`\`
 
-**Input:** [sample input]
-**Output:** [sample output]`.trim();
+**BLOCK 2: Complete Implementation (If they ask for full solution)**
+\`\`\`[language]
+// Complete solution with edge cases
+// Inline comment on every non-trivial line
+
+[Full implementation with validation, edge cases, main method]
+\`\`\`
+
+**Input:** [sample]
+**Output:** [sample]
+
+CODE FORMATTING RULES — NON-NEGOTIABLE:
+- EVERY statement, field, key, or config entry MUST be on its OWN LINE — never compress onto one horizontal line
+- YAML: each key on a new line, indented 2 spaces per level — NEVER write "apiVersion: v1 kind: Deployment metadata: name: x" on one line
+- JSON: each key-value pair on its own line, closing braces on their own line
+- Shell: one command per line
+- Indentation MUST be exact — 2 spaces for YAML levels, 4 spaces for code blocks
+- Never sacrifice line breaks to save tokens — always fully expanded, properly indented`.trim();
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
