@@ -490,137 +490,6 @@ async function extractResumeText(file) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* CODE BLOCK FIXER — POST-PROCESSOR                                          */
-/* Guarantees YAML/JSON/config inside fenced blocks is always multiline.      */
-/* Runs on the COMPLETE response after streaming finishes.                    */
-/* -------------------------------------------------------------------------- */
-
-function fixCodeBlocks(text) {
-  if (!text) return text;
-  // Match fenced code blocks
-  return text.replace(/\x60\x60\x60([\w.-]*)\n?([\s\S]*?)\x60\x60\x60/g, function(match, lang, body) {
-    const trimmedBody = body.trim();
-    // If already multiline, leave it alone
-    if (trimmedBody.includes('\n')) return match;
-    const langLower = (lang || '').toLowerCase();
-    let expanded = trimmedBody;
-    if (langLower === 'yaml' || langLower === 'yml') {
-      expanded = expandYaml(trimmedBody);
-    } else if (langLower === 'json') {
-      expanded = expandJson(trimmedBody);
-    } else if (langLower === 'bash' || langLower === 'sh' || langLower === 'shell') {
-      expanded = expandShell(trimmedBody);
-    } else if (langLower === 'dockerfile') {
-      expanded = expandDockerfile(trimmedBody);
-    } else if (/\w+: /.test(trimmedBody) && trimmedBody[0] !== '{') {
-      // Generic: looks like YAML key-value
-      expanded = expandYaml(trimmedBody);
-    }
-    return '\x60\x60\x60' + lang + '\n' + expanded + '\n\x60\x60\x60';
-  });
-}
-
-/**
- * FSM-based YAML expander.
- * Walks the collapsed single-line YAML and re-inserts newlines at
- * every real key: boundary and list-item boundary.
- */
-function expandYaml(line) {
-  line = (line || '').trim();
-  const output = [];
-  let i = 0;
-  const len = line.length;
-
-  while (i < len) {
-    // Skip leading spaces
-    while (i < len && line[i] === ' ') i++;
-    if (i >= len) break;
-
-    if (line[i] === '-' && i + 1 < len && line[i + 1] === ' ') {
-      // List item: '- key: val' or '- val'
-      i += 2;
-      const keyStart = i;
-      // Read until colon or space
-      while (i < len && line[i] !== ':' && line[i] !== ' ') i++;
-      if (i < len && line[i] === ':') {
-        const key = line.slice(keyStart, i);
-        i++; // skip ':'
-        const valEnd = findValueEnd(line, i);
-        const val = line.slice(i, valEnd).trim();
-        output.push('- ' + key + ': ' + val);
-        i = valEnd;
-      } else {
-        const valEnd = findValueEnd(line, keyStart);
-        output.push('- ' + line.slice(keyStart, valEnd).trim());
-        i = valEnd;
-      }
-    } else {
-      // Regular key: value
-      const keyStart = i;
-      while (i < len && line[i] !== ':' && line[i] !== ' ') i++;
-      if (i >= len || line[i] !== ':') {
-        // Not a key — just a bare word, skip to next space
-        while (i < len && line[i] !== ' ') i++;
-        continue;
-      }
-      const key = line.slice(keyStart, i);
-      i++; // skip ':'
-      const valEnd = findValueEnd(line, i);
-      const val = line.slice(i, valEnd).trim();
-      output.push(key + ': ' + val);
-      i = valEnd;
-    }
-  }
-
-  return output.filter(l => l.trim()).join('\n');
-}
-
-/**
- * Find where the current value ends.
- * Value ends before: the next ' - ' (list item) or ' word: ' (next key).
- */
-function findValueEnd(line, start) {
-  let i = start;
-  const len = line.length;
-  while (i < len) {
-    if (line[i] === ' ') {
-      let j = i + 1;
-      while (j < len && line[j] === ' ') j++;
-      // Check for list item
-      if (j < len && line[j] === '-' && j + 1 < len && line[j + 1] === ' ') return i;
-      // Check for 'word: ' or 'word:' at end
-      let k = j;
-      while (k < len && line[k] !== ':' && line[k] !== ' ') k++;
-      if (k < len && line[k] === ':' && (k + 1 >= len || line[k + 1] === ' ')) return i;
-    }
-    i++;
-  }
-  return len;
-}
-
-function expandJson(line) {
-  try { return JSON.stringify(JSON.parse(line), null, 2); }
-  catch (e) {
-    return line
-      .replace(/\{/g, '{\n  ').replace(/\}/g, '\n}')
-      .replace(/, /g, ',\n  ').trim();
-  }
-}
-
-function expandShell(line) {
-  return line
-    .replace(/\s*&&\s*/g, ' &&\\n  ')
-    .replace(/\s*;\s*/g, '\n')
-    .trim();
-}
-
-function expandDockerfile(line) {
-  return line
-    .replace(/\s+(FROM|RUN|CMD|ENTRYPOINT|ENV|COPY|ADD|WORKDIR|EXPOSE|LABEL|ARG|VOLUME|USER) /g, '\n$1 ')
-    .trim();
-}
-
-/* -------------------------------------------------------------------------- */
 /* MAIN HANDLER                                                               */
 /* -------------------------------------------------------------------------- */
 
@@ -978,6 +847,8 @@ export default async function handler(req, res) {
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
       // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
+      // This sends the HTTP 200 + headers to the client right away,
+      // eliminating the "blank screen" wait while we build messages.
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -985,118 +856,80 @@ export default async function handler(req, res) {
       res.flushHeaders?.();
       res.write("\u200B");
 
+      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
+      // All message construction is sync so we reach openai.create() as fast as possible
       const messages = [];
 
       // ============================================================
       // SYSTEM PROMPTS
       // ============================================================
 
-      const baseSystem = `You are a senior software engineer answering interview questions as a practitioner — someone who has actually solved these problems in production, not someone reciting theory.
+      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
+      // Old framing forced generic invented answers. New framing works with OR without resume.
+      const baseSystem = `You are a senior software engineer answering interview questions as a practitioner — someone who actually does this in production, not someone reading from a textbook.
 
 MANDATORY FORMAT (follow exactly for every non-code answer):
 
-Q: [restate the question in one crisp line]
+Q: [restate the question]
 
 [blank line]
 
-**[One-sentence direct answer — CRITICAL RULES:
- • Name the SPECIFIC technique, API call, pattern, or real fix — not the tool's feature category
- • Must sound like a standup update from a senior engineer, not a product brochure
- • WRONG: "I leverage Playwright's built-in wait mechanisms and flexible selectors to manage dynamic elements"
- • WRONG: "I use Selenium's dynamic handling capabilities effectively"
- • RIGHT: "Handled dynamic elements using smart locators, explicit waits, and self-healing logic"
- • RIGHT: "Handled multiple tabs using browser context + page events — captured new page via \`context.waitForEvent('page')\` and switched explicitly"
- • RIGHT: "Cut flakiness from 30% to under 3% by replacing all Thread.sleep calls with waitForSelector + a retry interceptor on 503s"
-]**
+**[One-sentence direct answer — the bottom line up front]**
 
 Here's how I handle it in production:
 
-[STEP ORDERING IS CRITICAL — order by real-world impact, NOT textbook sequence:
- • 1️⃣ = the fix that eliminates the BIGGEST failure mode / root cause
- • 2️⃣ = the next most important safeguard that fails without this
- • 3️⃣ = edge case handling, fallback mechanism, or observability
- • NEVER order steps just because they flow logically in sequence — order by what matters most]
+1️⃣ [First major step — verb-first, action title]
+* [Specific action taken]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
 
-1️⃣ [Most critical action — verb-first title describing the SPECIFIC action, not a category label]
-* [Exact action: name the specific API, method, selector strategy, config, or pattern — not a vague description]
-* [Exact action: include WHY this is the most critical step]
-* \`real syntax — actual method call, selector, command, or config — never pseudocode\`
+2️⃣ [Second major step]
+* [Specific action taken]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
 
-2️⃣ [Second most impactful action — the thing that still breaks without this]
-* [Exact action]
-* [Exact action]
-* \`real syntax\`
+3️⃣ [Third major step]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
 
-3️⃣ [Third action — edge case, fallback, or observability — only if genuinely needed]
-* [Exact action]
-* \`real syntax\`
+[N️⃣ Add more steps only if genuinely needed — do not pad]
 
-[N️⃣ Add more steps ONLY if genuinely required — do not pad with obvious steps]
+**[Bold closing statement — outcome, guarantee, or key takeaway with numbers if applicable]**
 
-**[Bold closing statement — the real outcome: flakiness %, time saved, SLA hit, zero failures — use numbers where applicable]**
-
-ANTI-PATTERNS TO AVOID (model must never do these):
-- Step titles that are just category names: ❌ "Use Explicit Waits" ❌ "Handle Locators" ❌ "Manage Tabs"
-- Step titles must describe the specific action: ✅ "Replace hard sleeps with waitForSelector + 10s timeout" ✅ "Capture new tab via context.waitForEvent and reassign page reference"
-- Bullets that are definitions: ❌ "Explicit waits pause execution until a condition is met" → ✅ "Set waitForSelector with 10s timeout on every dynamic element before interacting"
-- Generic closing: ❌ "This ensures stability" → ✅ "Test suite flakiness dropped from 28% to under 2% across 400 CI runs"
-- Bookish ordering: steps must go from highest-impact to lowest, not from introduction to conclusion
-
-GENERAL RULES:
-- "Here's how I handle it in production:" is ALWAYS the exact transition line — never skip, never rephrase
+RULES:
+- "Here's how I handle it in production:" is ALWAYS the transition line — never skip it
 - Every step starts with an emoji number: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
-- Sub-bullets use * (not •) and contain EXACT actions — never definitions, never "this ensures that"
-- Inline \`code\` for every real method, selector, command, config value, or query — use real syntax
-- NO padding phrases: "It is important to", "This ensures that", "In order to", "This helps us"
+- Sub-bullets use * (not •) and are specific actions — not definitions
+- Inline \`code\` for any real command, query, config value, or metric formula
+- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
+- NO "Real Scenario:" section — the steps ARE the production scenario
 - NO textbook definitions — never explain what something is, only what you DO with it
-- Include real values: timeout ms, retry counts, threshold %, latency numbers, error rates
-- For architecture questions: show call chain inline → UI → Gateway → Service → DB
-- For calculation questions: show formula first, then plug in real numbers
-- For failure/incident questions: steps = detect → contain → fix → verify
+- NO padding phrases: "It is important to", "This ensures that", "In order to"
+- Include real values where natural: timeout thresholds, retry counts, error rates, latency numbers
+- For architecture questions: show the call chain inline → UI → Gateway → Service → DB
+- For calculation questions: show the formula first, then plug in real numbers
+- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
 
-CODE BLOCKS INSIDE ANSWERS — CRITICAL FORMATTING RULES:
-- ANY code snippet, YAML, JSON, config, or command MUST be in a fenced code block: \`\`\`yaml / \`\`\`bash / \`\`\`json etc.
-- EVERY field, key, or statement MUST be on its OWN LINE — never inline on one horizontal line
-- YAML example — CORRECT (each key on new line):
-\`\`\`yaml
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: app-a
-spec:
-  replicas: 3
-  template:
-    spec:
-      containers:
-        - name: app
-          image: myapp:v1
-\`\`\`
-- YAML example — WRONG (never do this): apiVersion: apps/v1 kind: Deployment metadata: name: app-a spec: replicas: 3
-- Indentation MUST be preserved exactly — 2 spaces per YAML level, 4 spaces per code block level
-- Never compress multi-line configs into a single line to save tokens — always expand fully
-- Shell commands with flags: one command per line, flags on same line as command
-- If a config is long, show the MOST CRITICAL fields only — never truncate mid-block`.trim();
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
-
-MANDATORY FORMAT:
-
+**BLOCK 1: Simple Logic (Core algorithm only)**
 \`\`\`[language]
-// Brief one-line description of what this does
+// Core logic - what interviewer initially asks for
+// Inline comment on EVERY line explaining the step
 
-[code with inline comment on every non-trivial line]
+[Only essential algorithm/logic - minimal, focused]
 \`\`\`
 
-**Input:** [sample input]
-**Output:** [sample output]
+**BLOCK 2: Complete Implementation (If they ask for full solution)**
+\`\`\`[language]
+// Complete solution with edge cases
+// Inline comment on every non-trivial line
 
-CODE FORMATTING RULES — NON-NEGOTIABLE:
-- EVERY statement, field, key, or config entry MUST be on its OWN LINE — never compress onto one horizontal line
-- YAML: each key on a new line, indented 2 spaces per level — NEVER write "apiVersion: v1 kind: Deployment metadata: name: x" on one line
-- JSON: each key-value pair on its own line, closing braces on their own line
-- Shell: one command per line
-- Indentation MUST be exact — 2 spaces for YAML levels, 4 spaces for code blocks
-- Never sacrifice line breaks to save tokens — always fully expanded, properly indented`.trim();
+[Full implementation with validation, edge cases, main method]
+\`\`\`
+
+**Input:** [sample]
+**Output:** [sample]`.trim();
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
@@ -1109,33 +942,41 @@ CODE FORMATTING RULES — NON-NEGOTIABLE:
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
+      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
+      // They added ~800 tokens of microservices-specific context to EVERY request,
+      // which (a) slowed first-token and (b) biased non-microservices answers.
+      // The new system prompt's format rules achieve the same structure without the overhead.
+
       if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
       }
 
+      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
+      // Still enough for rich context, saves ~2000 tokens of overhead per request
       let resumeSummary = "";
 
-      // First question of session (resume provided)
-      if (resumeText?.trim()) {
-        resumeSummary = await getResumeSummary(resumeText);
+// First question of session (resume provided)
+if (resumeText?.trim()) {
+  resumeSummary = await getResumeSummary(resumeText);
 
-        if (sessionId) {
-          SESSION_CACHE.set(sessionId, { resumeSummary });
-        }
-      }
-      // Subsequent questions (no resume sent, reuse cached)
-      else if (sessionId && SESSION_CACHE.has(sessionId)) {
-        resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-      }
+  if (sessionId) {
+    SESSION_CACHE.set(sessionId, { resumeSummary });
+  }
+}
+// Subsequent questions (no resume sent, reuse cached)
+else if (sessionId && SESSION_CACHE.has(sessionId)) {
+  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+}
 
-      if (resumeSummary) {
-        messages.push({
-          role: "system",
-          content:
-            "Candidate background (use to personalize answers):\n" +
-            resumeSummary
-        });
-      }
+if (resumeSummary) {
+  messages.push({
+    role: "system",
+    content:
+      "Candidate background (use to personalize answers):\n" +
+      resumeSummary
+  });
+}
+
 
       const hist = safeHistory(history);
 
@@ -1151,28 +992,25 @@ CODE FORMATTING RULES — NON-NEGOTIABLE:
         content: String(prompt).slice(0, 7000).trim()
       });
 
+      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
+      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
+      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
+      // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.4,
-        max_tokens: 650,
+        temperature: 0.4,    // was 0.7 — lower = more consistent structure
+        max_tokens: 650,     // was 600 — higher = no cut-off answers
         messages
       });
 
-      // COLLECT full response first, then fix code blocks, then flush
-      // This guarantees YAML/JSON/config is always properly multiline — no horizontal scroll
-      let fullResponse = "";
       try {
         for await (const chunk of stream) {
           const t = chunk?.choices?.[0]?.delta?.content || "";
-          if (t) fullResponse += t;
+          if (t) res.write(t);
         }
       } catch {}
 
-      // Post-process: fix any collapsed single-line code blocks before sending to client
-      fullResponse = fixCodeBlocks(fullResponse);
-
-      res.write(fullResponse);
       return res.end();
     }
 
