@@ -16,11 +16,11 @@ document.getElementById("emptyBtn")?.addEventListener("click", () => {
 });
 
 document.getElementById("indept")?.addEventListener("click", () => {
-  copyToClipboard("For same question, Give the indept realtime explanation with realtime");
+  copyToClipboard("provide indept explanation for same question with realtime examples..not just bookish explanation");
 });
 
 document.getElementById("notCodeBtn")?.addEventListener("click", () => {
-  copyToClipboard("not code. explain in detailed way please");
+  copyToClipboard("not code..explain in detailed way please");
 });
 
 document.getElementById("codeSameBtn")?.addEventListener("click", () => {
