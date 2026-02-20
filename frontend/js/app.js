@@ -681,10 +681,10 @@ async function startChatStreaming(prompt, userTextForHistory) {
     const decoder = new TextDecoder();
     
     flushTimer = setInterval(() => {
-      if (mySeq !== chatStreamSeq) return;
-      if (!sawFirstChunk) return;
-      render();
-    }, 30);
+  if (mySeq !== chatStreamSeq) return;
+  if (!sawFirstChunk) return;
+  render();
+}, 16); // ~60fps feels instant like ChatGPT
     
     while (true) {
       const { done, value } = await reader.read();
@@ -693,17 +693,17 @@ async function startChatStreaming(prompt, userTextForHistory) {
       
       raw += decoder.decode(value, { stream: true });
       
-      if (!sawFirstChunk) {
-        sawFirstChunk = true;
-        responseBox.innerHTML = "";
-        setStatus(sendStatus, "Receiving…", "text-orange-600");
-      }
+     if (!sawFirstChunk) {
+  sawFirstChunk = true;
+  responseBox.innerHTML = ""; // clear immediately — don't wait
+  setStatus(sendStatus, "", ""); // silent — ChatGPT shows no status while streaming
+}
       render();
     }
     
     if (mySeq === chatStreamSeq) {
       render();
-      setStatus(sendStatus, "Done", "text-green-600");
+      setStatus(sendStatus, "", ""); // silent completion
       pushHistory("assistant", raw);
       resumeTextMem = "";
     }
@@ -835,7 +835,7 @@ async function handleSend() {
   updateTranscript();
   
   const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
+  responseBox.innerHTML = `<span class="blinking-cursor">▍</span>`;
   setStatus(sendStatus, "Queued…", "text-orange-600");
   
   const mode = modeSelect?.value || "interview";
