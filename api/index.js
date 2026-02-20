@@ -93,7 +93,7 @@ ${resumeText.slice(0, 20000)}
 
   try {
     const r = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       temperature: 0,
       max_tokens: 260,
       messages: [
@@ -866,39 +866,49 @@ export default async function handler(req, res) {
 
       // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
       // Old framing forced generic invented answers. New framing works with OR without resume.
-      const baseSystem = `You are a senior software engineer answering interview questions conversationally — like a real practitioner, not a textbook.
+      const baseSystem = `You are a senior software engineer answering interview questions as a practitioner — someone who actually does this in production, not someone reading from a textbook.
 
-ADAPT your format to the question type:
+MANDATORY FORMAT (follow exactly for every non-code answer):
 
-FOR CONCEPTUAL questions (what is X, explain X, difference between X and Y):
-- Start with a 1-sentence bottom line
-- Then explain naturally in 2-4 short paragraphs
-- Use analogies when helpful
-- End with a real-world implication
+Q: [restate the question]
 
-FOR HOW-TO / PROCESS questions (how do you handle X, walk me through X):
-- Lead with the direct answer
-- Use numbered steps (1. 2. 3.) only when sequence matters
-- Include inline \`code\` or commands where natural
-- Close with outcome/tradeoff
+[blank line]
 
-FOR SCENARIO / INCIDENT questions (what would you do if X, how did you handle X):
-- Answer in first person, past tense ("I'd start by..." or "We once had...")
-- Show your thinking, not just the steps
-- Include what you'd monitor/verify
+**[One-sentence direct answer — the bottom line up front]**
 
-FOR CODING questions:
-- Show code first, explain after
-- Add inline comments on every non-trivial line
-- Mention time/space complexity at the end
+Here's how I handle it in production:
 
-UNIVERSAL RULES:
-- Never restate the question
-- Never say "Great question" or "Certainly!"  
-- No bullet padding: each point must add new information
-- Keep answers under 350 words unless the question genuinely needs more
-- Inline \`code\` for any real command, config value, or metric
-- If resume context is provided, personalize naturally — don't force it`.trim();
+1️⃣ [First major step — verb-first, action title]
+* [Specific action taken]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
+
+2️⃣ [Second major step]
+* [Specific action taken]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
+
+3️⃣ [Third major step]
+* [Specific action taken]
+* \`actual command or code snippet if relevant\`
+
+[N️⃣ Add more steps only if genuinely needed — do not pad]
+
+**[Bold closing statement — outcome, guarantee, or key takeaway with numbers if applicable]**
+
+RULES:
+- "Here's how I handle it in production:" is ALWAYS the transition line — never skip it
+- Every step starts with an emoji number: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
+- Sub-bullets use * (not •) and are specific actions — not definitions
+- Inline \`code\` for any real command, query, config value, or metric formula
+- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
+- NO "Real Scenario:" section — the steps ARE the production scenario
+- NO textbook definitions — never explain what something is, only what you DO with it
+- NO padding phrases: "It is important to", "This ensures that", "In order to"
+- Include real values where natural: timeout thresholds, retry counts, error rates, latency numbers
+- For architecture questions: show the call chain inline → UI → Gateway → Service → DB
+- For calculation questions: show the formula first, then plug in real numbers
+- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
 
       const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
@@ -987,10 +997,10 @@ if (resumeSummary) {
       // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
       // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         stream: true,
-     temperature: 0.6,   // more natural, less robotic
-      max_tokens: 900,    // handles multi-part answers without cutoff  
+        temperature: 0.4,    // was 0.7 — lower = more consistent structure
+        max_tokens: 650,     // was 600 — higher = no cut-off answers
         messages
       });
 
