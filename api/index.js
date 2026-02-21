@@ -4,16 +4,10 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
-// NEW — STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import crypto from "crypto";
 
-/**
- * CRITICAL:
- * - bodyParser MUST be false for multipart/form-data
- * - otherwise Busboy sees a drained stream -> "Unexpected end of form"
- */
 export const config = {
   runtime: "nodejs",
   api: {
@@ -25,8 +19,7 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// In-memory cache (per warm lambda) to avoid re-summarizing the same resume
-const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
+const RESUME_SUMMARY_CACHE = new Map();
 const SESSION_CACHE = new Map();
 
 /* -------------------------------------------------------------------------- */
@@ -49,27 +42,20 @@ function readJson(req) {
     let body = "";
     req.on("data", c => (body += c));
     req.on("end", () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch {
-        reject(new Error("Invalid JSON"));
-      }
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch { reject(new Error("Invalid JSON")); }
     });
     req.on("error", reject);
   });
 }
 
-
 function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
-// Resume summary: summarize once, reuse many times (cuts tokens + latency)
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
-
-  // If already short, keep it (hard cap)
   if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
 
   const key = sha256(resumeText);
@@ -77,16 +63,20 @@ async function getResumeSummary(resumeTextRaw = "") {
   if (cached) return cached;
 
   const summaryPrompt = `
-Create a SHORT interview-ready resume summary from the content.
-Rules:
-- Output ONLY in Markdown.
-- Sections MUST be exactly:
-  **Role Snapshot:** (1 line)
-  **Core Skills:** (8–12 comma-separated keywords)
-  **Key Projects:** (3 bullets; each starts with **project keyword**)
-  **Impact:** (3 bullets with numbers if present; never invent)
-- Keep under 1200 characters.
-- If a detail is missing, skip it. Do NOT assume.
+Extract a CONCISE interview-ready profile from this resume.
+Output in this EXACT format (Markdown):
+
+**Name:** [full name]
+**Current/Last Role:** [title at company]
+**Total Experience:** [X years]
+**Core Stack:** [comma-separated: top 8-10 technologies/tools they actually used]
+**Key Projects:**
+- [Project name at Company]: [what they built, what it did, tech used, measurable outcome if any]
+- [repeat for top 3-4 projects]
+**Domain Expertise:** [2-3 domains e.g. "ML pipelines, credit risk modeling, NLP"]
+**Notable Achievements:** [2-3 specific wins with numbers if present]
+
+Rules: Only extract facts. No invention. Skip sections with no data.
 Resume:
 ${resumeText.slice(0, 20000)}
 `.trim();
@@ -95,53 +85,35 @@ ${resumeText.slice(0, 20000)}
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_tokens: 260,
+      max_tokens: 400,
       messages: [
-        { role: "system", content: "Extract facts only. Do not add assumptions." },
+        { role: "system", content: "Extract facts only. Preserve exact project names, company names, and metrics." },
         { role: "user", content: summaryPrompt }
       ]
     });
-
     const summary = String(r?.choices?.[0]?.message?.content || "").trim();
     const finalSummary = summary || resumeText.slice(0, 2500);
     RESUME_SUMMARY_CACHE.set(key, finalSummary);
     return finalSummary;
   } catch {
-    // If summarization fails, fall back to a short slice.
     return resumeText.slice(0, 2500);
   }
 }
 
-/**
- * Hardened multipart reader:
- * - waits for file stream completion
- * - handles aborted/limit/error
- * - avoids "finish" resolving before file end in edge cases
- */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
     const headers = req.headers || {};
     const ct = String(headers["content-type"] || "");
-
     if (!ct.toLowerCase().includes("multipart/form-data")) {
       return reject(new Error("Expected multipart/form-data"));
     }
-
-    const bb = Busboy({
-      headers,
-      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
-    });
-
+    const bb = Busboy({ headers, limits: { fileSize: 25 * 1024 * 1024 } });
     const fields = {};
     let file = null;
-
     let fileDone = Promise.resolve();
-
     bb.on("field", (name, val) => (fields[name] = val));
-
     bb.on("file", (name, stream, info) => {
       const chunks = [];
-
       fileDone = new Promise((resDone, rejDone) => {
         stream.on("data", d => chunks.push(d));
         stream.on("limit", () => rejDone(new Error("File too large")));
@@ -157,21 +129,13 @@ function readMultipart(req) {
         });
       });
     });
-
     bb.on("error", reject);
-
     bb.on("finish", async () => {
-      try {
-        await fileDone;
-        resolve({ fields, file });
-      } catch (e) {
-        reject(e);
-      }
+      try { await fileDone; resolve({ fields, file }); }
+      catch (e) { reject(e); }
     });
-
     req.on("aborted", () => reject(new Error("Request aborted")));
     req.on("error", reject);
-
     req.pipe(bb);
   });
 }
@@ -179,16 +143,13 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host)
-    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
-    dt.getDate()
-  ).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
 async function getUserFromBearer(req) {
@@ -196,296 +157,175 @@ async function getUserFromBearer(req) {
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
   if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
-
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
   if (error) return { ok: false, error: error.message };
   if (!data?.user) return { ok: false, error: "Invalid session" };
-
   return { ok: true, user: data.user, access_token: token };
 }
 
-// FIX 1 — LATENCY: Reduced from 18→8 messages, 2000→1200 chars per message
-// This cuts ~60% of history token overhead before the stream even starts
 function safeHistory(history) {
   if (!Array.isArray(history)) return [];
   const out = [];
-  for (const m of history.slice(-8)) {          // was -18
+  for (const m of history.slice(-8)) {
     const role = m?.role;
     const content = typeof m?.content === "string" ? m.content : "";
     if ((role === "user" || role === "assistant") && content.trim()) {
-      out.push({ role, content: content.slice(0, 1200) });  // was 2000
+      out.push({ role, content: content.slice(0, 1200) });
     }
   }
   return out;
 }
 
 /* -------------------------------------------------------------------------- */
-/* LIGHTWEIGHT CODE-INTENT DETECTION (ADDED)                                  */
-/* - DOES NOT rely on "java/python" keywords                                   */
-/* - Explanation intent overrides language mentions like "in Java"             */
+/* QUESTION INTENT DETECTION                                                  */
 /* -------------------------------------------------------------------------- */
 
-function looksLikeCodeText(s = "") {
-  // quick signals: braces/semicolons/common code tokens OR fenced blocks
-  if (!s) return false;
-  const t = String(s);
-
-  if (t.includes("```")) return true;
-
-  const tokenHits =
-    (t.match(/[{}();]/g)?.length || 0) +
-    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
-
-  return tokenHits >= 6;
-}
-
-// -------------------------------------------------------
-// QUESTION INTENT DETECTION (FIXED / PRACTICAL)
-// -------------------------------------------------------
-
-
-
-// -------------------------------------------------------
-// FOLLOW-UP DETECTION + CONTEXT PACK (ADDED)
-// - Improves continuity across 8–9 Q&As without extra model calls
-// -------------------------------------------------------
-
-function isFollowUpPrompt(q = "") {
-  const s = normalizeQ(q);
-  if (!s) return false;
-
-  // short questions with references are usually follow-ups
-  const followTokens = [
-    "then",
-    "so",
-    "but",
-    "that",
-    "this",
-    "it",
-    "same",
-    "why",
-    "how come",
-    "as you said",
-    "you said",
-    "earlier",
-    "previous",
-    "follow up",
-    "based on that"
-  ];
-
-  const hasRef = followTokens.some(t => s.includes(t));
-  const isShort = s.length <= 160;
-
-  return hasRef || isShort;
-}
-
-// FIX 2 — LATENCY + QUALITY: Reduced context pack from 9→5 pairs, 240→180 chars per Q, 260→200 chars per A
-// Tighter context = fewer tokens = faster first byte, model focuses on relevant context
-function buildContextPack(hist = []) {
-  const pairs = [];
-  let lastUser = null;
-
-  for (const m of hist) {
-    if (m.role === "user") {
-      lastUser = m.content;
-    } else if (m.role === "assistant" && lastUser) {
-      pairs.push({ q: lastUser, a: m.content });
-      lastUser = null;
-    }
-  }
-
-  const tail = pairs.slice(-5);  // was -9
-  if (!tail.length) return "";
-
-  const lines = ["PRIOR CONTEXT (reference only if question is a follow-up):"];
-  tail.forEach((p, i) => {
-    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);  // was 240
-    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);  // was 260
-    lines.push(`${i + 1}) Q: ${q}`);
-    lines.push(`   A: ${a}`);
-  });
-
-  return lines.join("\n");
-}
-
 function normalizeQ(q = "") {
-  return String(q || "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-function isExplanationQuestion(q = "") {
-  const s = normalizeQ(q);
-
-  // Strong explanation patterns (no code needed)
-  const explainStarts = [
-    "explain",
-    "what is",
-    "how does",
-    "why",
-    "describe",
-    "define",
-    "difference between",
-    "compare",
-    "advantages",
-    "disadvantages",
-    "pros and cons"
-  ];
-
-  // Common deep-dive / theory topics (usually explanation)
-  const explainTopics = [
-    "architecture",
-    "design",
-    "lifecycle",
-    "internals",
-    "jvm",
-    "garbage collector",
-    "class loader",
-    "multithreading",
-    "deadlock",
-    "solid",
-    "oops",
-    "normalization"
-  ];
-
-  return (
-    explainStarts.some(p => s.startsWith(p)) ||
-    explainTopics.some(t => s.includes(t))
-  );
+  return String(q || "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
-
-  // If user explicitly wants code, always treat as code
-  const explicitCode = [
-    "code",
-    "program",
-    "snippet",
-    "implementation",
-    "source code",
-    "write a function",
-    "write a program",
-    "give me code",
-    "show me code"
-  ];
-
-  // Task verbs that strongly indicate coding even without "code" word
-  const taskVerbs = [
-    "write",
-    "implement",
-    "create",
-    "build",
-    "develop",
-    "program",
-    "solve",
-    "print",
-    "return",
-    "calculate",
-    "count",
-    "find",
-    "check",
-    "validate",
-    "reverse",
-    "sort",
-    "remove",
-    "replace",
-    "convert"
-  ];
-
-  // Classic coding-problem keywords
-  const algoKeywords = [
-    "vowel",
-    "vowels",
-    "palindrome",
-    "anagram",
-    "fibonacci",
-    "prime",
-    "factorial",
-    "string",
-    "array",
-    "hashmap",
-    "hash set",
-    "linked list",
-    "stack",
-    "queue",
-    "binary search",
-    "time complexity",
-    "space complexity"
-  ];
-
-  // Code-looking characters/signals
+  const explicitCode = ["code", "program", "snippet", "implementation", "source code",
+    "write a function", "write a program", "give me code", "show me code"];
+  const taskVerbs = ["write", "implement", "create", "build", "develop", "program",
+    "solve", "print", "return", "calculate", "count", "find", "check", "validate",
+    "reverse", "sort", "remove", "replace", "convert"];
+  const algoKeywords = ["vowel", "palindrome", "anagram", "fibonacci", "prime", "factorial",
+    "string", "array", "hashmap", "linked list", "stack", "queue", "binary search",
+    "time complexity", "space complexity"];
   const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
 
-  const wantsExample = /\b(example|sample|demo)\b/.test(s);
-  const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
-
   let score = 0;
-
   if (explicitCode.some(x => s.includes(x))) score += 4;
   if (codeSignals.some(x => s.includes(x))) score += 4;
-
   if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
   if (algoKeywords.some(k => s.includes(k))) score += 2;
-
-  if (wantsExample) score += 1;
-  if (mentionsLanguage) score += 1; // LOW weight on purpose
-
-  // Threshold: >=3 => code-intent
+  if (/\b(example|sample|demo)\b/.test(s)) score += 1;
+  if (/\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s)) score += 1;
   return score >= 3;
 }
 
+function isFollowUpPrompt(q = "") {
+  const s = normalizeQ(q);
+  const followTokens = ["then", "so", "but", "that", "this", "it", "same", "why",
+    "how come", "as you said", "you said", "earlier", "previous", "follow up", "based on that"];
+  return followTokens.some(t => s.includes(t)) || s.length <= 160;
+}
+
+function buildContextPack(hist = []) {
+  const pairs = [];
+  let lastUser = null;
+  for (const m of hist) {
+    if (m.role === "user") { lastUser = m.content; }
+    else if (m.role === "assistant" && lastUser) {
+      pairs.push({ q: lastUser, a: m.content });
+      lastUser = null;
+    }
+  }
+  const tail = pairs.slice(-5);
+  if (!tail.length) return "";
+  const lines = ["PRIOR CONTEXT (use only if this is a follow-up question):"];
+  tail.forEach((p, i) => {
+    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);
+    lines.push(`${i + 1}) Q: ${q}`);
+    lines.push(`   A: ${a}`);
+  });
+  return lines.join("\n");
+}
 
 /* -------------------------------------------------------------------------- */
-/* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
+/* SYSTEM PROMPTS — PRACTITIONER VOICE                                        */
+/* -------------------------------------------------------------------------- */
+
+// KEY CHANGE: Removed rigid emoji-number format. Speaks like a real person.
+// Resume facts are injected separately so they personalize every answer.
+const BASE_SYSTEM = `You are a senior software/data engineer with 6+ years of real production experience, in a live technical interview RIGHT NOW. You answer as yourself — a practitioner — not as an AI assistant or textbook.
+
+VOICE (most important):
+- First person, direct: "I use", "I built", "In my experience", "What I've seen in prod..."
+- NEVER: "It is important to", "This ensures that", "One approach is", "You can use"
+- Skip definitions of what something IS — jump to what you DO with it and why
+- Use actual numbers: timeouts, error rates, row counts, latency, retry counts
+- If resume context is provided, reference those specific projects and companies naturally
+- Sound like someone explaining to a colleague, not writing documentation
+
+ANSWER FORMAT (adapt naturally per question type):
+
+For "How do you..." / "What do you do when..." questions:
+One direct answer sentence first.
+"In practice:" then 3-5 specific bullet actions (not definitions, not theory)
+Closing sentence with a concrete outcome.
+
+For "Explain X" / "What is X" questions:
+Plain-English 1-sentence definition (skip jargon).
+"The reason this matters in production is..." — with a real consequence
+How you actually work with it day-to-day.
+
+For "Difference between X and Y" questions:
+One verdict sentence upfront: "X is for __, Y is for __ — I reach for X when..."
+Tight comparison on 2-3 dimensions that actually matter in practice.
+Your personal usage from real projects.
+
+For architecture / design questions:
+Show the flow inline: Client → Service → Cache → DB
+Call out the failure points and how you handle them.
+
+FORMATTING RULES:
+- **Bold** for section labels only
+- Bullet points for lists of actions
+- Inline code for commands, queries, config values, method names
+- Code blocks for actual code snippets
+- NO emoji numbers (1️⃣ etc) — they look AI-generated
+- Keep answers to 200-280 words unless genuinely complex
+- Concise > exhaustive. Leave room for follow-up questions.`;
+
+const CODE_SYSTEM = `You are a senior engineer in a live coding interview. Write code like a practitioner — clean, commented on non-obvious lines only.
+
+ALWAYS structure coding answers as:
+
+**Approach:** One sentence — the pattern/algorithm and why you chose it.
+
+[Code block — minimal, readable, with comments explaining WHY not WHAT]
+
+**Time:** O(...) | **Space:** O(...)
+**Edge cases:** [specific ones you handle]
+**Production addition:** [one real thing you'd add: input validation, error handling, retry logic, etc.]
+
+Rules:
+- Simplest correct solution first
+- Comments explain reasoning ("// set gives O(1) lookup vs O(n) list scan"), not steps
+- No boilerplate main() unless asked
+- No over-engineering`;
+
+/* -------------------------------------------------------------------------- */
+/* RESUME EXTRACTION                                                           */
 /* -------------------------------------------------------------------------- */
 
 function guessExtAndMime(file) {
   const name = (file?.filename || "").toLowerCase();
   const mime = (file?.mime || "").toLowerCase();
-
-  if (name.endsWith(".pdf") || mime.includes("pdf"))
-    return { ext: "pdf", mime: "application/pdf" };
-
+  if (name.endsWith(".pdf") || mime.includes("pdf")) return { ext: "pdf", mime: "application/pdf" };
   if (name.endsWith(".docx") || mime.includes("wordprocessingml"))
-    return {
-      ext: "docx",
-      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    };
-
-  if (name.endsWith(".txt") || mime.includes("text/plain"))
-    return { ext: "txt", mime: "text/plain" };
-
+    return { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
+  if (name.endsWith(".txt") || mime.includes("text/plain")) return { ext: "txt", mime: "text/plain" };
   return { ext: "bin", mime: "application/octet-stream" };
 }
 
 async function extractResumeText(file) {
   if (!file?.buffer || file.buffer.length < 20) return "";
-
   const { ext } = guessExtAndMime(file);
-
   if (ext === "txt") return file.buffer.toString("utf8");
-
   if (ext === "docx") {
-    try {
-      const out = await mammoth.extractRawText({ buffer: file.buffer });
-      return String(out?.value || "");
-    } catch (e) {
-      return `[DOCX error during extraction] ${e?.message || ""}`;
-    }
+    try { const out = await mammoth.extractRawText({ buffer: file.buffer }); return String(out?.value || ""); }
+    catch (e) { return `[DOCX error] ${e?.message || ""}`; }
   }
-
   if (ext === "pdf") {
-    try {
-      const out = await pdfParse(file.buffer);
-      return String(out?.text || "");
-    } catch (e) {
-      return `[PDF error during extraction] ${e?.message || ""}`;
-    }
+    try { const out = await pdfParse(file.buffer); return String(out?.text || ""); }
+    catch (e) { return `[PDF error] ${e?.message || ""}`; }
   }
-
   return file.buffer.toString("utf8");
 }
 
@@ -501,16 +341,10 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "http://localhost");
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
-    /* ------------------------------------------------------- */
-    /* HEALTH                                                  */
-    /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
     }
 
-    /* ------------------------------------------------------- */
-    /* ENV CHECK                                               */
-    /* ------------------------------------------------------- */
     if (req.method === "GET" && path === "envcheck") {
       return res.status(200).json({
         hasSUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -522,72 +356,39 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — SIGNUP                                           */
-    /* ------------------------------------------------------- */
+    /* AUTH — SIGNUP */
     if (path === "auth/signup") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const { name, phone, email, password } = await readJson(req);
       if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
-
       const sb = supabaseAnon();
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
-
-      const { data, error } = await sb.auth.signUp({
-        email,
-        password,
-        options: { emailRedirectTo: redirectTo }
-      });
+      const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } });
       if (error) return res.status(400).json({ error: error.message });
-
       await supabaseAdmin().from("user_profiles").insert({
-        id: data?.user?.id,
-        name,
-        phone: phone || "",
-        email,
-        approved: false,
-        credits: 0,
-        created_at: new Date().toISOString()
+        id: data?.user?.id, name, phone: phone || "", email,
+        approved: false, credits: 0, created_at: new Date().toISOString()
       });
-
       return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — LOGIN                                            */
-    /* ------------------------------------------------------- */
+    /* AUTH — LOGIN */
     if (path === "auth/login") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const { email, password } = await readJson(req);
-
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
         const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
-        return res.json({
-          ok: true,
-          session: { is_admin: true, token, user: { id: "admin", email: adminEmail } }
-        });
+        return res.json({ ok: true, session: { is_admin: true, token, user: { id: "admin", email: adminEmail } } });
       }
-
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return res.status(401).json({ error: error.message });
-
       const user = data.user;
       if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
-
-      const profile = await supabaseAdmin()
-        .from("user_profiles")
-        .select("approved")
-        .eq("id", user.id)
-        .single();
-
-      if (!profile.data?.approved)
-        return res.status(403).json({ error: "Admin has not approved your account yet" });
-
+      const profile = await supabaseAdmin().from("user_profiles").select("approved").eq("id", user.id).single();
+      if (!profile.data?.approved) return res.status(403).json({ error: "Admin has not approved your account yet" });
       return res.json({
         ok: true,
         session: {
@@ -600,19 +401,14 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — REFRESH TOKEN                                    */
-    /* ------------------------------------------------------- */
+    /* AUTH — REFRESH TOKEN */
     if (path === "auth/refresh") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const { refresh_token } = await readJson(req);
       if (!refresh_token) return res.status(400).json({ error: "Missing refresh_token" });
-
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.refreshSession({ refresh_token });
       if (error) return res.status(401).json({ error: error.message });
-
       return res.json({
         ok: true,
         session: {
@@ -623,9 +419,7 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — FORGOT PASSWORD                                  */
-    /* ------------------------------------------------------- */
+    /* AUTH — FORGOT PASSWORD */
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -633,83 +427,47 @@ export default async function handler(req, res) {
       return res.json({ ok: true });
     }
 
-    /* ------------------------------------------------------- */
-    /* USER PROFILE                                            */
-    /* ------------------------------------------------------- */
+    /* USER PROFILE */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
       const profile = await supabaseAdmin()
         .from("user_profiles")
         .select("id,name,email,phone,approved,credits,created_at")
         .eq("id", gate.user.id)
         .single();
-
       if (!profile.data) return res.status(404).json({ error: "Profile not found" });
-
-      return res.json({
-        ok: true,
-        user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
-      });
+      return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
     }
 
-    /* ------------------------------------------------------- */
-    /* USER — CREDIT DEDUCTION                                 */
-    /* ------------------------------------------------------- */
+    /* USER — CREDIT DEDUCTION */
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
       const { delta } = await readJson(req);
       const d = Math.max(0, Math.floor(Number(delta || 0)));
       if (!d) return res.json({ ok: true, remaining: null });
-
       const sb = supabaseAdmin();
-
-      const { data: row, error: e1 } = await sb
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", gate.user.id)
-        .single();
+      const { data: row, error: e1 } = await sb.from("user_profiles").select("credits").eq("id", gate.user.id).single();
       if (e1) return res.status(400).json({ error: e1.message });
-
       const current = Number(row?.credits || 0);
       const remaining = Math.max(0, current - d);
-
-      const { error: e2 } = await sb
-        .from("user_profiles")
-        .update({ credits: remaining })
-        .eq("id", gate.user.id);
+      const { error: e2 } = await sb.from("user_profiles").update({ credits: remaining }).eq("id", gate.user.id);
       if (e2) return res.status(400).json({ error: e2.message });
-
       return res.json({ ok: remaining > 0, remaining });
     }
 
-    /* ------------------------------------------------------- */
-    /* REALTIME — CLIENT SECRET (NEW)                           */
-    /* ------------------------------------------------------- */
+    /* REALTIME CLIENT SECRET */
     if (path === "realtime/client_secret") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
-      // basic credit gate (don't start ASR if no credits)
-      const { data: row } = await supabaseAdmin()
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", gate.user.id)
-        .single();
-
+      const { data: row } = await supabaseAdmin().from("user_profiles").select("credits").eq("id", gate.user.id).single();
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
-
       const body = await readJson(req).catch(() => ({}));
-      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
-
+      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600)));
       const payload = {
         expires_after: { anchor: "created_at", seconds: ttl },
         session: {
@@ -720,135 +478,78 @@ export default async function handler(req, res) {
               transcription: {
                 model: "gpt-4o-mini-transcribe",
                 language: "en",
-                prompt:
-                  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit."
+                prompt: "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases."
               },
               noise_reduction: { type: "far_field" },
-              turn_detection: {
-                type: "server_vad",
-                threshold: 0.5,
-                prefix_padding_ms: 300,
-                silence_duration_ms: 350
-              }
+              turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 350 }
             }
           }
         }
       };
-
       const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
         method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-          "Content-Type": "application/json"
-        },
+        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
         body: JSON.stringify(payload)
       });
-
       const out = await r.json().catch(() => ({}));
-      if (!r.ok) {
-        return res.status(r.status).json({
-          error: out?.error?.message || out?.error || "Failed to create client secret"
-        });
-      }
-
+      if (!r.ok) return res.status(r.status).json({ error: out?.error?.message || "Failed to create client secret" });
       return res.json({ value: out.value, expires_at: out.expires_at || 0 });
     }
 
-    /* ------------------------------------------------------- */
-    /* DEEPGRAM — API KEY                                      */
-    /* ------------------------------------------------------- */
+    /* DEEPGRAM KEY */
     if (path === "deepgram/key") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
-      // Check if user has credits
-      const { data: row } = await supabaseAdmin()
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", gate.user.id)
-        .single();
-
+      const { data: row } = await supabaseAdmin().from("user_profiles").select("credits").eq("id", gate.user.id).single();
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
-
-      // Return Deepgram API key
       const apiKey = process.env.DEEPGRAM_API_KEY;
-      if (!apiKey) {
-        return res.status(500).json({ error: "Deepgram API key not configured" });
-      }
-
+      if (!apiKey) return res.status(500).json({ error: "Deepgram API key not configured" });
       return res.json({ key: apiKey });
     }
 
-    /* ------------------------------------------------------- */
-    /* RESUME EXTRACTION                                       */
-    /* ------------------------------------------------------- */
+    /* RESUME EXTRACTION */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const { file } = await readMultipart(req);
       if (!file?.buffer) return res.json({ text: "" });
-
       const text = await extractResumeText(file);
       return res.json({ text: String(text || "") });
     }
 
-    /* ------------------------------------------------------- */
-    /* TRANSCRIBE (mic/system audio)                           */
-    /* ------------------------------------------------------- */
+    /* TRANSCRIBE */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
-
       const { fields, file } = await readMultipart(req);
       if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
-
       try {
         const filename = file.filename || "audio.webm";
         const mime = (file.mime || "audio/webm").split(";")[0];
         const audioFile = await toFile(file.buffer, filename, { type: mime });
-
-        const basePrompt =
-          "Transcribe EXACTLY what is spoken in English. " +
-          "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
-          "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
-
+        const basePrompt = "Transcribe EXACTLY what is spoken in English. Do NOT translate. Do NOT add filler words. If silence/no speech, return empty.";
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(
-          0,
-          800
-        );
-
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
         const out = await openai.audio.transcriptions.create({
-          file: audioFile,
-          model: "gpt-4o-transcribe",
-          language: "en",
-          temperature: 0,
-          response_format: "json",
-          prompt: finalPrompt
+          file: audioFile, model: "gpt-4o-transcribe", language: "en",
+          temperature: 0, response_format: "json", prompt: finalPrompt
         });
-
         return res.json({ text: out.text || "" });
       } catch (e) {
-        const status = e?.status || e?.response?.status || 500;
-        return res.status(status).json({ error: e?.message || String(e) });
+        return res.status(e?.status || 500).json({ error: e?.message || String(e) });
       }
     }
 
-    /* ------------------------------------------------------- */
-    /* CHAT SEND — OPTIMIZED FOR LATENCY + QUALITY             */
-    /* ------------------------------------------------------- */
+    /* ------------------------------------------------------------------ */
+    /* CHAT SEND — PRACTITIONER VOICE SYSTEM PROMPT                        */
+    /* ------------------------------------------------------------------ */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
       const { prompt, instructions, resumeText, history, sessionId } = await readJson(req);
-
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
-      // This sends the HTTP 200 + headers to the client right away,
-      // eliminating the "blank screen" wait while we build messages.
+      // Flush headers immediately for low latency
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -856,130 +557,44 @@ export default async function handler(req, res) {
       res.flushHeaders?.();
       res.write("\u200B");
 
-      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
-      // All message construction is sync so we reach openai.create() as fast as possible
-      const messages = [];
-
-      // ============================================================
-      // SYSTEM PROMPTS
-      // ============================================================
-
-      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
-      // Old framing forced generic invented answers. New framing works with OR without resume.
-      const baseSystem = `You are a senior software engineer answering interview questions as a practitioner — someone who actually does this in production, not someone reading from a textbook.
-
-MANDATORY FORMAT (follow exactly for every non-code answer):
-
-Q: [restate the question]
-
-[blank line]
-
-**[One-sentence direct answer — the bottom line up front]**
-
-Here's how I handle it in production:
-
-1️⃣ [First major step — verb-first, action title]
-* [Specific action taken]
-* [Specific action taken]
-* \`actual command or code snippet if relevant\`
-
-2️⃣ [Second major step]
-* [Specific action taken]
-* [Specific action taken]
-* \`actual command or code snippet if relevant\`
-
-3️⃣ [Third major step]
-* [Specific action taken]
-* \`actual command or code snippet if relevant\`
-
-[N️⃣ Add more steps only if genuinely needed — do not pad]
-
-**[Bold closing statement — outcome, guarantee, or key takeaway with numbers if applicable]**
-
-RULES:
-- "Here's how I handle it in production:" is ALWAYS the transition line — never skip it
-- Every step starts with an emoji number: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
-- Sub-bullets use * (not •) and are specific actions — not definitions
-- Inline \`code\` for any real command, query, config value, or metric formula
-- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
-- NO "Real Scenario:" section — the steps ARE the production scenario
-- NO textbook definitions — never explain what something is, only what you DO with it
-- NO padding phrases: "It is important to", "This ensures that", "In order to"
-- Include real values where natural: timeout thresholds, retry counts, error rates, latency numbers
-- For architecture questions: show the call chain inline → UI → Gateway → Service → DB
-- For calculation questions: show the formula first, then plug in real numbers
-- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
-
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
-
-**BLOCK 1: Simple Logic (Core algorithm only)**
-\`\`\`[language]
-// Core logic - what interviewer initially asks for
-// Inline comment on EVERY line explaining the step
-
-[Only essential algorithm/logic - minimal, focused]
-\`\`\`
-
-**BLOCK 2: Complete Implementation (If they ask for full solution)**
-\`\`\`[language]
-// Complete solution with edge cases
-// Inline comment on every non-trivial line
-
-[Full implementation with validation, edge cases, main method]
-\`\`\`
-
-**Input:** [sample]
-**Output:** [sample]`.trim();
-
-      const forceCode =
-        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
+      const forceCode = /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
         /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
-
       const codeMode = forceCode || isCodeQuestion(prompt);
 
-      messages.push({
-        role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
-      });
+      const messages = [];
 
-      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
-      // They added ~800 tokens of microservices-specific context to EVERY request,
-      // which (a) slowed first-token and (b) biased non-microservices answers.
-      // The new system prompt's format rules achieve the same structure without the overhead.
+      // System prompt — practitioner voice (no emoji, no rigid template)
+      messages.push({ role: "system", content: codeMode ? CODE_SYSTEM : BASE_SYSTEM });
 
+      // Custom instructions (general mode only)
       if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
       }
 
-      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
-      // Still enough for rich context, saves ~2000 tokens of overhead per request
+      // Resume context — inject as first-person background for personalization
       let resumeSummary = "";
+      if (resumeText?.trim()) {
+        resumeSummary = await getResumeSummary(resumeText);
+        if (sessionId) SESSION_CACHE.set(sessionId, { resumeSummary });
+      } else if (sessionId && SESSION_CACHE.has(sessionId)) {
+        resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+      }
 
-// First question of session (resume provided)
-if (resumeText?.trim()) {
-  resumeSummary = await getResumeSummary(resumeText);
+      if (resumeSummary) {
+        // Frame resume as "your background" so model speaks from candidate's perspective
+        messages.push({
+          role: "system",
+          content: `YOUR BACKGROUND (speak from this perspective — reference these projects/companies/tools naturally in your answers):
+${resumeSummary}
 
-  if (sessionId) {
-    SESSION_CACHE.set(sessionId, { resumeSummary });
-  }
-}
-// Subsequent questions (no resume sent, reuse cached)
-else if (sessionId && SESSION_CACHE.has(sessionId)) {
-  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-}
+When answering, personalize by mentioning your actual projects above when relevant. Don't force it — only when it genuinely fits.`
+        });
+      }
 
-if (resumeSummary) {
-  messages.push({
-    role: "system",
-    content:
-      "Candidate background (use to personalize answers):\n" +
-      resumeSummary
-  });
-}
-
-
+      // Conversation history
       const hist = safeHistory(history);
 
+      // Context pack for follow-ups
       if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
         const ctx = buildContextPack(hist);
         if (ctx) messages.push({ role: "system", content: ctx });
@@ -987,20 +602,16 @@ if (resumeSummary) {
 
       for (const m of hist) messages.push(m);
 
-      messages.push({
-        role: "user",
-        content: String(prompt).slice(0, 7000).trim()
-      });
+      messages.push({ role: "user", content: String(prompt).slice(0, 7000).trim() });
 
-      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
-      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
-      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
-      // More consistent format adherence, less rambling, still natural-sounding
+      // gpt-4o-mini with tuned params:
+      // temperature 0.5: natural variation without hallucination
+      // max_tokens 750: enough for full answers, prevents cut-offs
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: 0.4,    // was 0.7 — lower = more consistent structure
-        max_tokens: 650,     // was 600 — higher = no cut-off answers
+        temperature: 0.5,
+        max_tokens: 750,
         messages
       });
 
@@ -1014,84 +625,49 @@ if (resumeSummary) {
       return res.end();
     }
 
-    /* ------------------------------------------------------- */
-    /* CHAT RESET                                              */
-    /* ------------------------------------------------------- */
+    /* CHAT RESET */
     if (path === "chat/reset") return res.json({ ok: true });
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — USER LIST                                       */
-    /* ------------------------------------------------------- */
+    /* ADMIN — USER LIST */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
       const { data } = await supabaseAdmin()
         .from("user_profiles")
         .select("id,name,email,phone,approved,credits,created_at")
         .order("created_at", { ascending: false });
-
       return res.json({ users: data });
     }
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — APPROVE USER                                    */
-    /* ------------------------------------------------------- */
+    /* ADMIN — APPROVE USER */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
       const { user_id, approved } = await readJson(req);
-
       const { data } = await supabaseAdmin()
-        .from("user_profiles")
-        .update({ approved })
-        .eq("id", user_id)
-        .select()
-        .single();
-
+        .from("user_profiles").update({ approved }).eq("id", user_id).select().single();
       return res.json({ ok: true, user: data });
     }
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — UPDATE CREDITS                                  */
-    /* ------------------------------------------------------- */
+    /* ADMIN — UPDATE CREDITS */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-
       const { user_id, delta } = await readJson(req);
-
       const sb = supabaseAdmin();
-      const { data: row } = await sb
-        .from("user_profiles")
-        .select("credits")
-        .eq("id", user_id)
-        .single();
-
+      const { data: row } = await sb.from("user_profiles").select("credits").eq("id", user_id).single();
       const newCredits = Math.max(0, Number(row.credits) + Number(delta));
-
-      const { data } = await sb
-        .from("user_profiles")
-        .update({ credits: newCredits })
-        .eq("id", user_id)
-        .select()
-        .single();
-
+      const { data } = await sb.from("user_profiles").update({ credits: newCredits }).eq("id", user_id).select().single();
       return res.json({ ok: true, credits: data.credits });
     }
 
     return res.status(404).json({ error: `No route: /api/${path}` });
+
   } catch (err) {
     const msg = String(err?.message || err);
-
-    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
-      return res.status(400).json({
-        error: "Unexpected end of form (multipart stream was consumed or interrupted)."
-      });
+      return res.status(400).json({ error: "Unexpected end of form (multipart stream interrupted)." });
     }
-
     return res.status(500).json({ error: msg });
   }
 }

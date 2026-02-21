@@ -110,14 +110,48 @@
       padding-bottom: 10px;
       border-bottom: 1px solid #d1d5db;
     }
-
     .transcript-block:last-child {
       border-bottom: none;
     }
 
+    /* Unsent block: has header row with label + copy button */
     .transcript-block.unsent {
+      background: #fff;
+      border: 1px solid #bfdbfe;
+      border-radius: 6px;
+      padding: 8px 10px;
+      margin-bottom: 10px;
+    }
+    .unsent-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 4px;
+    }
+    .unsent-label {
+      font-size: 10px;
+      font-weight: 700;
+      color: #1d4ed8;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    .copy-unsent-btn {
+      font-size: 11px;
+      padding: 2px 8px;
+      background: #1d4ed8;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.15s;
+    }
+    .copy-unsent-btn:hover { background: #1e40af; }
+    .unsent-text {
       font-weight: 700;
       color: #1f2937;
+      white-space: pre-wrap;
+      word-wrap: break-word;
     }
 
     .transcript-block.sent {
@@ -128,7 +162,7 @@
 </head>
 
 <body>
-  
+
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
   <div class="flex flex-col h-screen overflow-hidden">
@@ -140,22 +174,20 @@
       <div class="flex items-center gap-2">
         <button id="emptyBtn"
           class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-    Empty
-  </button>
-  <button id="indept"
+          Empty
+        </button>
+        <button id="indept"
           class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-    Indept
-  </button>
-
-  <button id="notCodeBtn"
+          Indept
+        </button>
+        <button id="notCodeBtn"
           class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-    Not Code
-  </button>
-
-  <button id="codeSameBtn"
+          Not Code
+        </button>
+        <button id="codeSameBtn"
           class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
-    Code Same
-  </button>
+          Code Same
+        </button>
         <button id="logoutBtn" class="text-sm text-red-600 hover:underline">Logout</button>
       </div>
     </div>
@@ -171,19 +203,18 @@
           </div>
 
           <div id="liveTranscript"
-     tabindex="0"
-     role="textbox"
-     aria-label="Live transcript">
-</div>
+               tabindex="0"
+               role="textbox"
+               aria-label="Live transcript">
+          </div>
 
           <div>
             <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
             <textarea id="manualQuestion"
-          rows="2"
-          class="w-full border p-2 text-sm bg-white rounded resize-none"
-          placeholder="Optional manual refinement…">
-</textarea>
-
+                      rows="2"
+                      class="w-full border p-2 text-sm bg-white rounded resize-none"
+                      placeholder="Optional manual refinement…">
+            </textarea>
           </div>
 
           <div>
@@ -203,12 +234,10 @@
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
-
           <button id="micMuteBtn"
                   class="mt-2 w-full px-3 py-2 bg-gray-700 text-white text-sm rounded">
             Mic: ON
           </button>
-
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
 

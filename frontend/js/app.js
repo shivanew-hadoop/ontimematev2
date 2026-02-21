@@ -1,10 +1,11 @@
 /* ========================================================================== */
-/* app.js — FIXED: All blocks captured + No duplicates + Smart deduplication */
+/* app.js — FIXED: All blocks captured + No duplicates + Smart deduplication  */
+/*          + Copy Unsent button in transcript                                 */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
-// TEMP CLIPBOARD BUTTONS
 
+// TEMP CLIPBOARD BUTTONS
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => {
     console.log("Copied:", text);
@@ -281,22 +282,32 @@ function getEffectiveInstructions() {
 
 if (liveTranscript) {
   const TH = 40;
-  liveTranscript.addEventListener("scroll", () => { 
-    pinnedTop = liveTranscript.scrollTop <= TH; 
+  liveTranscript.addEventListener("scroll", () => {
+    pinnedTop = liveTranscript.scrollTop <= TH;
   }, { passive: true });
 }
 
+// -----------------------------------------------------------------------
+// TRANSCRIPT RENDERING — with "Copy Unsent" button on the bold/unsent block
+// -----------------------------------------------------------------------
 function updateTranscript() {
   if (!liveTranscript) return;
-  
+
   let html = "";
-  
-  // Current unsent block (bold, on top) - includes interim
+
+  // Current unsent block (bold, on top) — includes copy button + interim
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
   if (displayText.trim()) {
-    html += `<div class="transcript-block unsent">${escapeHtml(displayText.trim())}</div>`;
+    const escaped = escapeHtml(displayText.trim());
+    html += `<div class="transcript-block unsent">
+      <div class="unsent-header">
+        <span class="unsent-label">Unsent</span>
+        <button class="copy-unsent-btn" onclick="copyUnsentText()" title="Copy to clipboard">📋 Copy</button>
+      </div>
+      <div class="unsent-text">${escaped}</div>
+    </div>`;
   }
-  
+
   // Sent blocks (newest first, normal weight)
   for (let i = sentBlocks.length - 1; i >= 0; i--) {
     const block = sentBlocks[i];
@@ -304,38 +315,49 @@ function updateTranscript() {
       html += `<div class="transcript-block sent">${escapeHtml(block.text.trim())}</div>`;
     }
   }
-  
+
   liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-// Smart deduplication - removes overlap from new text based on existing text
+// Copy the current unsent text to clipboard
+window.copyUnsentText = function() {
+  const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
+  const text = displayText.trim();
+  if (!text) return;
+  navigator.clipboard.writeText(text).then(() => {
+    const btn = liveTranscript.querySelector(".copy-unsent-btn");
+    if (btn) {
+      btn.textContent = "✓ Copied";
+      setTimeout(() => { btn.textContent = "📋 Copy"; }, 1200);
+    }
+  }).catch(() => {
+    const btn = liveTranscript.querySelector(".copy-unsent-btn");
+    if (btn) {
+      btn.textContent = "Failed";
+      setTimeout(() => { btn.textContent = "📋 Copy"; }, 900);
+    }
+  });
+};
+
+// Smart deduplication
 function removeOverlap(existingText, newText) {
   const existing = normalize(existingText).toLowerCase();
   const incoming = normalize(newText).toLowerCase();
-  
   if (!existing || !incoming) return newText;
-  
   const existingWords = existing.split(" ");
   const incomingWords = incoming.split(" ");
-  
-  // Check if incoming starts with end of existing (overlap)
   const maxCheck = Math.min(15, existingWords.length, incomingWords.length);
-  
   for (let overlapSize = maxCheck; overlapSize >= 3; overlapSize--) {
     const existingTail = existingWords.slice(-overlapSize).join(" ");
     const incomingHead = incomingWords.slice(0, overlapSize).join(" ");
-    
     if (existingTail === incomingHead) {
-      // Found overlap - return only the new part
       const originalIncomingWords = normalize(newText).split(" ");
       const newPart = originalIncomingWords.slice(overlapSize).join(" ");
       console.log(`[DEDUP] Removed ${overlapSize} overlapping words`);
       return newPart;
     }
   }
-  
-  // No overlap found
   return newText;
 }
 
@@ -433,48 +455,31 @@ async function getDeepgramKey() {
 }
 
 function stopSystemAudioOnly() {
-  if (sysReconnectTimer) {
-    clearTimeout(sysReconnectTimer);
-    sysReconnectTimer = null;
-  }
-  
+  if (sysReconnectTimer) { clearTimeout(sysReconnectTimer); sysReconnectTimer = null; }
   try { sysWebSocket?.close(); } catch {}
   sysWebSocket = null;
-  
   try { sysProcessor?.disconnect(); } catch {}
   sysProcessor = null;
-  
   try { sysAudioContext?.close(); } catch {}
   sysAudioContext = null;
-  
-  if (sysStream) {
-    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
-  }
+  if (sysStream) { try { sysStream.getTracks().forEach(t => t.stop()); } catch {} }
   sysStream = null;
 }
 
 async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
-  
   console.log("[DEEPGRAM] Starting system audio capture...");
-  
   try {
-    sysStream = await navigator.mediaDevices.getDisplayMedia({ 
-      video: true, 
-      audio: { 
-        echoCancellation: false, 
-        noiseSuppression: false, 
-        autoGainControl: false,
-        sampleRate: 16000
-      }
+    sysStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false, sampleRate: 16000 }
     });
   } catch (err) {
     console.error("[DEEPGRAM] Permission denied:", err);
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
-
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
     console.error("[DEEPGRAM] No audio track");
@@ -483,76 +488,51 @@ async function enableSystemAudio() {
     showBanner("System audio requires selecting a window/tab and enabling 'Share audio' in the picker.");
     return;
   }
-
   console.log("[DEEPGRAM] Audio track acquired");
   audioTrack.onended = () => {
     console.log("[DEEPGRAM] Track ended");
     stopSystemAudioOnly();
     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
   };
-
   try {
     const apiKey = await getDeepgramKey();
-    
     const wsUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&language=en-IN&punctuate=true&interim_results=true&smart_format=true&encoding=linear16&sample_rate=16000`;
-    
     sysWebSocket = new WebSocket(wsUrl, ["token", apiKey]);
-    
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
       currentInterimText = "";
     };
-    
     sysWebSocket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
         if (data.type === "Results") {
           const transcript = data.channel?.alternatives?.[0]?.transcript || "";
           const isFinal = data.is_final;
-          
           if (!transcript.trim()) return;
-          
           const normalizedTranscript = normalize(transcript);
-          
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
-          
           if (isFinal) {
-            // Remove overlap from new final text
             const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
-            
             if (newPart.trim()) {
-              // Append only the new part
-              if (currentBlock.text) {
-                currentBlock.text += " " + newPart;
-              } else {
-                currentBlock.text = newPart;
-              }
-              
+              if (currentBlock.text) { currentBlock.text += " " + newPart; }
+              else { currentBlock.text = newPart; }
               currentBlock.t = Date.now();
               console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
             }
-            
-            currentInterimText = ""; // Clear interim
+            currentInterimText = "";
             updateTranscript();
-            
           } else {
-            // Show interim immediately (word-by-word display)
             currentInterimText = normalizedTranscript;
             updateTranscript();
           }
         }
-      } catch (e) {
-        console.error("[DEEPGRAM] Message parse error:", e);
-      }
+      } catch (e) { console.error("[DEEPGRAM] Message parse error:", e); }
     };
-    
     sysWebSocket.onerror = (err) => {
       console.error("[DEEPGRAM] WebSocket error:", err);
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
-    
     sysWebSocket.onclose = () => {
       console.log("[DEEPGRAM] WebSocket closed");
       if (isRunning) {
@@ -560,30 +540,21 @@ async function enableSystemAudio() {
         sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
       }
     };
-    
     sysAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     const source = sysAudioContext.createMediaStreamSource(sysStream);
     sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
-    
     sysProcessor.onaudioprocess = (e) => {
       if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
-      
       const inputData = e.inputBuffer.getChannelData(0);
-      
       const int16Data = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i++) {
         const s = Math.max(-1, Math.min(1, inputData[i]));
         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      
-      if (sysWebSocket.readyState === WebSocket.OPEN) {
-        sysWebSocket.send(int16Data.buffer);
-      }
+      if (sysWebSocket.readyState === WebSocket.OPEN) { sysWebSocket.send(int16Data.buffer); }
     };
-    
     source.connect(sysProcessor);
     sysProcessor.connect(sysAudioContext.destination);
-    
   } catch (e) {
     console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
@@ -614,11 +585,7 @@ function startCreditTicking() {
     lastCreditAt += billableSec * 1000;
     try {
       const out = await deductCredits(delta);
-      if (out.remaining <= 0) {
-        stopAll();
-        showBanner("No credits remaining.");
-        return;
-      }
+      if (out.remaining <= 0) { stopAll(); showBanner("No credits remaining."); return; }
       await loadUserProfile();
     } catch {}
   }, 500);
@@ -639,9 +606,9 @@ function pushHistory(role, content) {
 }
 
 function compactHistoryForRequest() {
-  return chatHistory.slice(-12).map(m => ({ 
-    role: m.role, 
-    content: String(m.content || "").slice(0, 1600) 
+  return chatHistory.slice(-12).map(m => ({
+    role: m.role,
+    content: String(m.content || "").slice(0, 1600)
   }));
 }
 
@@ -650,26 +617,26 @@ async function startChatStreaming(prompt, userTextForHistory) {
   chatAbort = new AbortController();
   chatStreamActive = true;
   const mySeq = ++chatStreamSeq;
-  
+
   if (userTextForHistory) pushHistory("user", userTextForHistory);
-  
+
   aiRawBuffer = "";
   responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
   setStatus(sendStatus, "Connecting…", "text-orange-600");
-  
-  const body = { 
-    prompt, 
-    history: compactHistoryForRequest(), 
-    instructions: getEffectiveInstructions(), 
-    resumeText: resumeTextMem || "", 
-    sessionId: getSessionId() 
+
+  const body = {
+    prompt,
+    history: compactHistoryForRequest(),
+    instructions: getEffectiveInstructions(),
+    resumeText: resumeTextMem || "",
+    sessionId: getSessionId()
   };
-  
+
   let raw = "";
   let flushTimer = null;
   let sawFirstChunk = false;
   const render = () => { responseBox.innerHTML = renderMarkdownLite(raw); };
-  
+
   try {
     const res = await apiFetch("chat/send", {
       method: "POST",
@@ -677,26 +644,24 @@ async function startChatStreaming(prompt, userTextForHistory) {
       body: JSON.stringify(body),
       signal: chatAbort.signal
     }, false);
-    
+
     if (!res.ok) throw new Error(await res.text());
     if (!res.body) throw new Error("No stream body");
-    
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    
+
     flushTimer = setInterval(() => {
       if (mySeq !== chatStreamSeq) return;
       if (!sawFirstChunk) return;
       render();
     }, 30);
-    
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (mySeq !== chatStreamSeq) return;
-      
       raw += decoder.decode(value, { stream: true });
-      
       if (!sawFirstChunk) {
         sawFirstChunk = true;
         responseBox.innerHTML = "";
@@ -704,7 +669,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
       }
       render();
     }
-    
+
     if (mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
@@ -746,16 +711,13 @@ async function startAll() {
   console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
-  
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-  
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
   currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
-  
   isRunning = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
@@ -764,7 +726,6 @@ async function startAll() {
   stopBtn.classList.remove("opacity-50");
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
-  
   setStatus(audioStatus, "Starting system audio capture...", "text-orange-600");
   setTimeout(async () => { await enableSystemAudio(); }, 300);
   startCreditTicking();
@@ -774,9 +735,7 @@ function stopAll() {
   console.log("[STOP] Stopping all...");
   isRunning = false;
   stopSystemAudioOnly();
-  
   if (creditTimer) clearInterval(creditTimer);
-  
   startBtn.disabled = false;
   stopBtn.disabled = true;
   sysBtn.disabled = true;
@@ -784,7 +743,6 @@ function stopAll() {
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
-  
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
@@ -804,47 +762,44 @@ async function handleSend() {
   if (currentInterimText) {
     const newPart = removeOverlap(currentBlock.text, currentInterimText);
     if (newPart.trim()) {
-      if (currentBlock.text) {
-        currentBlock.text += " " + newPart;
-      } else {
-        currentBlock.text = newPart;
-      }
+      if (currentBlock.text) { currentBlock.text += " " + newPart; }
+      else { currentBlock.text = newPart; }
     }
     currentInterimText = "";
   }
 
   await new Promise(r => setTimeout(r, 200));
-  
+
   const manual = normalize(manualQuestion?.value || "");
   const current = normalize(currentBlock.text);
   const base = manual || current;
-  
+
   if (!base) {
     setStatus(sendStatus, "Nothing to send", "text-orange-600");
     return;
   }
-  
+
   const question = buildDraftQuestion(base);
   if (manualQuestion) manualQuestion.value = "";
-  
+
   if (currentBlock.text.trim()) {
     sentBlocks.push({ ...currentBlock, sent: true });
   }
-  
+
   currentBlock = { text: "", sent: false, t: Date.now() };
   currentInterimText = "";
-  
+
   abortChatStreamOnly(true);
   pinnedTop = true;
   updateTranscript();
-  
+
   const draftQ = question;
   responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
-  
+
   const mode = modeSelect?.value || "interview";
   const promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
-  
+
   await startChatStreaming(promptToSend, base);
 }
 
@@ -885,14 +840,11 @@ window.addEventListener("load", async () => {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
   }
-  
   chatHistory = [];
   resumeTextMem = "";
   if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
-  
   await loadUserProfile();
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-  
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
@@ -900,14 +852,12 @@ window.addEventListener("load", async () => {
   pinnedTop = true;
   stopSystemAudioOnly();
   updateTranscript();
-  
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
-  
   setStatus(audioStatus, "Stopped", "text-orange-600");
   updateMicMuteUI();
   console.log("[LOAD] Initialization complete");
