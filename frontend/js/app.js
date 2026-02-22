@@ -296,28 +296,29 @@ if (liveTranscript) {
 
 function updateTranscript() {
   if (!liveTranscript) return;
-  
-  // Show/hide copy button based on unsent text
-const copyBtn = document.getElementById("copyUnsentBtn");
-if (copyBtn) {
-  copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
-}
-  let html = "";
-  
-  // Current unsent block (bold, on top) - includes interim
+
+  // ✅ Define displayText FIRST
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
+
+  // ✅ THEN use it for the copy button
+  const copyBtn = document.getElementById("copyUnsentBtn");
+  if (copyBtn) {
+    copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
+  }
+
+  let html = "";
+
   if (displayText.trim()) {
     html += `<div class="transcript-block unsent">${escapeHtml(displayText.trim())}</div>`;
   }
-  
-  // Sent blocks (newest first, normal weight)
+
   for (let i = sentBlocks.length - 1; i >= 0; i--) {
     const block = sentBlocks[i];
     if (block.text.trim()) {
       html += `<div class="transcript-block sent">${escapeHtml(block.text.trim())}</div>`;
     }
   }
-  
+
   liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
