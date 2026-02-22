@@ -114,39 +114,15 @@
       border-bottom: none;
     }
 
-    /* Unsent block: has header row with label + copy button */
+    /* Unsent block: bold text, blue left border — no inner header row */
     .transcript-block.unsent {
       background: #fff;
       border: 1px solid #bfdbfe;
+      border-left: 3px solid #1d4ed8;
       border-radius: 6px;
       padding: 8px 10px;
       margin-bottom: 10px;
     }
-    .unsent-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      margin-bottom: 4px;
-    }
-    .unsent-label {
-      font-size: 10px;
-      font-weight: 700;
-      color: #1d4ed8;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-    }
-    .copy-unsent-btn {
-      font-size: 11px;
-      padding: 2px 8px;
-      background: #1d4ed8;
-      color: white;
-      border: none;
-      border-radius: 4px;
-      cursor: pointer;
-      user-select: none;
-      transition: background 0.15s;
-    }
-    .copy-unsent-btn:hover { background: #1e40af; }
     .unsent-text {
       font-weight: 700;
       color: #1f2937;
@@ -199,7 +175,17 @@
         <div class="flex flex-col flex-1 min-h-0 gap-3">
           <div class="flex items-center justify-between">
             <h3 class="font-semibold text-sm">Live Transcript</h3>
-            <span class="text-[10px] text-gray-500">Bold=Unsent | Normal=Sent</span>
+            <div class="flex items-center gap-2">
+              <button
+                id="copyUnsentBtn"
+                onclick="copyUnsentText()"
+                title="Copy unsent text to clipboard"
+                style="display:none"
+                class="text-xs px-2 py-1 bg-blue-600 text-white rounded hover:bg-blue-700 flex items-center gap-1">
+                📋 Copy
+              </button>
+              <span class="text-[10px] text-gray-500">Bold=Unsent | Normal=Sent</span>
+            </div>
           </div>
 
           <div id="liveTranscript"

@@ -288,24 +288,19 @@ if (liveTranscript) {
 }
 
 // -----------------------------------------------------------------------
-// TRANSCRIPT RENDERING — with "Copy Unsent" button on the bold/unsent block
+// TRANSCRIPT RENDERING — unsent block is plain bold text, no copy button inside
+// Copy button lives OUTSIDE the box next to the header (see updateCopyBtnVisibility)
 // -----------------------------------------------------------------------
 function updateTranscript() {
   if (!liveTranscript) return;
 
   let html = "";
 
-  // Current unsent block (bold, on top) — includes copy button + interim
+  // Current unsent block (bold, on top) — plain, no inner copy button
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
   if (displayText.trim()) {
     const escaped = escapeHtml(displayText.trim());
-    html += `<div class="transcript-block unsent">
-      <div class="unsent-header">
-        <span class="unsent-label">Unsent</span>
-        <button class="copy-unsent-btn" onclick="copyUnsentText()" title="Copy to clipboard">📋 Copy</button>
-      </div>
-      <div class="unsent-text">${escaped}</div>
-    </div>`;
+    html += `<div class="transcript-block unsent"><div class="unsent-text">${escaped}</div></div>`;
   }
 
   // Sent blocks (newest first, normal weight)
@@ -318,21 +313,29 @@ function updateTranscript() {
 
   liveTranscript.innerHTML = html;
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
+  updateCopyBtnVisibility();
 }
 
-// Copy the current unsent text to clipboard
+// Show/hide the external copy button depending on whether there's unsent text
+function updateCopyBtnVisibility() {
+  const btn = document.getElementById("copyUnsentBtn");
+  if (!btn) return;
+  const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
+  btn.style.display = displayText.trim() ? "inline-flex" : "none";
+}
+
+// Copy the current unsent text to clipboard — button is outside the transcript box
 window.copyUnsentText = function() {
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
   const text = displayText.trim();
   if (!text) return;
+  const btn = document.getElementById("copyUnsentBtn");
   navigator.clipboard.writeText(text).then(() => {
-    const btn = liveTranscript.querySelector(".copy-unsent-btn");
     if (btn) {
       btn.textContent = "✓ Copied";
       setTimeout(() => { btn.textContent = "📋 Copy"; }, 1200);
     }
   }).catch(() => {
-    const btn = liveTranscript.querySelector(".copy-unsent-btn");
     if (btn) {
       btn.textContent = "Failed";
       setTimeout(() => { btn.textContent = "📋 Copy"; }, 900);
@@ -378,12 +381,76 @@ function buildDraftQuestion(spoken) {
   return "Q: " + cleaned.charAt(0).toUpperCase() + cleaned.slice(1) + (cleaned.endsWith("?") ? "" : "?");
 }
 
+// Known tech terms that speech-to-text commonly mangles.
+// Maps garbled forms → correct term (all lowercase for matching).
+const ASR_CORRECTIONS = {
+  "transform mobile": "MobileBERT",
+  "mobile bird": "MobileBERT",
+  "mobile bert": "MobileBERT",
+  "mobile burt": "MobileBERT",
+  "transfer learning": "transfer learning",      // keep as-is (already correct)
+  "kubernetes": "Kubernetes",
+  "kubernete": "Kubernetes",
+  "kuber netties": "Kubernetes",
+  "docker compose": "Docker Compose",
+  "react native": "React Native",
+  "machine learning": "machine learning",
+  "deep learning": "deep learning",
+  "bert model": "BERT model",
+  "g p t": "GPT",
+  "chat g p t": "ChatGPT",
+  "large language model": "large language model",
+  "l l m": "LLM",
+  "r a g": "RAG",
+  "retrieval augmented": "retrieval-augmented generation",
+  "type script": "TypeScript",
+  "java script": "JavaScript",
+  "next j s": "Next.js",
+  "node j s": "Node.js",
+  "my s q l": "MySQL",
+  "mongo d b": "MongoDB",
+  "dynamo d b": "DynamoDB",
+  "s q l": "SQL",
+  "no s q l": "NoSQL",
+  "a p i": "API",
+  "rest a p i": "REST API",
+  "amazon web services": "AWS",
+  "google cloud platform": "GCP",
+};
+
+function fixAsrText(text) {
+  let s = text;
+  for (const [bad, good] of Object.entries(ASR_CORRECTIONS)) {
+    // case-insensitive replace of each known garbled form
+    s = s.replace(new RegExp(bad, "gi"), good);
+  }
+  return s;
+}
+
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
+
   const priorQs = extractPriorQuestions();
-  let prompt = base;
-  if (priorQs.length) prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
+
+  // Apply known ASR corrections first
+  const corrected = fixAsrText(base);
+
+  // Prefix with a brief ASR-awareness instruction so the model self-corrects
+  // any remaining speech-to-text noise before answering
+  const asrNote =
+    `[NOTE: This question was captured via speech-to-text and may contain transcription errors. ` +
+    `Before answering, silently interpret what the interviewer most likely meant — ` +
+    `especially for technical terms (e.g. "transform mobile" → MobileBERT, "bird" → BERT, ` +
+    `"q learning" → Q-learning, "type script" → TypeScript). ` +
+    `Answer the corrected question, not the literal garbled text.]`;
+
+  let prompt = `${asrNote}\n\n${corrected}`;
+
+  if (priorQs.length) {
+    prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
+  }
+
   return prompt;
 }
 
