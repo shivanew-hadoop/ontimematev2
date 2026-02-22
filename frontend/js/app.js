@@ -1,10 +1,10 @@
 /* ========================================================================== */
-/* app.js — FIXED: All blocks captured + No duplicates + Smart deduplication */
+/* app.js — FIXED: updateTranscript bug + copyUnsentText + personalized AI   */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
-// TEMP CLIPBOARD BUTTONS
 
+// TEMP CLIPBOARD BUTTONS
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => {
     console.log("Copied:", text);
@@ -15,19 +15,27 @@ document.getElementById("emptyBtn")?.addEventListener("click", () => {
   copyToClipboard("");
 });
 
+document.getElementById("indept")?.addEventListener("click", () => {
+  copyToClipboard("provide indept explanation for same question with realtime examples. not just bookish explanation or AI or Chatgpt style answer");
+});
+
 document.getElementById("notCodeBtn")?.addEventListener("click", () => {
-  copyToClipboard("not code..explain in detailed way please");
+  copyToClipboard("not code. explain in detailed way please");
 });
 
 document.getElementById("codeSameBtn")?.addEventListener("click", () => {
   copyToClipboard("code same for this please..not theory");
 });
 
+document.getElementById("indept")?.addEventListener("click", () => {
+  copyToClipboard("can you explain this in more depth with real examples from my experience");
+});
 
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
+// ✅ FIXED: copyUnsentText uses global vars correctly
 function copyUnsentText() {
   const displayText = (currentBlock.text + (currentInterimText ? " " + currentInterimText : "")).trim();
   if (!displayText) return;
@@ -289,18 +297,19 @@ function getEffectiveInstructions() {
 
 if (liveTranscript) {
   const TH = 40;
-  liveTranscript.addEventListener("scroll", () => { 
-    pinnedTop = liveTranscript.scrollTop <= TH; 
+  liveTranscript.addEventListener("scroll", () => {
+    pinnedTop = liveTranscript.scrollTop <= TH;
   }, { passive: true });
 }
 
+// ✅ FIXED: displayText is defined FIRST, then used for copy button
 function updateTranscript() {
   if (!liveTranscript) return;
 
-  // ✅ Define displayText FIRST
+  // Define displayText FIRST
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
 
-  // ✅ THEN use it for the copy button
+  // Now safe to use displayText for copy button
   const copyBtn = document.getElementById("copyUnsentBtn");
   if (copyBtn) {
     copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
@@ -323,33 +332,24 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-// Smart deduplication - removes overlap from new text based on existing text
+// Smart deduplication
 function removeOverlap(existingText, newText) {
   const existing = normalize(existingText).toLowerCase();
   const incoming = normalize(newText).toLowerCase();
-  
   if (!existing || !incoming) return newText;
-  
   const existingWords = existing.split(" ");
   const incomingWords = incoming.split(" ");
-  
-  // Check if incoming starts with end of existing (overlap)
   const maxCheck = Math.min(15, existingWords.length, incomingWords.length);
-  
   for (let overlapSize = maxCheck; overlapSize >= 3; overlapSize--) {
     const existingTail = existingWords.slice(-overlapSize).join(" ");
     const incomingHead = incomingWords.slice(0, overlapSize).join(" ");
-    
     if (existingTail === incomingHead) {
-      // Found overlap - return only the new part
       const originalIncomingWords = normalize(newText).split(" ");
       const newPart = originalIncomingWords.slice(overlapSize).join(" ");
       console.log(`[DEDUP] Removed ${overlapSize} overlapping words`);
       return newPart;
     }
   }
-  
-  // No overlap found
   return newText;
 }
 
@@ -451,16 +451,12 @@ function stopSystemAudioOnly() {
     clearTimeout(sysReconnectTimer);
     sysReconnectTimer = null;
   }
-  
   try { sysWebSocket?.close(); } catch {}
   sysWebSocket = null;
-  
   try { sysProcessor?.disconnect(); } catch {}
   sysProcessor = null;
-  
   try { sysAudioContext?.close(); } catch {}
   sysAudioContext = null;
-  
   if (sysStream) {
     try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
   }
@@ -470,15 +466,13 @@ function stopSystemAudioOnly() {
 async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
-  
   console.log("[DEEPGRAM] Starting system audio capture...");
-  
   try {
-    sysStream = await navigator.mediaDevices.getDisplayMedia({ 
-      video: true, 
-      audio: { 
-        echoCancellation: false, 
-        noiseSuppression: false, 
+    sysStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
         autoGainControl: false,
         sampleRate: 16000
       }
@@ -507,52 +501,38 @@ async function enableSystemAudio() {
 
   try {
     const apiKey = await getDeepgramKey();
-    
     const wsUrl = `wss://api.deepgram.com/v1/listen?model=nova-2&language=en-IN&punctuate=true&interim_results=true&smart_format=true&encoding=linear16&sample_rate=16000`;
-    
     sysWebSocket = new WebSocket(wsUrl, ["token", apiKey]);
-    
+
     sysWebSocket.onopen = () => {
       console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
       currentInterimText = "";
     };
-    
+
     sysWebSocket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        
         if (data.type === "Results") {
           const transcript = data.channel?.alternatives?.[0]?.transcript || "";
           const isFinal = data.is_final;
-          
           if (!transcript.trim()) return;
-          
           const normalizedTranscript = normalize(transcript);
-          
           console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
-          
           if (isFinal) {
-            // Remove overlap from new final text
             const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
-            
             if (newPart.trim()) {
-              // Append only the new part
               if (currentBlock.text) {
                 currentBlock.text += " " + newPart;
               } else {
                 currentBlock.text = newPart;
               }
-              
               currentBlock.t = Date.now();
               console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
             }
-            
-            currentInterimText = ""; // Clear interim
+            currentInterimText = "";
             updateTranscript();
-            
           } else {
-            // Show interim immediately (word-by-word display)
             currentInterimText = normalizedTranscript;
             updateTranscript();
           }
@@ -561,12 +541,12 @@ async function enableSystemAudio() {
         console.error("[DEEPGRAM] Message parse error:", e);
       }
     };
-    
+
     sysWebSocket.onerror = (err) => {
       console.error("[DEEPGRAM] WebSocket error:", err);
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
-    
+
     sysWebSocket.onclose = () => {
       console.log("[DEEPGRAM] WebSocket closed");
       if (isRunning) {
@@ -574,30 +554,26 @@ async function enableSystemAudio() {
         sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
       }
     };
-    
+
     sysAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     const source = sysAudioContext.createMediaStreamSource(sysStream);
     sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
-    
+
     sysProcessor.onaudioprocess = (e) => {
       if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
-      
       const inputData = e.inputBuffer.getChannelData(0);
-      
       const int16Data = new Int16Array(inputData.length);
       for (let i = 0; i < inputData.length; i++) {
         const s = Math.max(-1, Math.min(1, inputData[i]));
         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      
       if (sysWebSocket.readyState === WebSocket.OPEN) {
         sysWebSocket.send(int16Data.buffer);
       }
     };
-    
+
     source.connect(sysProcessor);
     sysProcessor.connect(sysAudioContext.destination);
-    
   } catch (e) {
     console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
@@ -653,9 +629,9 @@ function pushHistory(role, content) {
 }
 
 function compactHistoryForRequest() {
-  return chatHistory.slice(-12).map(m => ({ 
-    role: m.role, 
-    content: String(m.content || "").slice(0, 1600) 
+  return chatHistory.slice(-12).map(m => ({
+    role: m.role,
+    content: String(m.content || "").slice(0, 1600)
   }));
 }
 
@@ -664,26 +640,26 @@ async function startChatStreaming(prompt, userTextForHistory) {
   chatAbort = new AbortController();
   chatStreamActive = true;
   const mySeq = ++chatStreamSeq;
-  
+
   if (userTextForHistory) pushHistory("user", userTextForHistory);
-  
+
   aiRawBuffer = "";
   responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
   setStatus(sendStatus, "Connecting…", "text-orange-600");
-  
-  const body = { 
-    prompt, 
-    history: compactHistoryForRequest(), 
-    instructions: getEffectiveInstructions(), 
-    resumeText: resumeTextMem || "", 
-    sessionId: getSessionId() 
+
+  const body = {
+    prompt,
+    history: compactHistoryForRequest(),
+    instructions: getEffectiveInstructions(),
+    resumeText: resumeTextMem || "",
+    sessionId: getSessionId()
   };
-  
+
   let raw = "";
   let flushTimer = null;
   let sawFirstChunk = false;
   const render = () => { responseBox.innerHTML = renderMarkdownLite(raw); };
-  
+
   try {
     const res = await apiFetch("chat/send", {
       method: "POST",
@@ -691,26 +667,24 @@ async function startChatStreaming(prompt, userTextForHistory) {
       body: JSON.stringify(body),
       signal: chatAbort.signal
     }, false);
-    
+
     if (!res.ok) throw new Error(await res.text());
     if (!res.body) throw new Error("No stream body");
-    
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
-    
+
     flushTimer = setInterval(() => {
       if (mySeq !== chatStreamSeq) return;
       if (!sawFirstChunk) return;
       render();
     }, 30);
-    
+
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (mySeq !== chatStreamSeq) return;
-      
       raw += decoder.decode(value, { stream: true });
-      
       if (!sawFirstChunk) {
         sawFirstChunk = true;
         responseBox.innerHTML = "";
@@ -718,7 +692,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
       }
       render();
     }
-    
+
     if (mySeq === chatStreamSeq) {
       render();
       setStatus(sendStatus, "Done", "text-green-600");
@@ -752,7 +726,9 @@ resumeInput?.addEventListener("change", async () => {
   const data = await res.json().catch(() => ({}));
   resumeTextMem = String(data.text || "").trim();
   if (resumeStatus) {
-    resumeStatus.textContent = resumeTextMem ? `Resume extracted (${resumeTextMem.length} chars)` : "Resume extracted: empty";
+    resumeStatus.textContent = resumeTextMem
+      ? `✅ Resume loaded (${resumeTextMem.length} chars) — answers will be personalized`
+      : "Resume extracted: empty";
   }
 });
 
@@ -760,16 +736,16 @@ async function startAll() {
   console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
-  
+
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-  
+
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
   currentInterimText = "";
   pinnedTop = true;
   updateTranscript();
-  
+
   isRunning = true;
   startBtn.disabled = true;
   stopBtn.disabled = false;
@@ -778,7 +754,7 @@ async function startAll() {
   stopBtn.classList.remove("opacity-50");
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
-  
+
   setStatus(audioStatus, "Starting system audio capture...", "text-orange-600");
   setTimeout(async () => { await enableSystemAudio(); }, 300);
   startCreditTicking();
@@ -788,9 +764,9 @@ function stopAll() {
   console.log("[STOP] Stopping all...");
   isRunning = false;
   stopSystemAudioOnly();
-  
+
   if (creditTimer) clearInterval(creditTimer);
-  
+
   startBtn.disabled = false;
   stopBtn.disabled = true;
   sysBtn.disabled = true;
@@ -798,7 +774,7 @@ function stopAll() {
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
-  
+
   setStatus(audioStatus, "Stopped", "text-orange-600");
 }
 
@@ -828,37 +804,37 @@ async function handleSend() {
   }
 
   await new Promise(r => setTimeout(r, 200));
-  
+
   const manual = normalize(manualQuestion?.value || "");
   const current = normalize(currentBlock.text);
   const base = manual || current;
-  
+
   if (!base) {
     setStatus(sendStatus, "Nothing to send", "text-orange-600");
     return;
   }
-  
+
   const question = buildDraftQuestion(base);
   if (manualQuestion) manualQuestion.value = "";
-  
+
   if (currentBlock.text.trim()) {
     sentBlocks.push({ ...currentBlock, sent: true });
   }
-  
+
   currentBlock = { text: "", sent: false, t: Date.now() };
   currentInterimText = "";
-  
+
   abortChatStreamOnly(true);
   pinnedTop = true;
   updateTranscript();
-  
+
   const draftQ = question;
   responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
-  
+
   const mode = modeSelect?.value || "interview";
   const promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
-  
+
   await startChatStreaming(promptToSend, base);
 }
 
@@ -899,14 +875,14 @@ window.addEventListener("load", async () => {
     localStorage.removeItem("session");
     return (window.location.href = "/auth?tab=login");
   }
-  
+
   chatHistory = [];
   resumeTextMem = "";
-  if (resumeStatus) resumeStatus.textContent = "Resume cleared.";
-  
+  if (resumeStatus) resumeStatus.textContent = "Upload your resume for personalized answers.";
+
   await loadUserProfile();
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
-  
+
   transcriptEpoch++;
   currentBlock = { text: "", sent: false, t: Date.now() };
   sentBlocks = [];
@@ -914,14 +890,14 @@ window.addEventListener("load", async () => {
   pinnedTop = true;
   stopSystemAudioOnly();
   updateTranscript();
-  
+
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
-  
+
   setStatus(audioStatus, "Stopped", "text-orange-600");
   updateMicMuteUI();
   console.log("[LOAD] Initialization complete");
