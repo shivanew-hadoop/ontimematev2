@@ -27,9 +27,6 @@ document.getElementById("codeSameBtn")?.addEventListener("click", () => {
   copyToClipboard("code same for this please..not theory");
 });
 
-document.getElementById("indept")?.addEventListener("click", () => {
-  copyToClipboard("can you explain this in more depth with real examples from my experience");
-});
 
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();

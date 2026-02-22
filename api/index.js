@@ -63,46 +63,67 @@ function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
-// Resume summary: summarize once, reuse many times (cuts tokens + latency)
+// Resume: pass raw text if short enough, summarize only if very long
+// KEY INSIGHT: Summarization loses critical specifics (numbers, tool names, call chains).
+// Most resumes are under 8000 chars — pass raw to preserve ALL details ChatGPT would see.
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
 
-  // If already short, keep it (hard cap)
-  if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
+  // Pass raw text for normal-length resumes — no lossy compression
+  if (resumeText.length <= 8000) return resumeText;
 
   const key = sha256(resumeText);
   const cached = RESUME_SUMMARY_CACHE.get(key);
   if (cached) return cached;
 
   const summaryPrompt = `
-Extract ALL key facts from this resume into a structured summary for interview coaching.
-Return ONLY this exact structure in Markdown:
+Extract ALL key facts from this resume. Be EXHAUSTIVE — do not compress or omit specifics.
+Return EXACTLY this structure:
 
 **Name:** [full name]
-**Current Role:** [title at current company]
-**Current Company:** [company name]
-**Years Experience:** [total years]
-**Domain:** [e.g., Retail POS, E-commerce, Banking]
+**Current Role:** [exact title]
+**Current Company:** [company]
+**Total Experience:** [X years]
+**Domain:** [primary domain e.g. Retail POS, E-commerce]
 
-**Companies (newest first):**
-- [Company] | [Role] | [Dates] — [2-3 key achievements with tools used]
-- [repeat for each]
+**Work History (newest first — include ALL companies):**
+- [Company] | [Role] | [Start–End]
+  * [Specific achievement with tool: e.g. "Designed Robot Framework suites for POS UI+API+integration testing"]
+  * [Specific achievement: e.g. "Validated Kafka topics, partitions, offsets, Avro/JSON message serialization"]
+  * [Specific achievement with number if present: e.g. "Accelerated test dev 40% using GitHub Copilot"]
+  * [Include ALL notable responsibilities from resume for this role]
+- [Next company — same format]
 
-**Core Tech Stack:**
-- Automation: [list tools]
-- Languages: [list]
-- API/Backend: [list]
-- Mobile: [list]
-- CI/CD: [list]
-- Databases: [list]
-- Other: [list]
+**Full Tech Stack (list every tool mentioned):**
+- Automation Frameworks: [e.g. Robot Framework, Playwright, Selenium, Appium, CodeceptJS, Karate, Rest Assured, JMeter]
+- Languages: [e.g. Java, Python, JavaScript]
+- API/Backend: [e.g. Rest Assured, Postman, Karate, REST, SOAP, Swagger/OpenAPI]
+- Messaging/Streaming: [e.g. Apache Kafka — topics, partitions, offsets, Avro, JSON, Kafka Tool, Zookeeper]
+- Mobile: [e.g. Appium, XCUITest, Android SDK, SauceLabs, real devices]
+- CI/CD: [e.g. Jenkins, TeamCity, Maven, Gradle, GitHub Actions, GitLab]
+- Databases: [e.g. Oracle, MongoDB, SQL, NoSQL, DB Visualizer]
+- Defect/Test Mgmt: [e.g. JIRA, Q-Metry, TestRail, ALM]
+- Cloud/Other: [e.g. Azure, Charles Proxy, OpenAI API, Gemini]
 
-**Key Domain Knowledge:**
-[3-5 bullets of specific domain expertise — POS, payments, Kafka, etc.]
+**Domain Expertise (specific, technical):**
+* [e.g. End-to-end POS testing: registers, pin pads, scanners, printers, payment devices]
+* [e.g. POS integration testing: POS→Inventory, POS→Kafka, POS→Payment gateway, POS→Order mgmt, POS→Pricing]
+* [e.g. Kafka validation: topics, partitions, offsets, message serialization Avro/JSON, multi-cluster QA/ACCEPTANCE/PROD]
+* [e.g. Mobile automation: Android+iOS, real devices, emulators, SauceLabs cloud]
+* [Include ALL specific domain details from resume]
 
-**Standout Projects/Achievements:**
-[3-5 bullets with numbers and specific tools]
+**Key Achievements with Numbers:**
+* [e.g. Reduced test dev time 40% using GitHub Copilot]
+* [e.g. Self-healing locators using Heal plugin in CodeceptJS]
+* [e.g. AI-integrated testing using OpenAI API/GPT-5, Gemini into CodeceptJS]
+* [e.g. Parallel test execution with Playwright workers]
+* [List ALL quantified or notable achievements]
+
+**Retail/POS Specific Experience:**
+* [List specific POS scenarios tested: payments, refunds, promotions, loyalty, EBT/SNAP, receipts, etc.]
+* [List backend systems tested: inventory sync, order management, pricing engines, payment gateways]
+* [List environments: multi-lane, multi-store, multi-region, pilot launches, production rollouts]
 
 Resume:
 ${resumeText.slice(0, 20000)}
@@ -112,9 +133,9 @@ ${resumeText.slice(0, 20000)}
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_tokens: 600,
+      max_tokens: 1100,
       messages: [
-        { role: "system", content: "Extract ONLY facts from the resume. Do not invent or assume anything." },
+        { role: "system", content: "Extract ONLY facts verbatim from the resume. Do not summarize, compress, or omit any specific tool, technology, or achievement. Preserve all numbers and technical details exactly." },
         { role: "user", content: summaryPrompt }
       ]
     });
@@ -300,21 +321,28 @@ function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
   const explicitCode = [
     "code", "program", "snippet", "implementation", "source code",
-    "write a function", "write a program", "give me code", "show me code"
+    "write a function", "write a program", "give me code", "show me code",
+    "show the code", "write the code", "code for", "example code"
   ];
   const taskVerbs = [
     "write", "implement", "create", "build", "develop", "program", "solve",
     "print", "return", "calculate", "count", "find", "check", "validate",
-    "reverse", "sort", "remove", "replace", "convert"
+    "reverse", "sort", "remove", "replace", "convert", "parse", "generate",
+    "design a function", "code a", "script for"
   ];
   const algoKeywords = [
-    "vowel", "vowels", "palindrome", "anagram", "fibonacci", "prime", "factorial",
-    "string", "array", "hashmap", "hash set", "linked list", "stack", "queue",
-    "binary search", "time complexity", "space complexity"
+    "vowel", "palindrome", "anagram", "fibonacci", "prime", "factorial",
+    "string", "array", "hashmap", "linked list", "stack", "queue",
+    "binary search", "time complexity", "space complexity", "recursion",
+    "dynamic programming", "graph", "tree", "sorting", "searching"
   ];
-  const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
-  const wantsExample = /\b(example|sample|demo)\b/.test(s);
-  const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
+  const codeSignals = [
+    "()", "{}", "[]", "for(", "while(", "if(", "public static",
+    "def ", "class ", "fn ", "func ", "async ", "=>", "SELECT ", "FROM "
+  ];
+  // Universal language detection — every major language
+  const mentionsLanguage = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|r\b|bash|shell)\b/i.test(s);
+  const wantsExample = /\b(example|sample|demo|illustration)\b/.test(s);
 
   let score = 0;
   if (explicitCode.some(x => s.includes(x))) score += 4;
@@ -628,75 +656,88 @@ export default async function handler(req, res) {
       // SYSTEM PROMPTS — UPGRADED FOR PERSONALIZED DEPTH
       // ============================================================
 
-      const baseSystem = `You are an expert interview coach. The candidate has provided their resume. Your job is to answer every interview question AS IF YOU ARE THE CANDIDATE — using THEIR actual experience, companies, tools, and projects from the resume.
+      const baseSystem = `You are an expert interview coach. A candidate has shared their resume. Your only job is to answer interview questions AS THAT SPECIFIC PERSON — in first person, using only what's in their resume.
 
-CRITICAL RULES:
-- ALWAYS reference the candidate's actual companies (e.g., "At Albertsons...", "When I was at Kroger...")
-- ALWAYS use their actual tools and technologies from the resume
-- ALWAYS mention specific achievements or responsibilities from their background
-- Make answers feel like a real person sharing real experience, not a textbook
-- Be specific: use tool names, metric values, real scenarios they would have faced
+You have no fixed domain. You have no fixed technology. You have no fixed role.
+Everything — the language, the tools, the companies, the call chains, the numbers — comes entirely from their resume.
 
-MANDATORY FORMAT for every non-code answer:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ANSWER FORMAT (mandatory for every non-code answer):
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 Q: [restate the question]
 
-**[One-sentence bottom-line answer referencing their actual role/domain]**
+**[Single bottom-line sentence — include their actual company name and role]**
 
 Here's how I handle it in production:
 
-1️⃣ [Step title — verb-first]
-* [Specific action — what THEY did at THEIR company]
-* [Tool or technology THEY actually used]
-* \`actual command, config, or code snippet if relevant\`
+1️⃣ [Action title — verb first]
+* [What they specifically did — name the company, name the tool]
+* [Technical detail — HOW they used it, not what it is]
+* \`real code / command / config if it adds value\`
 
-2️⃣ [Next step]
-* [Specific action with their real context]
-* [Real tool from their stack]
+2️⃣ [Next action]
+* [Specific detail from their background]
+* [Their exact technology choice and why]
+* \`code if relevant\`
 
-3️⃣ [Next step]
-* [Specific action]
-* \`code/config if useful\`
+3️⃣ [Next action]
+* [Specific detail]
+* [Technical depth]
 
-[Add more steps only if genuinely needed]
+4️⃣ [Next action]
+* [Specific detail]
 
-**[Bold closing statement — outcome they achieved or guarantee with real numbers if available]**
+5️⃣ [Next action]
+* [Specific detail]
 
-FORMAT RULES:
-- "Here's how I handle it in production:" is ALWAYS the transition line
-- Every step: emoji number 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
-- Sub-bullets: * (not •), specific actions not definitions
-- Inline \`code\` for real commands, queries, configs
-- End with bold result statement
-- NO generic textbook answers — every answer must feel personalized to THEIR background
-- Include real values: retry counts, thresholds, latency numbers, test counts
-- For architecture: show call chain → UI → Gateway → Service → DB
-- For tools they use: explain HOW they used it, not just what it is`.trim();
+[Add 6️⃣ 7️⃣ only when the question genuinely needs it]
 
-       const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
+**[Bold closing — their actual outcome. Use their exact number/metric if the resume has one.]**
 
-**BLOCK 1: Simple Logic (Core algorithm only)**
-\`\`\`[language]
-// Core logic - what interviewer initially asks for
-// Inline comment on EVERY line explaining the step
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+RULES — NEVER BREAK THESE:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. MINIMUM 4 steps. 5-7 for design, architecture, or complex topics.
+2. Every step must tie back to something in their resume — never invent experience.
+3. Always name their actual company in at least the opening line and closing.
+4. Always use their exact tools — never substitute a generic alternative.
+5. Always use their exact numbers — never round or invent metrics.
+6. For system/architecture questions: write out the actual call chain with their tech stack.
+7. For framework/annotation questions: include a working code example in their language.
+8. Bold closing must state a concrete outcome — number, SLA, scale, or improvement.
+9. Never say "you can", "teams typically", or "one approach is". You ARE this person.
+10. If the question is outside their experience, answer as a senior practitioner in their domain and say so briefly.`.trim();
 
-[Only essential algorithm/logic - minimal, focused]
+      const CODE_FIRST_SYSTEM = `You are answering a coding question AS THE CANDIDATE from their resume.
+Use their actual programming language. Reference their actual production context.
+
+MANDATORY FORMAT:
+
+**[1-sentence bottom line — what this solves and where you've used it at your actual company]**
+
+\`\`\`[their actual language from resume]
+// [One-line description of what this does]
+
+[Working, correct code — inline comment on every non-trivial line]
 \`\`\`
 
-**BLOCK 2: Complete Implementation (If they ask for full solution)**
-\`\`\`[language]
-// Complete solution with edge cases
-// Inline comment on every non-trivial line
+**Input:** [concrete example]
+**Output:** [concrete result]
 
-[Full implementation with validation, edge cases, main method]
-\`\`\`
+**How I've used this at [their company]:**
+* [Real production use case from their background]
+* [Scale, edge case, or optimization they would have applied]
+* [Any production gotcha or constraint relevant to their domain]
 
-**Input:** [sample]
-**Output:** [sample]`.trim();
+**Complexity:**
+* Time: O([n]) — [brief reason]
+* Space: O([n]) — [brief reason]`.trim();
 
+      // Universal language + task detection — works for any tech stack
       const forceCode =
-        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
-        /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
+        /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|bash|code|program)\b/i.test(prompt) &&
+        /\b(count|find|occurrence|write|implement|create|solve|build|show|give)\b/i.test(prompt);
 
       const codeMode = forceCode || isCodeQuestion(prompt);
 
@@ -724,16 +765,23 @@ FORMAT RULES:
       if (resumeSummary) {
         messages.push({
           role: "system",
-          content: `CANDIDATE PROFILE — USE THIS TO PERSONALIZE EVERY ANSWER:
+          content: `══════════════════════════════════════════
+CANDIDATE RESUME — READ EVERY WORD. USE IN EVERY ANSWER.
+══════════════════════════════════════════
 ${resumeSummary}
-
-INSTRUCTION: Answer as this specific candidate. Reference their actual companies, tools, projects, and achievements. Do not give generic answers.`
+══════════════════════════════════════════
+MANDATORY: You are answering AS this candidate. Every answer must:
+- Reference their EXACT company names, role titles, and dates
+- Use their EXACT technologies and tools (never substitute generics)
+- Quote their EXACT achievements and numbers (percentages, latency cuts, throughput gains, user counts)
+- Show their EXACT system call chains and architectures from their experience
+- Sound like THIS specific person at an interview — not a textbook answer
+DO NOT give generic answers. If the question relates to anything in the resume, use that context.`
         });
       } else {
-        // No resume — still give a good answer but note it
         messages.push({
           role: "system",
-          content: "No resume provided. Give a thorough, production-grade answer as a senior QA/SDET engineer with 10+ years experience in retail POS, automation frameworks, API testing, and mobile testing."
+          content: "No resume provided. Give a thorough, senior-level production answer based on the question domain. Be specific with tools, numbers, and real-world patterns."
         });
       }
 
@@ -751,12 +799,12 @@ INSTRUCTION: Answer as this specific candidate. Reference their actual companies
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      // Increased tokens for richer answers — 1200 matches ChatGPT depth
+      // gpt-4o = same model ChatGPT uses — this is the real fix for depth/quality gap
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         stream: true,
-        temperature: 0.35,  // Slightly lower = more consistent, structured answers
-        max_tokens: 1200,   // Was 650 — this is why answers were getting cut short
+        temperature: 0.3,
+        max_tokens: 1600,
         messages
       });
 
