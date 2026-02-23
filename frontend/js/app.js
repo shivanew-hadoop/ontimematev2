@@ -16,7 +16,7 @@ document.getElementById("emptyBtn")?.addEventListener("click", () => {
 });
 
 document.getElementById("indept")?.addEventListener("click", () => {
-  copyToClipboard("provide indept explanation for same question with realtime examples. not just bookish explanation or AI or Chatgpt style answer");
+  copyToClipboard("- provide in depth explanation on individual each tasks involved here that you perform with real time examples. Include tools, concepts, frameworks, relevant code if applicable");
 });
 
 document.getElementById("notCodeBtn")?.addEventListener("click", () => {
@@ -831,6 +831,9 @@ async function handleSend() {
 
   const mode = modeSelect?.value || "interview";
   const promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
+  if (!isCodeQuestion(base)) {
+  promptToSend += "\n\n - provide in depth explanation on individual each tasks involved here that you perform with real time examples. Include tools, concepts, frameworks, relevant code if applicable";
+}
 
   await startChatStreaming(promptToSend, base);
 }
