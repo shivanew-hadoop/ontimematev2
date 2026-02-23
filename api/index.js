@@ -660,21 +660,27 @@ export default async function handler(req, res) {
 Tone will be senior, practical, south-Indian style, human, non-generic, outcome-focused — no ChatGPT fluff, no buzzwords, no textbook gyaan.
 it should come like I am explaining to interviewer in present or past tense based on question`.trim();
 
-      const CODE_FIRST_SYSTEM = `You are answering a coding question as the candidate from their resume. Use their actual language. Tie it to their real work.
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
-One sentence first: what this solves and where you have used it at your actual company.
+**BLOCK 1: Simple Logic (Core algorithm only)**
+\`\`\`[language]
+// Core logic - what interviewer initially asks for
+// Inline comment on EVERY line explaining the step
 
-Then working code:
-\`\`\`[language from their resume]
-// what this does
-[correct code, comment every non-obvious line]
+[Only essential algorithm/logic - minimal, focused]
 \`\`\`
 
-Input -> Output with a real example.
+**BLOCK 2: Complete Implementation (If they ask for full solution)**
+\`\`\`[language]
+// Complete solution with edge cases
+// Inline comment on every non-trivial line
 
-2-3 sentences: how you have used this exact pattern at your company — real use case, real scale, real constraint from your background.
+[Full implementation with validation, edge cases, main method]
+\`\`\`
 
-Time: O(x) because [reason]. Space: O(x) because [reason].`.trim()
+**Input:** [sample]
+**Output:** [sample]`.trim();
+
 
       // Universal language + task detection — works for any tech stack
       const forceCode =
