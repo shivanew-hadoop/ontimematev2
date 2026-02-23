@@ -32,6 +32,41 @@ function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
+function isCodeQuestion(q = "") {
+  const s = normalize(q);  // ← only change: normalizeQ → normalize
+  const explicitCode = [
+    "code", "program", "snippet", "implementation", "source code",
+    "write a function", "write a program", "give me code", "show me code",
+    "show the code", "write the code", "code for", "example code"
+  ];
+  const taskVerbs = [
+    "write", "implement", "create", "build", "develop", "program", "solve",
+    "print", "return", "calculate", "count", "find", "check", "validate",
+    "reverse", "sort", "remove", "replace", "convert", "parse", "generate",
+    "design a function", "code a", "script for"
+  ];
+  const algoKeywords = [
+    "vowel", "palindrome", "anagram", "fibonacci", "prime", "factorial",
+    "string", "array", "hashmap", "linked list", "stack", "queue",
+    "binary search", "time complexity", "space complexity", "recursion",
+    "dynamic programming", "graph", "tree", "sorting", "searching"
+  ];
+  const codeSignals = [
+    "()", "{}", "[]", "for(", "while(", "if(", "public static",
+    "def ", "class ", "fn ", "func ", "async ", "=>", "SELECT ", "FROM "
+  ];
+  const mentionsLanguage = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|r\b|bash|shell)\b/i.test(s);
+  const wantsExample = /\b(example|sample|demo|illustration)\b/.test(s);
+
+  let score = 0;
+  if (explicitCode.some(x => s.includes(x))) score += 4;
+  if (codeSignals.some(x => s.includes(x))) score += 4;
+  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
+  if (algoKeywords.some(k => s.includes(k))) score += 2;
+  if (wantsExample) score += 1;
+  if (mentionsLanguage) score += 1;
+  return score >= 3;
+}
 // ✅ FIXED: copyUnsentText uses global vars correctly
 function copyUnsentText() {
   const displayText = (currentBlock.text + (currentInterimText ? " " + currentInterimText : "")).trim();
@@ -783,6 +818,7 @@ function hardClearTranscript() {
   pinnedTop = true;
   updateTranscript();
 }
+
 
 async function handleSend() {
   if (sendBtn.disabled) return;
