@@ -831,7 +831,9 @@ async function handleSend() {
 
   const mode = modeSelect?.value || "interview";
   const promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
-
+  if (!isCodeQuestion(base)) {
+  promptToSend += "\n\n- provide in depth explanation on individual each tasks involved here that you perform with real time examples. Include tools, concepts, frameworks, relevant code if applicable";
+}
   await startChatStreaming(promptToSend, base);
 }
 
