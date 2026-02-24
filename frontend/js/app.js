@@ -1,10 +1,10 @@
 /* ========================================================================== */
-/* app.js — FIXED: updateTranscript bug + copyUnsentText + personalized AI   */
+/* app.js — Interview assistant mode + Role/Years inputs + personalized AI    */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;
 
-// TEMP CLIPBOARD BUTTONS
+/* -------------------- Quick clipboard buttons -------------------- */
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => {
     console.log("Copied:", text);
@@ -16,7 +16,7 @@ document.getElementById("emptyBtn")?.addEventListener("click", () => {
 });
 
 document.getElementById("indept")?.addEventListener("click", () => {
-  copyToClipboard("- provide in depth explanation  on why this concept and if applicable list out individual each tasks involved here that you perform with real time examples. Include tools and frameworks if applicable only, include concepts, relevant code if applicable only");
+  copyToClipboard("provide indept explanation for same question with realtime examples. not just bookish explanation or AI or Chatgpt style answer");
 });
 
 document.getElementById("notCodeBtn")?.addEventListener("click", () => {
@@ -27,47 +27,11 @@ document.getElementById("codeSameBtn")?.addEventListener("click", () => {
   copyToClipboard("code same for this please..not theory");
 });
 
-
+/* -------------------- Helpers -------------------- */
 function normalize(s) {
   return (s || "").replace(/\s+/g, " ").trim();
 }
 
-function isCodeQuestion(q = "") {
-  const s = normalize(q);  // ← only change: normalizeQ → normalize
-  const explicitCode = [
-    "code", "program", "snippet", "implementation", "source code",
-    "write a function", "write a program", "give me code", "show me code",
-    "show the code", "write the code", "code for", "example code"
-  ];
-  const taskVerbs = [
-    "write", "implement", "create", "build", "develop", "program", "solve",
-    "print", "return", "calculate", "count", "find", "check", "validate",
-    "reverse", "sort", "remove", "replace", "convert", "parse", "generate",
-    "design a function", "code a", "script for"
-  ];
-  const algoKeywords = [
-    "vowel", "palindrome", "anagram", "fibonacci", "prime", "factorial",
-    "string", "array", "hashmap", "linked list", "stack", "queue",
-    "binary search", "time complexity", "space complexity", "recursion",
-    "dynamic programming", "graph", "tree", "sorting", "searching"
-  ];
-  const codeSignals = [
-    "()", "{}", "[]", "for(", "while(", "if(", "public static",
-    "def ", "class ", "fn ", "func ", "async ", "=>", "SELECT ", "FROM "
-  ];
-  const mentionsLanguage = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|r\b|bash|shell)\b/i.test(s);
-  const wantsExample = /\b(example|sample|demo|illustration)\b/.test(s);
-
-  let score = 0;
-  if (explicitCode.some(x => s.includes(x))) score += 4;
-  if (codeSignals.some(x => s.includes(x))) score += 4;
-  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
-  if (algoKeywords.some(k => s.includes(k))) score += 2;
-  if (wantsExample) score += 1;
-  if (mentionsLanguage) score += 1;
-  return score >= 3;
-}
-// ✅ FIXED: copyUnsentText uses global vars correctly
 function copyUnsentText() {
   const displayText = (currentBlock.text + (currentInterimText ? " " + currentInterimText : "")).trim();
   if (!displayText) return;
@@ -79,6 +43,8 @@ function copyUnsentText() {
     }
   });
 }
+
+window.copyUnsentText = copyUnsentText;
 
 function escapeHtml(s) {
   return String(s || "")
@@ -104,12 +70,14 @@ function renderMarkdownLite(md) {
   text = text.replace(/(Q:[^\n]+?)(\s+\*\*[A-Z])/g, "$1\n$2");
   text = text.replace(/([^\n])(Here's how I handle it in production:?)/gi, "$1\n$2");
   text = text.replace(/([^\n])([1-9]️⃣)/g, "$1\n$2");
+
   const preParts = text.split(/(```[\s\S]*?```)/g);
   for (let i = 0; i < preParts.length; i++) {
     if (i % 2 === 0) preParts[i] = preParts[i].replace(/ \* /g, "\n* ");
   }
   text = preParts.join("");
   text = text.replace(/([^\n])(\*\*[A-Z][^*\n]{15,}\*\*)(\s*)$/gm, "$1\n$2$3");
+
   const parts = text.split(/(```[\s\S]*?```)/g);
   const processedParts = parts.map((part, i) => {
     if (i % 2 === 1) {
@@ -119,18 +87,17 @@ function renderMarkdownLite(md) {
       const escapedCode = code.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
       return `<pre><code class="language-${lang}">${escapedCode}</code></pre>`;
     }
+
     let s = part;
     s = s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
     s = s.replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
     s = s.replace(/`([^`]+)`/g, "<code>$1</code>");
+
     const lines = s.split("\n");
     const htmlLines = lines.map(line => {
       const trimmed = line.trim();
       if (/^[1-9]️⃣/.test(trimmed)) return `<div style="margin-top:12px;margin-bottom:4px;font-weight:600">${trimmed}</div>`;
-      if (/^\*\s+/.test(trimmed)) {
-        const content = trimmed.replace(/^\*\s+/, "");
-        return `<div style="margin-left:18px;margin-top:3px;line-height:1.55">• ${content}</div>`;
-      }
+      if (/^\*\s+/.test(trimmed)) return `<div style="margin-left:18px;margin-top:3px;line-height:1.55">• ${trimmed.replace(/^\*\s+/, "")}</div>`;
       if (/^Q:\s/.test(trimmed)) return `<div style="margin-bottom:8px;font-weight:600">${trimmed}</div>`;
       if (/^here'?s how i handle it in production/i.test(trimmed)) return `<div style="margin-top:8px;margin-bottom:6px;font-style:italic">${trimmed}</div>`;
       if (!trimmed) return `<div style="height:6px"></div>`;
@@ -138,6 +105,7 @@ function renderMarkdownLite(md) {
     });
     return htmlLines.join("");
   });
+
   return processedParts.join("");
 }
 
@@ -152,7 +120,9 @@ function setupMarkdownRenderer() {
       try {
         if (lang && hljs.getLanguage(lang)) return hljs.highlight(code, { language: lang }).value;
         return hljs.highlightAuto(code).value;
-      } catch { return code; }
+      } catch {
+        return code;
+      }
     }
   });
 }
@@ -170,6 +140,7 @@ function enhanceCodeBlocks(containerEl) {
     if (pre.querySelector(".code-actions")) return;
     const toolbar = document.createElement("div");
     toolbar.className = "code-actions";
+
     const btn = document.createElement("button");
     btn.className = "code-btn";
     btn.type = "button";
@@ -186,6 +157,7 @@ function enhanceCodeBlocks(containerEl) {
         setTimeout(() => (btn.textContent = "Copy"), 900);
       }
     });
+
     toolbar.appendChild(btn);
     pre.appendChild(toolbar);
   });
@@ -195,6 +167,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupMarkdownRenderer();
 });
 
+/* -------------------- DOM refs -------------------- */
 const userInfo = document.getElementById("userInfo");
 const instructionsBox = document.getElementById("instructionsBox");
 const instrStatus = document.getElementById("instrStatus");
@@ -213,12 +186,13 @@ const sendBtn = document.getElementById("sendBtn");
 const sendStatus = document.getElementById("sendStatus");
 const bannerTop = document.getElementById("bannerTop");
 const modeSelect = document.getElementById("modeSelect");
-const micMuteBtn = document.getElementById("micMuteBtn");
+const roleText = document.getElementById("roleText");
+const yearsExp = document.getElementById("yearsExp");
 
+/* -------------------- State -------------------- */
 let session = null;
 let isRunning = false;
 let hiddenInstructions = "";
-let micMuted = false;
 
 let sysStream = null;
 let sysAudioContext = null;
@@ -245,6 +219,54 @@ let transcriptEpoch = 0;
 const CREDIT_BATCH_SEC = 5;
 const CREDITS_PER_SEC = 1;
 
+/* -------------------- Role / years persistence -------------------- */
+function loadInterviewMetaFromStorage() {
+  try {
+    const role = localStorage.getItem("tm_role_text") || "";
+    const yrs = localStorage.getItem("tm_years_exp") || "";
+    if (roleText) roleText.value = role;
+    if (yearsExp) yearsExp.value = yrs;
+  } catch {}
+}
+
+function saveInterviewMetaToStorage() {
+  try {
+    if (roleText) localStorage.setItem("tm_role_text", roleText.value || "");
+    if (yearsExp) localStorage.setItem("tm_years_exp", yearsExp.value || "");
+  } catch {}
+}
+
+roleText?.addEventListener("input", saveInterviewMetaToStorage);
+yearsExp?.addEventListener("input", saveInterviewMetaToStorage);
+
+/* Normalize free-text role to backend role overlay keys */
+function mapRoleType(rawRole = "") {
+  const s = normalize(rawRole).toLowerCase();
+  if (!s) return "";
+
+  if (s.includes("qa") || s.includes("test") || s.includes("automation") || s.includes("selenium")) {
+    return "qa-automation";
+  }
+  if (s.includes("data engineer") || s.includes("etl") || s.includes("snowflake") || s.includes("databricks")) {
+    return "data-engineer";
+  }
+  if (s.includes("genai") || s.includes("llm") || s.includes("rag") || s.includes("ai engineer")) {
+    return "genai";
+  }
+  if (s.includes("cloud architect") || s.includes("solution architect") || s.includes("aws architect")) {
+    return "cloud-architect";
+  }
+  if (
+    s.includes("java") || s.includes("spring") || s.includes("backend") ||
+    s.includes("microservices") || s.includes("full stack")
+  ) {
+    return "java-backend";
+  }
+
+  return "generic";
+}
+
+/* -------------------- Modes -------------------- */
 const MODE_INSTRUCTIONS = {
   general: "",
   interview: "",
@@ -275,33 +297,12 @@ function authHeaders() {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-function updateMicMuteUI() {
-  if (!micMuteBtn) return;
-  if (micMuted) {
-    micMuteBtn.textContent = "Mic: OFF";
-    micMuteBtn.classList.remove("bg-gray-700");
-    micMuteBtn.classList.add("bg-gray-900");
-  } else {
-    micMuteBtn.textContent = "Mic: ON";
-    micMuteBtn.classList.remove("bg-gray-900");
-    micMuteBtn.classList.add("bg-gray-700");
-  }
-}
-
-async function setMicMuted(on) {
-  micMuted = !!on;
-  updateMicMuteUI();
-}
-
-if (micMuteBtn) {
-  micMuteBtn.addEventListener("click", () => setMicMuted(!micMuted));
-  updateMicMuteUI();
-}
-
 function applyModeInstructions() {
   const mode = modeSelect?.value || "interview";
   hiddenInstructions = MODE_INSTRUCTIONS[mode] || "";
+
   if (!instructionsBox || !instrStatus) return;
+
   if (mode === "general") {
     instructionsBox.disabled = false;
     instrStatus.textContent = "You can enter custom instructions.";
@@ -310,6 +311,7 @@ function applyModeInstructions() {
     instructionsBox.value = "";
     instrStatus.textContent = `${mode.charAt(0).toUpperCase() + mode.slice(1)} mode selected. Custom instructions disabled.`;
   }
+
   setTimeout(() => (instrStatus.textContent = ""), 900);
 }
 
@@ -327,6 +329,7 @@ function getEffectiveInstructions() {
   return (localStorage.getItem("instructions") || "").trim();
 }
 
+/* -------------------- Transcript UI -------------------- */
 if (liveTranscript) {
   const TH = 40;
   liveTranscript.addEventListener("scroll", () => {
@@ -334,18 +337,13 @@ if (liveTranscript) {
   }, { passive: true });
 }
 
-// ✅ FIXED: displayText is defined FIRST, then used for copy button
 function updateTranscript() {
   if (!liveTranscript) return;
 
-  // Define displayText FIRST
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
 
-  // Now safe to use displayText for copy button
   const copyBtn = document.getElementById("copyUnsentBtn");
-  if (copyBtn) {
-    copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
-  }
+  if (copyBtn) copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
 
   let html = "";
 
@@ -364,14 +362,15 @@ function updateTranscript() {
   if (pinnedTop) requestAnimationFrame(() => (liveTranscript.scrollTop = 0));
 }
 
-// Smart deduplication
 function removeOverlap(existingText, newText) {
   const existing = normalize(existingText).toLowerCase();
   const incoming = normalize(newText).toLowerCase();
   if (!existing || !incoming) return newText;
+
   const existingWords = existing.split(" ");
   const incomingWords = incoming.split(" ");
   const maxCheck = Math.min(15, existingWords.length, incomingWords.length);
+
   for (let overlapSize = maxCheck; overlapSize >= 3; overlapSize--) {
     const existingTail = existingWords.slice(-overlapSize).join(" ");
     const incomingHead = incomingWords.slice(0, overlapSize).join(" ");
@@ -382,6 +381,7 @@ function removeOverlap(existingText, newText) {
       return newPart;
     }
   }
+
   return newText;
 }
 
@@ -405,12 +405,18 @@ function buildDraftQuestion(spoken) {
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
+
   const priorQs = extractPriorQuestions();
   let prompt = base;
-  if (priorQs.length) prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
+
+  if (priorQs.length) {
+    prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
+  }
+
   return prompt;
 }
 
+/* -------------------- Auth/API -------------------- */
 async function loadUserProfile() {
   try {
     const res = await apiFetch("user/profile", {}, true);
@@ -436,13 +442,16 @@ function isTokenNearExpiry() {
 async function refreshAccessToken() {
   const refresh_token = session?.refresh_token;
   if (!refresh_token) throw new Error("Missing refresh_token. Please login again.");
+
   const res = await fetch("/api?path=auth/refresh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ refresh_token })
   });
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Refresh failed");
+
   session.access_token = data.session.access_token;
   session.refresh_token = data.session.refresh_token;
   session.expires_at = data.session.expires_at;
@@ -453,9 +462,12 @@ async function apiFetch(path, opts = {}, needAuth = true) {
   if (needAuth && isTokenNearExpiry()) {
     try { await refreshAccessToken(); } catch {}
   }
+
   const headers = { ...(opts.headers || {}) };
   if (needAuth) Object.assign(headers, authHeaders());
+
   const res = await fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers, cache: "no-store" });
+
   if (needAuth && res.status === 401) {
     const t = await res.text().catch(() => "");
     const looksExpired = t.includes("token is expired") || t.includes("invalid JWT") || t.includes("Missing token");
@@ -465,6 +477,7 @@ async function apiFetch(path, opts = {}, needAuth = true) {
       return fetch(`/api?path=${encodeURIComponent(path)}`, { ...opts, headers: headers2, cache: "no-store" });
     }
   }
+
   return res;
 }
 
@@ -473,11 +486,13 @@ async function getDeepgramKey() {
     method: "POST",
     headers: { "Content-Type": "application/json" }
   }, true);
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data?.key) throw new Error(data?.error || "Failed to get Deepgram key");
   return data.key;
 }
 
+/* -------------------- System audio (Deepgram) -------------------- */
 function stopSystemAudioOnly() {
   if (sysReconnectTimer) {
     clearTimeout(sysReconnectTimer);
@@ -498,7 +513,7 @@ function stopSystemAudioOnly() {
 async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
-  console.log("[DEEPGRAM] Starting system audio capture...");
+
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
@@ -510,23 +525,19 @@ async function enableSystemAudio() {
       }
     });
   } catch (err) {
-    console.error("[DEEPGRAM] Permission denied:", err);
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
-    console.error("[DEEPGRAM] No audio track");
     setStatus(audioStatus, "No system audio detected.", "text-red-600");
     stopSystemAudioOnly();
     showBanner("System audio requires selecting a window/tab and enabling 'Share audio' in the picker.");
     return;
   }
 
-  console.log("[DEEPGRAM] Audio track acquired");
   audioTrack.onended = () => {
-    console.log("[DEEPGRAM] Track ended");
     stopSystemAudioOnly();
     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
   };
@@ -537,7 +548,6 @@ async function enableSystemAudio() {
     sysWebSocket = new WebSocket(wsUrl, ["token", apiKey]);
 
     sysWebSocket.onopen = () => {
-      console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
       currentInterimText = "";
     };
@@ -545,42 +555,36 @@ async function enableSystemAudio() {
     sysWebSocket.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === "Results") {
-          const transcript = data.channel?.alternatives?.[0]?.transcript || "";
-          const isFinal = data.is_final;
-          if (!transcript.trim()) return;
-          const normalizedTranscript = normalize(transcript);
-          console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
-          if (isFinal) {
-            const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
-            if (newPart.trim()) {
-              if (currentBlock.text) {
-                currentBlock.text += " " + newPart;
-              } else {
-                currentBlock.text = newPart;
-              }
-              currentBlock.t = Date.now();
-              console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
-            }
-            currentInterimText = "";
-            updateTranscript();
-          } else {
-            currentInterimText = normalizedTranscript;
-            updateTranscript();
+        if (data.type !== "Results") return;
+
+        const transcript = data.channel?.alternatives?.[0]?.transcript || "";
+        const isFinal = data.is_final;
+        if (!transcript.trim()) return;
+
+        const normalizedTranscript = normalize(transcript);
+
+        if (isFinal) {
+          const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
+          if (newPart.trim()) {
+            currentBlock.text = currentBlock.text ? `${currentBlock.text} ${newPart}` : newPart;
+            currentBlock.t = Date.now();
           }
+          currentInterimText = "";
+          updateTranscript();
+        } else {
+          currentInterimText = normalizedTranscript;
+          updateTranscript();
         }
       } catch (e) {
         console.error("[DEEPGRAM] Message parse error:", e);
       }
     };
 
-    sysWebSocket.onerror = (err) => {
-      console.error("[DEEPGRAM] WebSocket error:", err);
+    sysWebSocket.onerror = () => {
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
 
     sysWebSocket.onclose = () => {
-      console.log("[DEEPGRAM] WebSocket closed");
       if (isRunning) {
         setStatus(audioStatus, "Reconnecting...", "text-orange-600");
         sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
@@ -599,25 +603,24 @@ async function enableSystemAudio() {
         const s = Math.max(-1, Math.min(1, inputData[i]));
         int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
       }
-      if (sysWebSocket.readyState === WebSocket.OPEN) {
-        sysWebSocket.send(int16Data.buffer);
-      }
+      sysWebSocket.send(int16Data.buffer);
     };
 
     source.connect(sysProcessor);
     sysProcessor.connect(sysAudioContext.destination);
   } catch (e) {
-    console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
   }
 }
 
+/* -------------------- Credits -------------------- */
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ delta })
   }, true);
+
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "Deduct failed");
   return data;
@@ -626,14 +629,18 @@ async function deductCredits(delta) {
 function startCreditTicking() {
   if (creditTimer) clearInterval(creditTimer);
   lastCreditAt = Date.now();
+
   creditTimer = setInterval(async () => {
     if (!isRunning) return;
+
     const now = Date.now();
     const sec = Math.floor((now - lastCreditAt) / 1000);
     if (sec < CREDIT_BATCH_SEC) return;
+
     const billableSec = sec - (sec % CREDIT_BATCH_SEC);
     const delta = billableSec * CREDITS_PER_SEC;
     lastCreditAt += billableSec * 1000;
+
     try {
       const out = await deductCredits(delta);
       if (out.remaining <= 0) {
@@ -646,6 +653,7 @@ function startCreditTicking() {
   }, 500);
 }
 
+/* -------------------- Chat streaming -------------------- */
 function abortChatStreamOnly(silent = true) {
   try { chatAbort?.abort(); } catch {}
   chatAbort = null;
@@ -679,18 +687,27 @@ async function startChatStreaming(prompt, userTextForHistory) {
   responseBox.innerHTML = `<span class="text-gray-500 text-sm">Receiving…</span>`;
   setStatus(sendStatus, "Connecting…", "text-orange-600");
 
+  const roleLabel = normalize(roleText?.value || "");
+  const yrs = Number(yearsExp?.value || 0);
+
   const body = {
     prompt,
     history: compactHistoryForRequest(),
     instructions: getEffectiveInstructions(),
     resumeText: resumeTextMem || "",
-    sessionId: getSessionId()
+    sessionId: getSessionId(),
+    roleType: mapRoleType(roleLabel),
+    roleText: roleLabel,
+    yearsExp: Number.isFinite(yrs) && yrs > 0 ? yrs : null
   };
 
   let raw = "";
   let flushTimer = null;
   let sawFirstChunk = false;
-  const render = () => { responseBox.innerHTML = renderMarkdownLite(raw); };
+  const render = () => {
+    responseBox.innerHTML = renderMarkdownLite(raw);
+    enhanceCodeBlocks(responseBox);
+  };
 
   try {
     const res = await apiFetch("chat/send", {
@@ -707,8 +724,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
     const decoder = new TextDecoder();
 
     flushTimer = setInterval(() => {
-      if (mySeq !== chatStreamSeq) return;
-      if (!sawFirstChunk) return;
+      if (mySeq !== chatStreamSeq || !sawFirstChunk) return;
       render();
     }, 30);
 
@@ -716,6 +732,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
       const { done, value } = await reader.read();
       if (done) break;
       if (mySeq !== chatStreamSeq) return;
+
       raw += decoder.decode(value, { stream: true });
       if (!sawFirstChunk) {
         sawFirstChunk = true;
@@ -742,12 +759,16 @@ async function startChatStreaming(prompt, userTextForHistory) {
   }
 }
 
+/* -------------------- Resume upload -------------------- */
 resumeInput?.addEventListener("change", async () => {
   const file = resumeInput.files?.[0];
   if (!file) return;
+
   if (resumeStatus) resumeStatus.textContent = "Processing…";
+
   const fd = new FormData();
   fd.append("file", file);
+
   const res = await apiFetch("resume/extract", { method: "POST", body: fd }, false);
   if (!res.ok) {
     const errText = await res.text().catch(() => "");
@@ -755,8 +776,10 @@ resumeInput?.addEventListener("change", async () => {
     if (resumeStatus) resumeStatus.textContent = `Resume extract failed (${res.status}): ${errText.slice(0, 160)}`;
     return;
   }
+
   const data = await res.json().catch(() => ({}));
   resumeTextMem = String(data.text || "").trim();
+
   if (resumeStatus) {
     resumeStatus.textContent = resumeTextMem
       ? `✅ Resume loaded (${resumeTextMem.length} chars) — answers will be personalized`
@@ -764,8 +787,8 @@ resumeInput?.addEventListener("change", async () => {
   }
 });
 
+/* -------------------- Main controls -------------------- */
 async function startAll() {
-  console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
 
@@ -783,6 +806,7 @@ async function startAll() {
   stopBtn.disabled = false;
   sysBtn.disabled = false;
   sendBtn.disabled = false;
+
   stopBtn.classList.remove("opacity-50");
   sysBtn.classList.remove("opacity-50");
   sendBtn.classList.remove("opacity-60");
@@ -793,16 +817,15 @@ async function startAll() {
 }
 
 function stopAll() {
-  console.log("[STOP] Stopping all...");
   isRunning = false;
   stopSystemAudioOnly();
-
   if (creditTimer) clearInterval(creditTimer);
 
   startBtn.disabled = false;
   stopBtn.disabled = true;
   sysBtn.disabled = true;
   sendBtn.disabled = true;
+
   stopBtn.classList.add("opacity-50");
   sysBtn.classList.add("opacity-50");
   sendBtn.classList.add("opacity-60");
@@ -819,19 +842,13 @@ function hardClearTranscript() {
   updateTranscript();
 }
 
-
 async function handleSend() {
   if (sendBtn.disabled) return;
 
-  // Commit any pending interim
   if (currentInterimText) {
     const newPart = removeOverlap(currentBlock.text, currentInterimText);
     if (newPart.trim()) {
-      if (currentBlock.text) {
-        currentBlock.text += " " + newPart;
-      } else {
-        currentBlock.text = newPart;
-      }
+      currentBlock.text = currentBlock.text ? `${currentBlock.text} ${newPart}` : newPart;
     }
     currentInterimText = "";
   }
@@ -861,15 +878,14 @@ async function handleSend() {
   pinnedTop = true;
   updateTranscript();
 
-  const draftQ = question;
-  responseBox.innerHTML = renderMarkdownLite(`${draftQ}\n\n_Generating answer…_`);
+  responseBox.innerHTML = renderMarkdownLite(`${question}\n\n_Generating answer…_`);
   setStatus(sendStatus, "Queued…", "text-orange-600");
 
   const mode = modeSelect?.value || "interview";
-  let promptToSend = mode === "interview" ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, "")) : question;
-  if (!isCodeQuestion(base)) {
-  promptToSend += "\n\n- provide in depth explanation on individual each tasks involved here that you perform with real time examples. Include tools, concepts, frameworks, relevant code if applicable";
-}
+  const promptToSend = mode === "interview"
+    ? buildInterviewQuestionPrompt(question.replace(/^Q:\s*/i, ""))
+    : question;
+
   await startChatStreaming(promptToSend, base);
 }
 
@@ -902,8 +918,8 @@ document.getElementById("logoutBtn").onclick = () => {
   window.location.href = "/auth?tab=login";
 };
 
+/* -------------------- Boot -------------------- */
 window.addEventListener("load", async () => {
-  console.log("[LOAD] Page loaded");
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
   if (!session.refresh_token) {
@@ -914,6 +930,8 @@ window.addEventListener("load", async () => {
   chatHistory = [];
   resumeTextMem = "";
   if (resumeStatus) resumeStatus.textContent = "Upload your resume for personalized answers.";
+
+  loadInterviewMetaFromStorage();
 
   await loadUserProfile();
   await apiFetch("chat/reset", { method: "POST" }, false).catch(() => {});
@@ -934,8 +952,6 @@ window.addEventListener("load", async () => {
   sendBtn.classList.add("opacity-60");
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
-  updateMicMuteUI();
-  console.log("[LOAD] Initialization complete");
 });
 
 startBtn.onclick = startAll;

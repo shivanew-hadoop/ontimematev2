@@ -370,6 +370,20 @@ function guessExtAndMime(file) {
   return { ext: "bin", mime: "application/octet-stream" };
 }
 
+function normalizeRoleType(roleType = "", roleText = "") {
+  const rt = String(roleType || "").toLowerCase().trim();
+  if (rt) return rt;
+
+  const s = String(roleText || "").toLowerCase().trim();
+  if (!s) return "";
+  if (s.includes("qa") || s.includes("automation") || s.includes("test")) return "qa-automation";
+  if (s.includes("data engineer") || s.includes("etl") || s.includes("databricks") || s.includes("snowflake")) return "data-engineer";
+  if (s.includes("genai") || s.includes("llm") || s.includes("rag")) return "genai";
+  if (s.includes("cloud") || s.includes("architect")) return "cloud-architect";
+  if (s.includes("java") || s.includes("spring") || s.includes("backend")) return "java-backend";
+  return "generic";
+}
+
 async function extractResumeText(file) {
   if (!file?.buffer || file.buffer.length < 20) return "";
   const { ext } = guessExtAndMime(file);
@@ -639,7 +653,7 @@ export default async function handler(req, res) {
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      const { prompt, instructions, resumeText, history, sessionId } = await readJson(req);
+      const { prompt, instructions, resumeText, history, sessionId, roleType, roleText, yearsExp } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
       // Send headers immediately to eliminate blank-screen wait
@@ -656,9 +670,52 @@ export default async function handler(req, res) {
       // SYSTEM PROMPTS — UPGRADED FOR PERSONALIZED DEPTH
       // ============================================================
 
-      const baseSystem = `From now on, I’ll answer straight to the point, in simple English, 1–2 sharp lines first covering the full matter, then brief explanation + example only if really needed.
-Tone will be senior, practical, south-Indian style, human, non-generic, outcome-focused — no ChatGPT fluff, no buzzwords, no textbook gyaan.
-it should come like I am explaining to interviewer in present or past tense based on question`.trim();
+            // ============================================================
+      // SYSTEM PROMPTS — INTERVIEW ASSISTANT LAYERING (UPDATED)
+      // ============================================================
+
+      const INTERVIEW_BASE_SYSTEM = `
+You are a senior engineer answering in a live technical interview.
+
+=== CORE RULES ===
+- Start with a direct 1–2 line answer first.
+- Speak in first person ("I designed", "I handled", "I fixed").
+- Keep tone practical, senior, human, interview-ready.
+- No textbook definitions unless explicitly asked.
+- No generic buzzwords.
+- Explain trade-offs and decision-making.
+- Mention metrics when possible.
+- Assume production-scale systems by default.
+- Use structured sections.
+- Keep answers concise but deep.
+
+=== THINKING PROCESS ===
+Before answering:
+1. Identify question type (architecture, debugging, performance, coding, cloud, behavioral).
+2. Identify the likely bottleneck or design trade-off.
+3. Give immediate practical answer.
+4. Add production considerations (scaling, failure handling, monitoring).
+5. Suggest one improvement if relevant.
+
+=== RESPONSE FORMAT ===
+Short Answer:
+
+Context:
+
+What I Did:
+
+Why That Approach:
+
+Production Considerations:
+- Scaling
+- Failure handling
+- Monitoring
+
+Impact:
+(Metrics if available)
+
+Improvement:
+`.trim();
 
       const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
@@ -681,8 +738,7 @@ it should come like I am explaining to interviewer in present or past tense base
 **Input:** [sample]
 **Output:** [sample]`.trim();
 
-
-      // Universal language + task detection — works for any tech stack
+      // Universal language + task detection
       const forceCode =
         /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|bash|code|program)\b/i.test(prompt) &&
         /\b(count|find|occurrence|write|implement|create|solve|build|show|give)\b/i.test(prompt);
@@ -691,14 +747,63 @@ it should come like I am explaining to interviewer in present or past tense base
 
       messages.push({
         role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+        content: codeMode ? CODE_FIRST_SYSTEM : INTERVIEW_BASE_SYSTEM
       });
 
+      // Optional caller instructions (general mode/sales mode, etc.)
       if (!codeMode && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
       }
 
-      // Resume context — the KEY to personalized answers
+      // Role overlay (from UI role textbox)
+      const normalizedRoleType = normalizeRoleType(roleType, roleText);
+      if (!codeMode) {
+        if (normalizedRoleType === "java-backend") {
+          messages.push({
+            role: "system",
+            content: "Interview focus: Java backend / Spring Boot / microservices. Prioritize Spring ecosystem, REST APIs, Kafka, Redis caching, DB indexing/tuning, thread pools, performance, resilience (timeouts/circuit breaker), and production debugging."
+          });
+        } else if (normalizedRoleType === "data-engineer") {
+          messages.push({
+            role: "system",
+            content: "Interview focus: Data Engineering. Prioritize ETL pipelines, ingestion, partitioning, parallel processing, data quality checks, orchestration, warehouse optimization (Snowflake/Databricks), scaling, and batch vs streaming trade-offs."
+          });
+        } else if (normalizedRoleType === "qa-automation") {
+          messages.push({
+            role: "system",
+            content: "Interview focus: QA Automation. Prioritize framework design, UI/API automation strategy, CI/CD integration, flaky test reduction, environment issues, test data management, coverage metrics, and release validation."
+          });
+        } else if (normalizedRoleType === "cloud-architect") {
+          messages.push({
+            role: "system",
+            content: "Interview focus: Cloud / Solution Architecture. Prioritize AWS/Azure architecture, scalability, IAM/security, high availability, observability, cost-performance trade-offs, and migration decisions."
+          });
+        } else if (normalizedRoleType === "genai") {
+          messages.push({
+            role: "system",
+            content: "Interview focus: GenAI / LLM systems. Prioritize RAG architecture, embeddings, retrieval quality, latency, prompt orchestration, evaluation, hallucination controls, and production reliability."
+          });
+        }
+      }
+
+      // Years of experience context (from UI)
+      const yrs = Number(yearsExp || 0);
+      if (!codeMode && Number.isFinite(yrs) && yrs > 0) {
+        messages.push({
+          role: "system",
+          content: `Candidate positioning: answer at the depth and ownership expected from a ${yrs}-year experienced engineer. Sound senior enough for that level.`
+        });
+      }
+
+      // Raw role text hint (free text from UI)
+      if (!codeMode && String(roleText || "").trim()) {
+        messages.push({
+          role: "system",
+          content: `Target interview role (free text): ${String(roleText).trim().slice(0, 120)}. Bias examples and terminology toward this role when relevant.`
+        });
+      }
+
+      // Resume context — personalized answers
       let resumeSummary = "";
 
       if (resumeText?.trim()) {
@@ -714,22 +819,22 @@ it should come like I am explaining to interviewer in present or past tense base
         messages.push({
           role: "system",
           content: `══════════════════════════════════════════
-CANDIDATE RESUME — READ EVERY WORD. USE IN EVERY ANSWER.
+CANDIDATE RESUME CONTEXT
 ══════════════════════════════════════════
 ${resumeSummary}
 ══════════════════════════════════════════
-MANDATORY: You are answering AS this candidate. Every answer must:
-- Reference their EXACT company names, role titles, and dates
-- Use their EXACT technologies and tools (never substitute generics)
-- Quote their EXACT achievements and numbers (percentages, latency cuts, throughput gains, user counts)
-- Show their EXACT system call chains and architectures from their experience
-- Sound like THIS specific person at an interview — not a textbook answer
-DO NOT give generic answers. If the question relates to anything in the resume, use that context.`
+
+Use this resume context whenever relevant:
+- Prefer candidate's actual companies, projects, tools, and achievements.
+- Use exact technologies mentioned in the resume (no random substitutions).
+- Use metrics/numbers from the resume if they fit the answer.
+- If the question is unrelated to resume details, answer generically but still senior-level.
+- Do NOT invent companies, projects, or achievements not present in the resume.`
         });
       } else {
         messages.push({
           role: "system",
-          content: "No resume provided. Give a thorough, senior-level production answer based on the question domain. Be specific with tools, numbers, and real-world patterns."
+          content: "No resume provided. Give a senior-level interview answer with practical production examples, tools, trade-offs, and measurable impact where possible."
         });
       }
 
