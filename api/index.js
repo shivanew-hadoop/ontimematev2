@@ -794,7 +794,7 @@ Use this resume when the question relates to the candidate's experience:
 
       // ── STEP 10: Stream response ──
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         stream: true,
         temperature: questionType === "code" || questionType === "sql" ? 0.1 : 0.35,
         max_tokens: questionType === "experience" ? 1800 : 1600,
