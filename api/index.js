@@ -4,16 +4,10 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
-// NEW — STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import crypto from "crypto";
 
-/**
- * CRITICAL:
- * - bodyParser MUST be false for multipart/form-data
- * - otherwise Busboy sees a drained stream -> "Unexpected end of form"
- */
 export const config = {
   runtime: "nodejs",
   api: {
@@ -25,8 +19,7 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// In-memory cache (per warm lambda) to avoid re-summarizing the same resume
-const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
+const RESUME_SUMMARY_CACHE = new Map();
 const SESSION_CACHE = new Map();
 
 /* -------------------------------------------------------------------------- */
@@ -38,10 +31,7 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader(
-    "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, Accept, X-Requested-With"
-  );
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With");
 }
 
 function readJson(req) {
@@ -49,11 +39,8 @@ function readJson(req) {
     let body = "";
     req.on("data", c => (body += c));
     req.on("end", () => {
-      try {
-        resolve(body ? JSON.parse(body) : {});
-      } catch {
-        reject(new Error("Invalid JSON"));
-      }
+      try { resolve(body ? JSON.parse(body) : {}); }
+      catch { reject(new Error("Invalid JSON")); }
     });
     req.on("error", reject);
   });
@@ -63,14 +50,9 @@ function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
-// Resume: pass raw text if short enough, summarize only if very long
-// KEY INSIGHT: Summarization loses critical specifics (numbers, tool names, call chains).
-// Most resumes are under 8000 chars — pass raw to preserve ALL details ChatGPT would see.
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
-
-  // Pass raw text for normal-length resumes — no lossy compression
   if (resumeText.length <= 8000) return resumeText;
 
   const key = sha256(resumeText);
@@ -89,41 +71,19 @@ Return EXACTLY this structure:
 
 **Work History (newest first — include ALL companies):**
 - [Company] | [Role] | [Start–End]
-  * [Specific achievement with tool: e.g. "Designed Robot Framework suites for POS UI+API+integration testing"]
-  * [Specific achievement: e.g. "Validated Kafka topics, partitions, offsets, Avro/JSON message serialization"]
-  * [Specific achievement with number if present: e.g. "Accelerated test dev 40% using GitHub Copilot"]
-  * [Include ALL notable responsibilities from resume for this role]
-- [Next company — same format]
+  * [Specific achievement with tool]
+  * [Specific achievement with number if present]
 
 **Full Tech Stack (list every tool mentioned):**
-- Automation Frameworks: [e.g. Robot Framework, Playwright, Selenium, Appium, CodeceptJS, Karate, Rest Assured, JMeter]
-- Languages: [e.g. Java, Python, JavaScript]
-- API/Backend: [e.g. Rest Assured, Postman, Karate, REST, SOAP, Swagger/OpenAPI]
-- Messaging/Streaming: [e.g. Apache Kafka — topics, partitions, offsets, Avro, JSON, Kafka Tool, Zookeeper]
-- Mobile: [e.g. Appium, XCUITest, Android SDK, SauceLabs, real devices]
-- CI/CD: [e.g. Jenkins, TeamCity, Maven, Gradle, GitHub Actions, GitLab]
-- Databases: [e.g. Oracle, MongoDB, SQL, NoSQL, DB Visualizer]
-- Defect/Test Mgmt: [e.g. JIRA, Q-Metry, TestRail, ALM]
-- Cloud/Other: [e.g. Azure, Charles Proxy, OpenAI API, Gemini]
-
-**Domain Expertise (specific, technical):**
-* [e.g. End-to-end POS testing: registers, pin pads, scanners, printers, payment devices]
-* [e.g. POS integration testing: POS→Inventory, POS→Kafka, POS→Payment gateway, POS→Order mgmt, POS→Pricing]
-* [e.g. Kafka validation: topics, partitions, offsets, message serialization Avro/JSON, multi-cluster QA/ACCEPTANCE/PROD]
-* [e.g. Mobile automation: Android+iOS, real devices, emulators, SauceLabs cloud]
-* [Include ALL specific domain details from resume]
+- Automation Frameworks: ...
+- Languages: ...
+- API/Backend: ...
+- CI/CD: ...
+- Databases: ...
+- Cloud/Other: ...
 
 **Key Achievements with Numbers:**
-* [e.g. Reduced test dev time 40% using GitHub Copilot]
-* [e.g. Self-healing locators using Heal plugin in CodeceptJS]
-* [e.g. AI-integrated testing using OpenAI API/GPT-5, Gemini into CodeceptJS]
-* [e.g. Parallel test execution with Playwright workers]
 * [List ALL quantified or notable achievements]
-
-**Retail/POS Specific Experience:**
-* [List specific POS scenarios tested: payments, refunds, promotions, loyalty, EBT/SNAP, receipts, etc.]
-* [List backend systems tested: inventory sync, order management, pricing engines, payment gateways]
-* [List environments: multi-lane, multi-store, multi-region, pilot launches, production rollouts]
 
 Resume:
 ${resumeText.slice(0, 20000)}
@@ -135,11 +95,10 @@ ${resumeText.slice(0, 20000)}
       temperature: 0,
       max_tokens: 1100,
       messages: [
-        { role: "system", content: "Extract ONLY facts verbatim from the resume. Do not summarize, compress, or omit any specific tool, technology, or achievement. Preserve all numbers and technical details exactly." },
+        { role: "system", content: "Extract ONLY facts verbatim from the resume. Preserve all numbers and technical details exactly." },
         { role: "user", content: summaryPrompt }
       ]
     });
-
     const summary = String(r?.choices?.[0]?.message?.content || "").trim();
     const finalSummary = summary || resumeText.slice(0, 2500);
     RESUME_SUMMARY_CACHE.set(key, finalSummary);
@@ -149,29 +108,18 @@ ${resumeText.slice(0, 20000)}
   }
 }
 
-/**
- * Hardened multipart reader
- */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
     const headers = req.headers || {};
     const ct = String(headers["content-type"] || "");
+    if (!ct.toLowerCase().includes("multipart/form-data")) return reject(new Error("Expected multipart/form-data"));
 
-    if (!ct.toLowerCase().includes("multipart/form-data")) {
-      return reject(new Error("Expected multipart/form-data"));
-    }
-
-    const bb = Busboy({
-      headers,
-      limits: { fileSize: 25 * 1024 * 1024 }
-    });
-
+    const bb = Busboy({ headers, limits: { fileSize: 25 * 1024 * 1024 } });
     const fields = {};
     let file = null;
     let fileDone = Promise.resolve();
 
     bb.on("field", (name, val) => (fields[name] = val));
-
     bb.on("file", (name, stream, info) => {
       const chunks = [];
       fileDone = new Promise((resDone, rejDone) => {
@@ -179,27 +127,13 @@ function readMultipart(req) {
         stream.on("limit", () => rejDone(new Error("File too large")));
         stream.on("error", rejDone);
         stream.on("end", () => {
-          file = {
-            field: name,
-            filename: info?.filename || "upload.bin",
-            mime: info?.mimeType || "application/octet-stream",
-            buffer: Buffer.concat(chunks)
-          };
+          file = { field: name, filename: info?.filename || "upload.bin", mime: info?.mimeType || "application/octet-stream", buffer: Buffer.concat(chunks) };
           resDone();
         });
       });
     });
-
     bb.on("error", reject);
-    bb.on("finish", async () => {
-      try {
-        await fileDone;
-        resolve({ fields, file });
-      } catch (e) {
-        reject(e);
-      }
-    });
-
+    bb.on("finish", async () => { try { await fileDone; resolve({ fields, file }); } catch (e) { reject(e); } });
     req.on("aborted", () => reject(new Error("Request aborted")));
     req.on("error", reject);
     req.pipe(bb);
@@ -209,16 +143,13 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host)
-    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
-    dt.getDate()
-  ).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
 }
 
 async function getUserFromBearer(req) {
@@ -226,12 +157,10 @@ async function getUserFromBearer(req) {
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
   if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
-
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
   if (error) return { ok: false, error: error.message };
   if (!data?.user) return { ok: false, error: "Invalid session" };
-
   return { ok: true, user: data.user, access_token: token };
 }
 
@@ -249,131 +178,96 @@ function safeHistory(history) {
 }
 
 /* -------------------------------------------------------------------------- */
-/* INTENT DETECTION                                                            */
+/* DYNAMIC INTENT DETECTION ENGINE                                            */
 /* -------------------------------------------------------------------------- */
 
-function looksLikeCodeText(s = "") {
-  if (!s) return false;
-  const t = String(s);
-  if (t.includes("```")) return true;
-  const tokenHits =
-    (t.match(/[{}();]/g)?.length || 0) +
-    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
-  return tokenHits >= 6;
+function normalizeQ(q = "") {
+  return String(q || "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function isFollowUpPrompt(q = "") {
   const s = normalizeQ(q);
-  if (!s) return false;
-  const followTokens = [
-    "then", "so", "but", "that", "this", "it", "same", "why", "how come",
-    "as you said", "you said", "earlier", "previous", "follow up", "based on that"
-  ];
-  const hasRef = followTokens.some(t => s.includes(t));
-  const isShort = s.length <= 160;
-  return hasRef || isShort;
+  const followTokens = ["then", "so", "but", "that", "this", "it", "same", "why", "how come", "as you said", "you said", "earlier", "previous", "follow up", "based on that"];
+  return followTokens.some(t => s.includes(t)) || s.length <= 160;
 }
 
 function buildContextPack(hist = []) {
   const pairs = [];
   let lastUser = null;
   for (const m of hist) {
-    if (m.role === "user") {
-      lastUser = m.content;
-    } else if (m.role === "assistant" && lastUser) {
-      pairs.push({ q: lastUser, a: m.content });
-      lastUser = null;
-    }
+    if (m.role === "user") lastUser = m.content;
+    else if (m.role === "assistant" && lastUser) { pairs.push({ q: lastUser, a: m.content }); lastUser = null; }
   }
   const tail = pairs.slice(-5);
   if (!tail.length) return "";
   const lines = ["PRIOR CONTEXT (reference only if question is a follow-up):"];
   tail.forEach((p, i) => {
-    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);
-    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);
-    lines.push(`${i + 1}) Q: ${q}`);
-    lines.push(`   A: ${a}`);
+    lines.push(`${i + 1}) Q: ${String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180)}`);
+    lines.push(`   A: ${String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200)}`);
   });
   return lines.join("\n");
 }
 
-function normalizeQ(q = "") {
-  return String(q || "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-function isExplanationQuestion(q = "") {
+/**
+ * DYNAMIC QUESTION TYPE CLASSIFIER
+ * Returns one of: "code" | "sql" | "experience" | "concept" | "debug" | "behavioral" | "quick"
+ */
+function classifyQuestion(q = "") {
   const s = normalizeQ(q);
-  const explainStarts = [
-    "explain", "what is", "how does", "why", "describe", "define",
-    "difference between", "compare", "advantages", "disadvantages", "pros and cons"
-  ];
-  const explainTopics = [
-    "architecture", "design", "lifecycle", "internals", "jvm", "garbage collector",
-    "class loader", "multithreading", "deadlock", "solid", "oops", "normalization"
-  ];
-  return (
-    explainStarts.some(p => s.startsWith(p)) ||
-    explainTopics.some(t => s.includes(t))
-  );
-}
 
-function isCodeQuestion(q = "") {
-  const s = normalizeQ(q);
-  const explicitCode = [
-    "code", "program", "snippet", "implementation", "source code",
-    "write a function", "write a program", "give me code", "show me code",
-    "show the code", "write the code", "code for", "example code"
-  ];
-  const taskVerbs = [
-    "write", "implement", "create", "build", "develop", "program", "solve",
-    "print", "return", "calculate", "count", "find", "check", "validate",
-    "reverse", "sort", "remove", "replace", "convert", "parse", "generate",
-    "design a function", "code a", "script for"
-  ];
-  const algoKeywords = [
-    "vowel", "palindrome", "anagram", "fibonacci", "prime", "factorial",
-    "string", "array", "hashmap", "linked list", "stack", "queue",
-    "binary search", "time complexity", "space complexity", "recursion",
-    "dynamic programming", "graph", "tree", "sorting", "searching"
-  ];
-  const codeSignals = [
-    "()", "{}", "[]", "for(", "while(", "if(", "public static",
-    "def ", "class ", "fn ", "func ", "async ", "=>", "SELECT ", "FROM "
-  ];
-  // Universal language detection — every major language
-  const mentionsLanguage = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|r\b|bash|shell)\b/i.test(s);
-  const wantsExample = /\b(example|sample|demo|illustration)\b/.test(s);
+  // CODE: explicit coding task in a programming language
+  const explicitCode = ["write a function", "write a program", "give me code", "show me code", "code for", "implement", "write code", "snippet"];
+  const codeSignals = ["()", "{}", "for(", "while(", "public static", "def ", "class ", "async ", "=>"];
+  const algoKeywords = ["palindrome", "fibonacci", "prime", "factorial", "anagram", "linked list", "binary search", "recursion", "dynamic programming", "sorting"];
+  const programmingLang = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|bash|shell)\b/i.test(s);
 
-  let score = 0;
-  if (explicitCode.some(x => s.includes(x))) score += 4;
-  if (codeSignals.some(x => s.includes(x))) score += 4;
-  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
-  if (algoKeywords.some(k => s.includes(k))) score += 2;
-  if (wantsExample) score += 1;
-  if (mentionsLanguage) score += 1;
-  return score >= 3;
-}
+  let codeScore = 0;
+  if (explicitCode.some(x => s.includes(x))) codeScore += 4;
+  if (codeSignals.some(x => s.includes(x))) codeScore += 4;
+  if (algoKeywords.some(k => s.includes(k))) codeScore += 2;
+  if (programmingLang && /\b(write|implement|create|build|program|solve|count|find|print|return|calculate|reverse|sort)\b/.test(s)) codeScore += 2;
+  if (codeScore >= 3) return "code";
 
-/* -------------------------------------------------------------------------- */
-/* RESUME EXTRACTION                                                           */
-/* -------------------------------------------------------------------------- */
+  // SQL: query writing tasks
+  const sqlKeywords = ["select", "query", "sql", "join", "group by", "window function", "cte", "with clause", "row_number", "partition by", "snowflake query", "write a query", "give me a query"];
+  if (sqlKeywords.some(k => s.includes(k)) && /\b(write|show|give|how|what|fetch|get|find)\b/.test(s)) return "sql";
 
-function guessExtAndMime(file) {
-  const name = (file?.filename || "").toLowerCase();
-  const mime = (file?.mime || "").toLowerCase();
-  if (name.endsWith(".pdf") || mime.includes("pdf"))
-    return { ext: "pdf", mime: "application/pdf" };
-  if (name.endsWith(".docx") || mime.includes("wordprocessingml"))
-    return { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
-  if (name.endsWith(".txt") || mime.includes("text/plain"))
-    return { ext: "txt", mime: "text/plain" };
-  return { ext: "bin", mime: "application/octet-stream" };
+  // EXPERIENCE: asking about past work, projects, challenges
+  const experienceSignals = [
+    "you worked on", "you have worked", "what complex", "most complex", "challenging project",
+    "give me an example", "tell me about a time", "walk me through", "describe a situation",
+    "what did you do", "how did you handle", "what was your approach", "real example",
+    "in your experience", "in your project", "have you ever", "did you work on",
+    "optimization you did", "problem you solved", "issue you faced", "you implemented"
+  ];
+  if (experienceSignals.some(k => s.includes(k))) return "experience";
+
+  // BEHAVIORAL: HR/soft skill questions
+  const behavioralSignals = [
+    "tell me about yourself", "greatest strength", "greatest weakness", "why should we hire",
+    "where do you see yourself", "conflict with", "team situation", "disagreement", "how do you handle pressure",
+    "what motivates you", "why did you leave", "career goal", "self introduction", "introduce yourself"
+  ];
+  if (behavioralSignals.some(k => s.includes(k))) return "behavioral";
+
+  // DEBUG: troubleshooting, failure investigation
+  const debugSignals = [
+    "pipeline failed", "build failed", "error", "exception", "not working", "issue", "bug",
+    "troubleshoot", "debug", "root cause", "why is it failing", "what could go wrong",
+    "potential reason", "investigate", "fix this", "what went wrong"
+  ];
+  if (debugSignals.some(k => s.includes(k))) return "debug";
+
+  // QUICK: short/factual questions
+  if (s.length < 60 && /^(what|who|when|where|which|is|are|do|does|can|how many|how much)/.test(s)) return "quick";
+
+  // CONCEPT: default for explanation questions
+  return "concept";
 }
 
 function normalizeRoleType(roleType = "", roleText = "") {
   const rt = String(roleType || "").toLowerCase().trim();
   if (rt) return rt;
-
   const s = String(roleText || "").toLowerCase().trim();
   if (!s) return "";
   if (s.includes("qa") || s.includes("automation") || s.includes("test")) return "qa-automation";
@@ -384,25 +278,212 @@ function normalizeRoleType(roleType = "", roleText = "") {
   return "generic";
 }
 
+/* -------------------------------------------------------------------------- */
+/* DYNAMIC SYSTEM PROMPT BUILDER                                              */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Returns the RIGHT system prompt for the detected question type.
+ * Each template mirrors the ChatGPT 5.2 style seen in the screenshots.
+ */
+function buildDynamicSystemPrompt(questionType) {
+  switch (questionType) {
+
+    case "code":
+      return `You are a senior engineer being asked a coding question in a live interview.
+
+Always produce TWO blocks:
+
+**BLOCK 1 — Core Logic (simple, minimal)**
+\`\`\`[language]
+// Core algorithm only — what the interviewer initially asks
+// Inline comment on EVERY line explaining the step
+\`\`\`
+
+**BLOCK 2 — Complete Implementation (production-grade)**
+\`\`\`[language]
+// Full solution: edge cases, validation, main method
+// Inline comment on every non-trivial line
+\`\`\`
+
+**Input:** [sample input]
+**Output:** [sample output]
+
+**Time Complexity:** O(?) | **Space Complexity:** O(?)
+
+Then briefly explain the approach in 2–3 sentences — no padding.`;
+
+    case "sql":
+      return `You are a senior data engineer answering a SQL/query question in a live interview.
+
+Format:
+
+First, state your approach in 1 sentence — which technique you'll use and why.
+
+Then show the query:
+
+\`\`\`sql
+-- Comment explaining what each clause does
+SELECT ...
+FROM ...
+\`\`\`
+
+What this does:
+- [clause] → [what it achieves]
+- [clause] → [what it achieves]
+
+If multiple approaches exist (e.g. IS_CURRENT flag vs window function), show both with a one-line tradeoff note.
+Do not add filler. Be direct and practical.`;
+
+    case "experience":
+      return `You are a senior engineer sharing a real project story in a live interview.
+
+Open with ONE strong hook sentence — the result first (e.g. "One of the most complex X I worked on was Y — it was doing Z, and I reduced/improved/solved it by doing W.").
+
+Then say "Let me explain clearly." and break it down:
+
+**The original problem had:**
+- [specific issue 1]
+- [specific issue 2]
+- [specific issue 3]
+
+**What I identified:**
+1. [Root cause or key finding]
+2. [Second finding]
+
+**What I did:**
+- [Specific action + tool used]
+- [Specific action + why I chose that approach]
+- [Specific action + what it solved]
+
+**Result:**
+- [Metric: time/cost/reliability improvement]
+- [Business impact if relevant]
+
+Use real tools, real numbers, real decisions. Sound like someone who actually did this. No generic filler.`;
+
+    case "concept":
+      return `You are a senior engineer explaining a technical concept in a live interview.
+
+Format:
+
+Open with 1–2 sentences: direct definition + why it matters in production. Do NOT start with "Great question" or preamble.
+
+Then explain clearly — use plain language first, then go technical.
+
+If the concept has types or variants, explain each with:
+- What it does
+- When to use it
+- A concrete example (table, scenario, or diagram if helpful)
+
+Then pivot to your real-world experience:
+"In my projects, I used/handled this by..."
+- [Specific tool or approach you used]
+- [What problem it solved]
+- [Result or trade-off]
+
+End with a 1-sentence summary of the core insight.
+
+Do NOT use rigid section headers like "Short Answer:" or "Technical Depth:". Write naturally like a real explanation.`;
+
+    case "debug":
+      return `You are a senior engineer debugging a production issue in a live interview.
+
+Format:
+
+Open with 1 sentence identifying the most likely failure category (don't guess randomly — reason from context).
+
+Then walk through your investigation process step by step:
+
+**1️⃣ [First thing to check]**
+[Why you check this first]
+- [Specific action: command, log, tool]
+- [What you look for]
+
+**2️⃣ [Second investigation step]**
+[Reasoning]
+- [Specific action]
+- [What it reveals]
+
+**3️⃣ [Third step if relevant]**
+
+**Root cause categories to rule out:**
+- [Category 1]: [how to confirm]
+- [Category 2]: [how to confirm]
+
+**How I would fix it:**
+- [Fix 1]
+- [Fix 2]
+
+Sound methodical, not guessing. Reference real tools (git, logs, CI dashboards, DB explain plans, etc.).`;
+
+    case "behavioral":
+      return `You are answering a behavioral/HR interview question using the Situation–Action–Result structure.
+
+Format:
+
+**Situation:** [2–3 sentences — context, team size, what was at stake]
+
+**Action:**
+- [What I specifically did — not "we"]
+- [Tool or method I used]
+- [Why I chose that approach]
+- [How I handled pushback or challenge if any]
+
+**Result:**
+- [Measurable outcome]
+- [What I learned or improved]
+
+Keep it authentic, confident, and concise. First-person. No filler phrases like "That's a great question" or "I am a team player."`;
+
+    case "quick":
+      return `You are a senior engineer answering a quick technical question in an interview.
+
+Give a direct, confident answer in 2–4 sentences first.
+
+If useful, add a brief "In practice..." note with a real-world example or trade-off.
+
+Do not over-explain. Do not use headers or bullet points unless there are genuinely multiple distinct items to compare.`;
+
+    default:
+      return `You are a senior engineer answering in a live technical interview.
+
+Lead with a 1–2 sentence direct answer — no preamble.
+
+Then explain with appropriate depth based on what the question needs:
+- Concepts → definition + real-world use + your experience
+- Experience → story format with problem → action → result
+- Code → working code first, then explanation
+- Debug → investigation steps + root cause reasoning
+
+Use specific tools, real numbers, and practical trade-offs. Sound like someone who has actually done this work.`;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* RESUME EXTRACTION                                                          */
+/* -------------------------------------------------------------------------- */
+
+function guessExtAndMime(file) {
+  const name = (file?.filename || "").toLowerCase();
+  const mime = (file?.mime || "").toLowerCase();
+  if (name.endsWith(".pdf") || mime.includes("pdf")) return { ext: "pdf", mime: "application/pdf" };
+  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) return { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
+  if (name.endsWith(".txt") || mime.includes("text/plain")) return { ext: "txt", mime: "text/plain" };
+  return { ext: "bin", mime: "application/octet-stream" };
+}
+
 async function extractResumeText(file) {
   if (!file?.buffer || file.buffer.length < 20) return "";
   const { ext } = guessExtAndMime(file);
   if (ext === "txt") return file.buffer.toString("utf8");
   if (ext === "docx") {
-    try {
-      const out = await mammoth.extractRawText({ buffer: file.buffer });
-      return String(out?.value || "");
-    } catch (e) {
-      return `[DOCX error during extraction] ${e?.message || ""}`;
-    }
+    try { const out = await mammoth.extractRawText({ buffer: file.buffer }); return String(out?.value || ""); }
+    catch (e) { return `[DOCX error] ${e?.message || ""}`; }
   }
   if (ext === "pdf") {
-    try {
-      const out = await pdfParse(file.buffer);
-      return String(out?.text || "");
-    } catch (e) {
-      return `[PDF error during extraction] ${e?.message || ""}`;
-    }
+    try { const out = await pdfParse(file.buffer); return String(out?.text || ""); }
+    catch (e) { return `[PDF error] ${e?.message || ""}`; }
   }
   return file.buffer.toString("utf8");
 }
@@ -419,16 +500,10 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "http://localhost");
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
-    /* ------------------------------------------------------- */
-    /* HEALTH                                                  */
-    /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
     }
 
-    /* ------------------------------------------------------- */
-    /* ENV CHECK                                               */
-    /* ------------------------------------------------------- */
     if (req.method === "GET" && path === "envcheck") {
       return res.status(200).json({
         hasSUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -440,9 +515,6 @@ export default async function handler(req, res) {
       });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — SIGNUP                                           */
-    /* ------------------------------------------------------- */
     if (path === "auth/signup") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const { name, phone, email, password } = await readJson(req);
@@ -451,16 +523,10 @@ export default async function handler(req, res) {
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
       const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } });
       if (error) return res.status(400).json({ error: error.message });
-      await supabaseAdmin().from("user_profiles").insert({
-        id: data?.user?.id, name, phone: phone || "", email,
-        approved: false, credits: 0, created_at: new Date().toISOString()
-      });
+      await supabaseAdmin().from("user_profiles").insert({ id: data?.user?.id, name, phone: phone || "", email, approved: false, credits: 0, created_at: new Date().toISOString() });
       return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — LOGIN                                            */
-    /* ------------------------------------------------------- */
     if (path === "auth/login") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const { email, password } = await readJson(req);
@@ -477,21 +543,9 @@ export default async function handler(req, res) {
       if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
       const profile = await supabaseAdmin().from("user_profiles").select("approved").eq("id", user.id).single();
       if (!profile.data?.approved) return res.status(403).json({ error: "Admin has not approved your account yet" });
-      return res.json({
-        ok: true,
-        session: {
-          is_admin: false,
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,
-          expires_at: data.session.expires_at,
-          user: { id: user.id, email: user.email }
-        }
-      });
+      return res.json({ ok: true, session: { is_admin: false, access_token: data.session.access_token, refresh_token: data.session.refresh_token, expires_at: data.session.expires_at, user: { id: user.id, email: user.email } } });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — REFRESH TOKEN                                    */
-    /* ------------------------------------------------------- */
     if (path === "auth/refresh") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const { refresh_token } = await readJson(req);
@@ -499,19 +553,9 @@ export default async function handler(req, res) {
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.refreshSession({ refresh_token });
       if (error) return res.status(401).json({ error: error.message });
-      return res.json({
-        ok: true,
-        session: {
-          access_token: data.session.access_token,
-          refresh_token: data.session.refresh_token,
-          expires_at: data.session.expires_at
-        }
-      });
+      return res.json({ ok: true, session: { access_token: data.session.access_token, refresh_token: data.session.refresh_token, expires_at: data.session.expires_at } });
     }
 
-    /* ------------------------------------------------------- */
-    /* AUTH — FORGOT PASSWORD                                  */
-    /* ------------------------------------------------------- */
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -519,24 +563,14 @@ export default async function handler(req, res) {
       return res.json({ ok: true });
     }
 
-    /* ------------------------------------------------------- */
-    /* USER PROFILE                                            */
-    /* ------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const profile = await supabaseAdmin()
-        .from("user_profiles")
-        .select("id,name,email,phone,approved,credits,created_at")
-        .eq("id", gate.user.id)
-        .single();
+      const profile = await supabaseAdmin().from("user_profiles").select("id,name,email,phone,approved,credits,created_at").eq("id", gate.user.id).single();
       if (!profile.data) return res.status(404).json({ error: "Profile not found" });
       return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
     }
 
-    /* ------------------------------------------------------- */
-    /* USER — CREDIT DEDUCTION                                 */
-    /* ------------------------------------------------------- */
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const gate = await getUserFromBearer(req);
@@ -554,9 +588,6 @@ export default async function handler(req, res) {
       return res.json({ ok: remaining > 0, remaining });
     }
 
-    /* ------------------------------------------------------- */
-    /* REALTIME — CLIENT SECRET                                */
-    /* ------------------------------------------------------- */
     if (path === "realtime/client_secret") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const gate = await getUserFromBearer(req);
@@ -573,10 +604,7 @@ export default async function handler(req, res) {
           audio: {
             input: {
               format: { type: "audio/pcm", rate: 24000 },
-              transcription: {
-                model: "gpt-4o-mini-transcribe", language: "en",
-                prompt: "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit."
-              },
+              transcription: { model: "gpt-4o-mini-transcribe", language: "en", prompt: "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit." },
               noise_reduction: { type: "far_field" },
               turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 350 }
             }
@@ -593,9 +621,6 @@ export default async function handler(req, res) {
       return res.json({ value: out.value, expires_at: out.expires_at || 0 });
     }
 
-    /* ------------------------------------------------------- */
-    /* DEEPGRAM — API KEY                                      */
-    /* ------------------------------------------------------- */
     if (path === "deepgram/key") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const gate = await getUserFromBearer(req);
@@ -608,9 +633,6 @@ export default async function handler(req, res) {
       return res.json({ key: apiKey });
     }
 
-    /* ------------------------------------------------------- */
-    /* RESUME EXTRACTION                                       */
-    /* ------------------------------------------------------- */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const { file } = await readMultipart(req);
@@ -619,9 +641,6 @@ export default async function handler(req, res) {
       return res.json({ text: String(text || "") });
     }
 
-    /* ------------------------------------------------------- */
-    /* TRANSCRIBE (mic/system audio)                           */
-    /* ------------------------------------------------------- */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
       const { fields, file } = await readMultipart(req);
@@ -630,16 +649,10 @@ export default async function handler(req, res) {
         const filename = file.filename || "audio.webm";
         const mime = (file.mime || "audio/webm").split(";")[0];
         const audioFile = await toFile(file.buffer, filename, { type: mime });
-        const basePrompt =
-          "Transcribe EXACTLY what is spoken in English. " +
-          "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
-          "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
+        const basePrompt = "Transcribe EXACTLY what is spoken in English. Do NOT translate. Do NOT add filler words. Do NOT invent speakers. Do NOT repeat earlier sentences. If silence/no speech, return empty.";
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
         const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
-        const out = await openai.audio.transcriptions.create({
-          file: audioFile, model: "gpt-4o-transcribe", language: "en",
-          temperature: 0, response_format: "json", prompt: finalPrompt
-        });
+        const out = await openai.audio.transcriptions.create({ file: audioFile, model: "gpt-4o-transcribe", language: "en", temperature: 0, response_format: "json", prompt: finalPrompt });
         return res.json({ text: out.text || "" });
       } catch (e) {
         const status = e?.status || e?.response?.status || 500;
@@ -648,7 +661,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — HIGH-QUALITY PERSONALIZED RESPONSES         */
+    /* CHAT SEND — DYNAMIC TEMPLATE ENGINE                     */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -656,7 +669,7 @@ export default async function handler(req, res) {
       const { prompt, instructions, resumeText, history, sessionId, roleType, roleText, yearsExp } = await readJson(req);
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // Send headers immediately to eliminate blank-screen wait
+      // Stream headers
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -666,150 +679,52 @@ export default async function handler(req, res) {
 
       const messages = [];
 
-      // ============================================================
-      // SYSTEM PROMPTS — UPGRADED FOR PERSONALIZED DEPTH
-      // ============================================================
+      // ── STEP 1: Classify the question to pick the right response template ──
+      const questionType = classifyQuestion(prompt);
 
-            // ============================================================
-      // SYSTEM PROMPTS — INTERVIEW ASSISTANT LAYERING (UPDATED)
-      // ============================================================
-
-      const INTERVIEW_BASE_SYSTEM = `
-You are a senior engineer answering in a live technical interview.
-
-Always start with a clear 1–2 line direct answer.
-Do not begin with theory.
-
-If question is:
-- Coding → provide code first with inline comments, then explain.
-- Debugging → start with root cause thinking.
-- Behavioral → use Situation–Action–Result.
-- Otherwise → follow default structure below.
-
-Default Structure:
-
-Short Answer:
-
-Context:
-
-What I Did:
-- Specific action
-- Tools used
-- Why I chose that approach
-- What problem it solved
-
-Technical Depth:
-- Design decisions
-- Trade-offs
-- Alternatives
-
-Production Considerations:
-- Scalability
-- Failure handling
-- Observability
-- Security
-
-Impact:
-- Measurable results
-
-Improvement:
-- What I would optimize further
-`.trim();
-
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
-
-**BLOCK 1: Simple Logic (Core algorithm only)**
-\`\`\`[language]
-// Core logic - what interviewer initially asks for
-// Inline comment on EVERY line explaining the step
-
-[Only essential algorithm/logic - minimal, focused]
-\`\`\`
-
-**BLOCK 2: Complete Implementation (If they ask for full solution)**
-\`\`\`[language]
-// Complete solution with edge cases
-// Inline comment on every non-trivial line
-
-[Full implementation with validation, edge cases, main method]
-\`\`\`
-
-**Input:** [sample]
-**Output:** [sample]`.trim();
-
-      // Universal language + task detection
-      const forceCode =
-        /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|sql|bash|code|program)\b/i.test(prompt) &&
-        /\b(count|find|occurrence|write|implement|create|solve|build|show|give)\b/i.test(prompt);
-
-      const codeMode = forceCode || isCodeQuestion(prompt);
-
+      // ── STEP 2: Apply the dynamic system prompt for this question type ──
       messages.push({
         role: "system",
-        content: codeMode ? CODE_FIRST_SYSTEM : INTERVIEW_BASE_SYSTEM
+        content: buildDynamicSystemPrompt(questionType)
       });
 
-      // Optional caller instructions (general mode/sales mode, etc.)
-      if (!codeMode && instructions?.trim()) {
+      // ── STEP 3: Optional caller instructions (only for non-code/sql) ──
+      const isStructuredType = questionType === "code" || questionType === "sql";
+      if (!isStructuredType && instructions?.trim()) {
         messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
       }
 
-      // Role overlay (from UI role textbox)
+      // ── STEP 4: Role-specific overlay ──
       const normalizedRoleType = normalizeRoleType(roleType, roleText);
-      if (!codeMode) {
-        if (normalizedRoleType === "java-backend") {
-          messages.push({
-            role: "system",
-            content: "Interview focus: Java backend / Spring Boot / microservices. Prioritize Spring ecosystem, REST APIs, Kafka, Redis caching, DB indexing/tuning, thread pools, performance, resilience (timeouts/circuit breaker), and production debugging."
-          });
-        } else if (normalizedRoleType === "data-engineer") {
-          messages.push({
-            role: "system",
-            content: "Interview focus: Data Engineering. Prioritize ETL pipelines, ingestion, partitioning, parallel processing, data quality checks, orchestration, warehouse optimization (Snowflake/Databricks), scaling, and batch vs streaming trade-offs."
-          });
-        } else if (normalizedRoleType === "qa-automation") {
-          messages.push({
-            role: "system",
-            content: "Interview focus: QA Automation. Prioritize framework design, UI/API automation strategy, CI/CD integration, flaky test reduction, environment issues, test data management, coverage metrics, and release validation."
-          });
-        } else if (normalizedRoleType === "cloud-architect") {
-          messages.push({
-            role: "system",
-            content: "Interview focus: Cloud / Solution Architecture. Prioritize AWS/Azure architecture, scalability, IAM/security, high availability, observability, cost-performance trade-offs, and migration decisions."
-          });
-        } else if (normalizedRoleType === "genai") {
-          messages.push({
-            role: "system",
-            content: "Interview focus: GenAI / LLM systems. Prioritize RAG architecture, embeddings, retrieval quality, latency, prompt orchestration, evaluation, hallucination controls, and production reliability."
-          });
+      if (!isStructuredType) {
+        const roleOverlays = {
+          "java-backend": "Interview focus: Java backend / Spring Boot / microservices. Prioritize Spring ecosystem, REST APIs, Kafka, Redis caching, DB indexing, thread pools, performance, resilience (timeouts/circuit breaker), and production debugging.",
+          "data-engineer": "Interview focus: Data Engineering. Prioritize ETL pipelines, ingestion, partitioning, parallel processing, data quality, orchestration, warehouse optimization (Snowflake/Databricks), batch vs streaming trade-offs.",
+          "qa-automation": "Interview focus: QA Automation. Prioritize framework design, UI/API automation strategy, CI/CD integration, flaky test reduction, environment issues, test data management, coverage metrics, release validation.",
+          "cloud-architect": "Interview focus: Cloud / Solution Architecture. Prioritize AWS/Azure architecture, scalability, IAM/security, high availability, observability, cost-performance trade-offs, migration decisions.",
+          "genai": "Interview focus: GenAI / LLM systems. Prioritize RAG architecture, embeddings, retrieval quality, latency, prompt orchestration, evaluation, hallucination controls, and production reliability."
+        };
+        if (roleOverlays[normalizedRoleType]) {
+          messages.push({ role: "system", content: roleOverlays[normalizedRoleType] });
         }
       }
 
-      // Years of experience context (from UI)
+      // ── STEP 5: Years of experience context ──
       const yrs = Number(yearsExp || 0);
-      if (!codeMode && Number.isFinite(yrs) && yrs > 0) {
-        messages.push({
-          role: "system",
-          content: `Candidate positioning: answer at the depth and ownership expected from a ${yrs}-year experienced engineer. Sound senior enough for that level.`
-        });
+      if (!isStructuredType && Number.isFinite(yrs) && yrs > 0) {
+        messages.push({ role: "system", content: `Candidate positioning: answer at the depth and ownership expected from a ${yrs}-year experienced engineer.` });
       }
 
-      // Raw role text hint (free text from UI)
-      if (!codeMode && String(roleText || "").trim()) {
-        messages.push({
-          role: "system",
-          content: `Target interview role (free text): ${String(roleText).trim().slice(0, 120)}. Bias examples and terminology toward this role when relevant.`
-        });
+      // ── STEP 6: Free-text role hint ──
+      if (!isStructuredType && String(roleText || "").trim()) {
+        messages.push({ role: "system", content: `Target interview role: ${String(roleText).trim().slice(0, 120)}. Bias examples toward this role when relevant.` });
       }
 
-      // Resume context — personalized answers
+      // ── STEP 7: Resume personalization ──
       let resumeSummary = "";
-
       if (resumeText?.trim()) {
         resumeSummary = await getResumeSummary(resumeText);
-        if (sessionId) {
-          SESSION_CACHE.set(sessionId, { resumeSummary });
-        }
+        if (sessionId) SESSION_CACHE.set(sessionId, { resumeSummary });
       } else if (sessionId && SESSION_CACHE.has(sessionId)) {
         resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
       }
@@ -823,40 +738,34 @@ CANDIDATE RESUME CONTEXT
 ${resumeSummary}
 ══════════════════════════════════════════
 
-Use this resume context whenever relevant:
-- Prefer candidate's actual companies, projects, tools, and achievements.
-- Use exact technologies mentioned in the resume (no random substitutions).
-- Use metrics/numbers from the resume if they fit the answer.
-- If the question is unrelated to resume details, answer generically but still senior-level.
-- Do NOT invent companies, projects, or achievements not present in the resume.`
+Use this resume when the question relates to the candidate's experience:
+- Use their actual companies, projects, tools, and achievements.
+- Use exact technologies from the resume — no substitutions.
+- Use real metrics/numbers from the resume if they fit.
+- If the question is unrelated to resume, answer generically but senior-level.
+- Do NOT invent companies, projects, or achievements not in the resume.`
         });
       } else {
-        messages.push({
-          role: "system",
-          content: "No resume provided. Give a senior-level interview answer with practical production examples, tools, trade-offs, and measurable impact where possible."
-        });
+        messages.push({ role: "system", content: "No resume provided. Give senior-level answers with practical production examples, real tools, trade-offs, and measurable impact." });
       }
 
+      // ── STEP 8: Conversation history ──
       const hist = safeHistory(history);
-
-      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+      if (!isStructuredType && hist.length && isFollowUpPrompt(String(prompt || ""))) {
         const ctx = buildContextPack(hist);
         if (ctx) messages.push({ role: "system", content: ctx });
       }
-
       for (const m of hist) messages.push(m);
 
-      messages.push({
-        role: "user",
-        content: String(prompt).slice(0, 7000).trim()
-      });
+      // ── STEP 9: User prompt ──
+      messages.push({ role: "user", content: String(prompt).slice(0, 7000).trim() });
 
-      // gpt-4o = same model ChatGPT uses — this is the real fix for depth/quality gap
+      // ── STEP 10: Stream response ──
       const stream = await openai.chat.completions.create({
         model: "gpt-4o",
         stream: true,
-        temperature: 0.3,
-        max_tokens: 1600,
+        temperature: questionType === "code" || questionType === "sql" ? 0.1 : 0.35,
+        max_tokens: questionType === "experience" ? 1800 : 1600,
         messages
       });
 
@@ -870,27 +779,15 @@ Use this resume context whenever relevant:
       return res.end();
     }
 
-    /* ------------------------------------------------------- */
-    /* CHAT RESET                                              */
-    /* ------------------------------------------------------- */
     if (path === "chat/reset") return res.json({ ok: true });
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — USER LIST                                       */
-    /* ------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const { data } = await supabaseAdmin()
-        .from("user_profiles")
-        .select("id,name,email,phone,approved,credits,created_at")
-        .order("created_at", { ascending: false });
+      const { data } = await supabaseAdmin().from("user_profiles").select("id,name,email,phone,approved,credits,created_at").order("created_at", { ascending: false });
       return res.json({ users: data });
     }
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — APPROVE USER                                    */
-    /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -899,9 +796,6 @@ Use this resume context whenever relevant:
       return res.json({ ok: true, user: data });
     }
 
-    /* ------------------------------------------------------- */
-    /* ADMIN — UPDATE CREDITS                                  */
-    /* ------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
@@ -914,6 +808,7 @@ Use this resume context whenever relevant:
     }
 
     return res.status(404).json({ error: `No route: /api/${path}` });
+
   } catch (err) {
     const msg = String(err?.message || err);
     if (msg.toLowerCase().includes("unexpected end of form")) {
