@@ -872,7 +872,7 @@ MANDATORY FORMAT (follow exactly):
 
 Q: [restate the question]
 
-**[One sharp, senior-level summary answer — name the exact concepts, frameworks, or fundamentals. Sound like you've shipped this in prod.]**
+**[Give me a one line, senior-level interview answer explaining by listing extract concepts or framework or core fundamentals on how to handle this scenario using best practice]**
 
 ---
 
