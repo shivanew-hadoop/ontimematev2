@@ -59,34 +59,54 @@ function readJson(req) {
   });
 }
 
-
 function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
-// Resume summary: summarize once, reuse many times (cuts tokens + latency)
+/* -------------------------------------------------------------------------- */
+/* RESUME SUMMARY — FIXED                                                      */
+/* Preserves exact project names, client names, tools, and measurable wins.   */
+/* Old version compressed everything into keywords → model had nothing to cite */
+/* -------------------------------------------------------------------------- */
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
 
-  // If already short, keep it (hard cap)
+  // If already short enough, use it directly
   if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
 
   const key = sha256(resumeText);
   const cached = RESUME_SUMMARY_CACHE.get(key);
   if (cached) return cached;
 
+  // FIX: Extract specifics, NOT a keyword summary.
+  // The old prompt produced "Core Skills: Selenium, TestNG..." which gives the model
+  // zero ammunition to answer "how did YOU handle X" — it falls back to generic answers.
+  // This prompt preserves the exact details the model needs to ground answers in the candidate's reality.
   const summaryPrompt = `
-Create a SHORT interview-ready resume summary from the content.
-Rules:
-- Output ONLY in Markdown.
-- Sections MUST be exactly:
-  **Role Snapshot:** (1 line)
-  **Core Skills:** (8–12 comma-separated keywords)
-  **Key Projects:** (3 bullets; each starts with **project keyword**)
-  **Impact:** (3 bullets with numbers if present; never invent)
-- Keep under 1200 characters.
-- If a detail is missing, skip it. Do NOT assume.
+Extract a precise interview-ready technical profile from this resume.
+CRITICAL RULES:
+- Preserve EXACT client names, project names, tools, versions, and measurable outcomes verbatim.
+- DO NOT generalize. "Used Selenium" is useless. "Built ThreadLocal WebDriver + TestNG RetryAnalyzer hybrid framework for Citizens Bank CPM project" is correct.
+- DO NOT invent anything. Extract only what is explicitly written.
+- If numbers are present (%, ms, count), keep them exactly.
+
+Output ONLY in this format — no other text:
+
+**Role:** [Job title] | [Total years of experience] | [Primary domain: Banking/Healthcare/Payments/etc]
+
+**Projects:**
+- [Client name] ([dates]): [Role] — [Specific tools/frameworks used] — [Specific responsibility or achievement, verbatim if measurable]
+(repeat for every project listed, max 5)
+
+**Technical Depth:**
+- [Tool/Framework]: [Exact usage — not "used X" but HOW it was used, what problem it solved, what was built with it]
+(6–10 entries, only tools explicitly described with context)
+
+**Quantified Results:** [Only real numbers/metrics from resume. Skip this section entirely if none found.]
+
+Keep total output under 2000 characters. Never invent. Never generalize.
+
 Resume:
 ${resumeText.slice(0, 20000)}
 `.trim();
@@ -95,9 +115,9 @@ ${resumeText.slice(0, 20000)}
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0,
-      max_tokens: 260,
+      max_tokens: 420, // was 260 — not enough for structured project extraction with specifics
       messages: [
-        { role: "system", content: "Extract facts only. Do not add assumptions." },
+        { role: "system", content: "Extract facts only. Preserve exact names, tools, numbers. Do not generalize or add assumptions." },
         { role: "user", content: summaryPrompt }
       ]
     });
@@ -107,9 +127,27 @@ ${resumeText.slice(0, 20000)}
     RESUME_SUMMARY_CACHE.set(key, finalSummary);
     return finalSummary;
   } catch {
-    // If summarization fails, fall back to a short slice.
     return resumeText.slice(0, 2500);
   }
+}
+
+/* -------------------------------------------------------------------------- */
+/* EXTRACT PROJECT NAMES — HELPER FOR RESUME INJECTION                        */
+/* Pulls client/project names for explicit reinforcement in the system prompt  */
+/* -------------------------------------------------------------------------- */
+function extractProjectNames(summary = "") {
+  const matches = summary.match(/[-•]\s+([A-Z][A-Za-z0-9\s&]+?)\s+\(/g) || [];
+  const names = matches
+    .map(m => m.replace(/[-•\s(]/g, "").trim())
+    .filter(n => n.length > 2)
+    .slice(0, 5);
+
+  if (!names.length) {
+    // Fallback: look for bold project-like patterns
+    const bold = summary.match(/\*\*([^*]+)\*\*/g) || [];
+    return bold.map(b => b.replace(/\*\*/g, "").trim()).slice(0, 5).join(", ") || "projects in resume";
+  }
+  return names.join(", ");
 }
 
 /**
@@ -129,12 +167,11 @@ function readMultipart(req) {
 
     const bb = Busboy({
       headers,
-      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
+      limits: { fileSize: 25 * 1024 * 1024 } // 25MB
     });
 
     const fields = {};
     let file = null;
-
     let fileDone = Promise.resolve();
 
     bb.on("field", (name, val) => (fields[name] = val));
@@ -205,83 +242,47 @@ async function getUserFromBearer(req) {
   return { ok: true, user: data.user, access_token: token };
 }
 
-// FIX 1 — LATENCY: Reduced from 18→8 messages, 2000→1200 chars per message
-// This cuts ~60% of history token overhead before the stream even starts
 function safeHistory(history) {
   if (!Array.isArray(history)) return [];
   const out = [];
-  for (const m of history.slice(-8)) {          // was -18
+  for (const m of history.slice(-8)) {
     const role = m?.role;
     const content = typeof m?.content === "string" ? m.content : "";
     if ((role === "user" || role === "assistant") && content.trim()) {
-      out.push({ role, content: content.slice(0, 1200) });  // was 2000
+      out.push({ role, content: content.slice(0, 1200) });
     }
   }
   return out;
 }
 
 /* -------------------------------------------------------------------------- */
-/* LIGHTWEIGHT CODE-INTENT DETECTION (ADDED)                                  */
-/* - DOES NOT rely on "java/python" keywords                                   */
-/* - Explanation intent overrides language mentions like "in Java"             */
+/* LIGHTWEIGHT CODE-INTENT DETECTION                                          */
 /* -------------------------------------------------------------------------- */
 
 function looksLikeCodeText(s = "") {
-  // quick signals: braces/semicolons/common code tokens OR fenced blocks
   if (!s) return false;
   const t = String(s);
-
   if (t.includes("```")) return true;
-
   const tokenHits =
     (t.match(/[{}();]/g)?.length || 0) +
     (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
-
   return tokenHits >= 6;
 }
-
-// -------------------------------------------------------
-// QUESTION INTENT DETECTION (FIXED / PRACTICAL)
-// -------------------------------------------------------
-
-
-
-// -------------------------------------------------------
-// FOLLOW-UP DETECTION + CONTEXT PACK (ADDED)
-// - Improves continuity across 8–9 Q&As without extra model calls
-// -------------------------------------------------------
 
 function isFollowUpPrompt(q = "") {
   const s = normalizeQ(q);
   if (!s) return false;
 
-  // short questions with references are usually follow-ups
   const followTokens = [
-    "then",
-    "so",
-    "but",
-    "that",
-    "this",
-    "it",
-    "same",
-    "why",
-    "how come",
-    "as you said",
-    "you said",
-    "earlier",
-    "previous",
-    "follow up",
-    "based on that"
+    "then", "so", "but", "that", "this", "it", "same", "why", "how come",
+    "as you said", "you said", "earlier", "previous", "follow up", "based on that"
   ];
 
   const hasRef = followTokens.some(t => s.includes(t));
   const isShort = s.length <= 160;
-
   return hasRef || isShort;
 }
 
-// FIX 2 — LATENCY + QUALITY: Reduced context pack from 9→5 pairs, 240→180 chars per Q, 260→200 chars per A
-// Tighter context = fewer tokens = faster first byte, model focuses on relevant context
 function buildContextPack(hist = []) {
   const pairs = [];
   let lastUser = null;
@@ -295,13 +296,13 @@ function buildContextPack(hist = []) {
     }
   }
 
-  const tail = pairs.slice(-5);  // was -9
+  const tail = pairs.slice(-5);
   if (!tail.length) return "";
 
   const lines = ["PRIOR CONTEXT (reference only if question is a follow-up):"];
   tail.forEach((p, i) => {
-    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);  // was 240
-    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);  // was 260
+    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);
+    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);
     lines.push(`${i + 1}) Q: ${q}`);
     lines.push(`   A: ${a}`);
   });
@@ -319,35 +320,14 @@ function normalizeQ(q = "") {
 function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // Strong explanation patterns (no code needed)
   const explainStarts = [
-    "explain",
-    "what is",
-    "how does",
-    "why",
-    "describe",
-    "define",
-    "difference between",
-    "compare",
-    "advantages",
-    "disadvantages",
-    "pros and cons"
+    "explain", "what is", "how does", "why", "describe", "define",
+    "difference between", "compare", "advantages", "disadvantages", "pros and cons"
   ];
 
-  // Common deep-dive / theory topics (usually explanation)
   const explainTopics = [
-    "architecture",
-    "design",
-    "lifecycle",
-    "internals",
-    "jvm",
-    "garbage collector",
-    "class loader",
-    "multithreading",
-    "deadlock",
-    "solid",
-    "oops",
-    "normalization"
+    "architecture", "design", "lifecycle", "internals", "jvm", "garbage collector",
+    "class loader", "multithreading", "deadlock", "solid", "oops", "normalization"
   ];
 
   return (
@@ -359,84 +339,38 @@ function isExplanationQuestion(q = "") {
 function isCodeQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // If user explicitly wants code, always treat as code
   const explicitCode = [
-    "code",
-    "program",
-    "snippet",
-    "implementation",
-    "source code",
-    "write a function",
-    "write a program",
-    "give me code",
-    "show me code"
+    "code", "program", "snippet", "implementation", "source code",
+    "write a function", "write a program", "give me code", "show me code"
   ];
 
-  // Task verbs that strongly indicate coding even without "code" word
   const taskVerbs = [
-    "write",
-    "implement",
-    "create",
-    "build",
-    "develop",
-    "program",
-    "solve",
-    "print",
-    "return",
-    "calculate",
-    "count",
-    "find",
-    "check",
-    "validate",
-    "reverse",
-    "sort",
-    "remove",
-    "replace",
-    "convert"
+    "write", "implement", "create", "build", "develop", "program", "solve",
+    "print", "return", "calculate", "count", "find", "check", "validate",
+    "reverse", "sort", "remove", "replace", "convert"
   ];
 
-  // Classic coding-problem keywords
   const algoKeywords = [
-    "vowel",
-    "vowels",
-    "palindrome",
-    "anagram",
-    "fibonacci",
-    "prime",
-    "factorial",
-    "string",
-    "array",
-    "hashmap",
-    "hash set",
-    "linked list",
-    "stack",
-    "queue",
-    "binary search",
-    "time complexity",
-    "space complexity"
+    "vowel", "vowels", "palindrome", "anagram", "fibonacci", "prime", "factorial",
+    "string", "array", "hashmap", "hash set", "linked list", "stack", "queue",
+    "binary search", "time complexity", "space complexity"
   ];
 
-  // Code-looking characters/signals
   const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
 
   const wantsExample = /\b(example|sample|demo)\b/.test(s);
   const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
 
   let score = 0;
-
   if (explicitCode.some(x => s.includes(x))) score += 4;
   if (codeSignals.some(x => s.includes(x))) score += 4;
-
   if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
   if (algoKeywords.some(k => s.includes(k))) score += 2;
-
   if (wantsExample) score += 1;
-  if (mentionsLanguage) score += 1; // LOW weight on purpose
+  if (mentionsLanguage) score += 1;
 
-  // Threshold: >=3 => code-intent
   return score >= 3;
 }
-
 
 /* -------------------------------------------------------------------------- */
 /* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
@@ -689,7 +623,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* REALTIME — CLIENT SECRET (NEW)                           */
+    /* REALTIME — CLIENT SECRET                                */
     /* ------------------------------------------------------- */
     if (path === "realtime/client_secret") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -697,7 +631,6 @@ export default async function handler(req, res) {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      // basic credit gate (don't start ASR if no credits)
       const { data: row } = await supabaseAdmin()
         .from("user_profiles")
         .select("credits")
@@ -708,7 +641,7 @@ export default async function handler(req, res) {
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
 
       const body = await readJson(req).catch(() => ({}));
-      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
+      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600)));
 
       const payload = {
         expires_after: { anchor: "created_at", seconds: ttl },
@@ -763,7 +696,6 @@ export default async function handler(req, res) {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
 
-      // Check if user has credits
       const { data: row } = await supabaseAdmin()
         .from("user_profiles")
         .select("credits")
@@ -773,7 +705,6 @@ export default async function handler(req, res) {
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
 
-      // Return Deepgram API key
       const apiKey = process.env.DEEPGRAM_API_KEY;
       if (!apiKey) {
         return res.status(500).json({ error: "Deepgram API key not configured" });
@@ -815,10 +746,7 @@ export default async function handler(req, res) {
           "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
 
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(
-          0,
-          800
-        );
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
 
         const out = await openai.audio.transcriptions.create({
           file: audioFile,
@@ -837,7 +765,7 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — OPTIMIZED FOR LATENCY + QUALITY             */
+    /* CHAT SEND                                               */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
@@ -846,9 +774,7 @@ export default async function handler(req, res) {
 
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
-      // This sends the HTTP 200 + headers to the client right away,
-      // eliminating the "blank screen" wait while we build messages.
+      // Flush headers immediately to eliminate blank-screen latency
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -856,72 +782,83 @@ export default async function handler(req, res) {
       res.flushHeaders?.();
       res.write("\u200B");
 
-      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
-      // All message construction is sync so we reach openai.create() as fast as possible
       const messages = [];
 
       // ============================================================
-      // SYSTEM PROMPTS
+      // BASE SYSTEM — FIXED
+      // Root cause of generic answers: old prompt said "if resume provided → use it"
+      // which the model treated as optional. New prompt makes it NON-NEGOTIABLE with
+      // explicit rules and violation labels.
       // ============================================================
-
-      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
-      // Old framing forced generic invented answers. New framing works with OR without resume.
       const baseSystem = `
-You are a senior engineer with 10+ years of production experience. 
-You answer interview questions the way a real engineer does — from actual shipped systems, not documentation.
+You are a senior QA/SDET engineer with 10+ years of production experience being interviewed.
+You answer from YOUR OWN shipped experience — not from documentation, not from theory.
 
-═══════════════════════════════════════════
-SECTION 1 — DIRECT ANSWER (always first)
-═══════════════════════════════════════════
-Q: [restate the question exactly]
+═══════════════════════════════════════════════════════════
+SECTION 1 — YOUR DIRECT ANSWER (always first, always sharp)
+═══════════════════════════════════════════════════════════
+Q: [restate the question exactly as asked]
 
-**[2–3 sentence senior-level answer. Name every concept, tool, or framework you would actually use. 
-Sound like you've already solved this in production. No filler. No "great question". 
-If resume context is provided, weave in the candidate's actual stack and domain.]**
+**[2–3 sentences. Answer as if YOU personally solved this. Name every specific tool, technique,
+framework, or pattern you actually used. Reference your domain (banking, healthcare, payments, etc.).
+MANDATORY RULE: If candidate background is provided below, your answer MUST name their actual
+client, project, or tool stack. Saying "In our project" without naming it = RULE VIOLATION.]**
 
-═══════════════════════════════════════════
+═══════════════════════════════════════════════════════════
 SECTION 2 — CONCEPT BREAKDOWN
-═══════════════════════════════════════════
-Take EVERY concept or framework named in Section 1 and break each one down.
-One heading per concept. 4–5 bullets each. No skipping.
+═══════════════════════════════════════════════════════════
+For EVERY distinct concept, tool, or technique named in Section 1 — write one ## block.
+Minimum 4 bullets. Never merge two concepts into one block. Never skip a concept.
 
-## [Concept Name exactly as mentioned in Section 1]
-- **What it solves in prod**: [the actual failure mode or bottleneck this prevents — not a definition]
-- **How we used it**: [If resume context is provided → tie directly to candidate's project/stack. 
-  If no resume → use a real industry example: "At Uber's dispatch service..." / "Netflix chaos engineering does X..."]
-- **Implementation detail**: [specific config value, design decision, or trade-off you made and why]
-- **Outcome**: [measurable — "cut p99 from 1.2s to 180ms", "eliminated 3AM pages for 6 months", "handled 10x Black Friday spike"]
-- [actual code snippet, CLI command, or config block — not pseudocode]
+## [Exact concept name from Section 1]
+- **The failure it prevented**: [specific production failure mode — not a textbook definition.
+  Example: "WebDriverWait replaced Thread.sleep because our Angular login had async token validation
+  taking 200–800ms — sleep was either too short (flaky) or too long (slow suite)"]
+- **What I did in [Client/Project name]**: [MANDATORY if candidate background provided — cite their
+  exact client, project name, and tool. Example: "In the Citizens Bank CPM project, I implemented
+  ThreadLocal<WebDriver> so each TestNG parallel thread got its own isolated driver instance —
+  without this, 3 threads sharing one driver caused random NoSuchSessionException failures."]
+  [If NO resume context → use a named real-world reference: "At a fintech running 400+ nightly
+  Selenium tests, we saw 12% flaky rate traced to..."]
+- **Exact implementation**: [specific class, annotation, config value, or design decision.
+  Why THIS approach over the obvious alternative.]
+- **Outcome**: [hard number or operational result REQUIRED.
+  "Flaky rate dropped from 12% to 1.8%." / "Zero NoSuchSession failures across 6 parallel threads."
+  Saying "improved stability" without a number = RULE VIOLATION.]
+- \`[copy-pasteable code snippet, exact CLI command, or config — inline comment on every non-obvious line]\`
 
-[Repeat ## block for EVERY concept listed in Section 1 — do not merge or skip any]
+[Repeat ## block for every concept in Section 1. Zero exceptions.]
 
-═══════════════════════════════════════════
-SECTION 3 — PRODUCTION EVIDENCE
-═══════════════════════════════════════════
-Pick the single most important concept. Prove it with a war story.
+═══════════════════════════════════════════════════════════
+SECTION 3 — WAR STORY (the one fix that mattered most)
+═══════════════════════════════════════════════════════════
+Pick the single most impactful concept. Prove it happened.
 
-**System**: [what was running — microservice, monolith, data pipeline, mobile backend]
-**Scale**: [RPS, users, data volume, team size — be specific]
-**Problem**: [what was actually breaking or about to break]
-**Fix**: [exact steps taken — tools chosen, configs set, rollout strategy]
+**Project**: [MANDATORY if resume provided → exact client + project name. No resume → named real system]
+**Stack**: [exact tools and versions if known]
+**Scale**: [test count, execution frequency, team size, CI environment]
+**What was breaking**: [specific symptom with frequency — "Login test failing 1-in-5 runs in Jenkins nightly"]
+**Root cause**: [actual diagnosis — not "timing issues" but "Angular form emitting (ngModelChange)
+  before HTTP token response arrived, so next step hit stale DOM"]
+**Fix applied**: [step by step — tools chosen, why, trade-offs considered]
 
-\`\`\`[language]
-// What this is solving and WHY this approach over alternatives
-[real implementation — not hello world, not pseudocode]
+\`\`\`java
+// [One-line: what this class/method solves]
+// [Why THIS approach — what alternatives were rejected and why]
+[Production-quality code. Comment every non-obvious line. No pseudocode.]
 \`\`\`
 
-**Result**: [one line. Hard number. "Reduced incident rate by 80%." / "Deployed 40 services with zero downtime."]
+**Result**: [One sentence. Hard number. "Flaky rate: 12% → 1.8%. Zero false CI failures for 6 months."]
 
-═══════════════════════════════════════════
-HARD RULES — NEVER BREAK THESE
-═══════════════════════════════════════════
-- Section 2 MUST have one ## block per concept from Section 1. Never merge. Never skip.
-- Every bullet must describe something that happened in a real system — not a textbook definition.
-- If resume context is injected → ALWAYS reference the candidate's actual projects, stack, or domain in Section 2 and 3.
-- If no resume → use real industry war stories (Uber, Netflix, Amazon, fintech, healthtech — match the domain of the question).
-- Outcome bullets must have a number or a concrete operational result. "Improved performance" is not acceptable.
-- Code in Section 3 must be runnable or directly pasteable — comment every non-obvious line.
-- Never use "It is important to...", "One should...", "Best practice is..." — that's bookish. Cut it.
+═══════════════════════════════════════════════════════════
+NON-NEGOTIABLE RULES — BREAKING ANY = INVALID ANSWER
+═══════════════════════════════════════════════════════════
+1. If candidate background is injected → EVERY "What I did" bullet MUST name their actual client or project. "In our project" with no name = VIOLATION.
+2. Section 2 must have exactly one ## block per distinct concept from Section 1. No merging. No skipping.
+3. Outcome bullets must contain a number or a concrete operational result. "Improved stability" = VIOLATION.
+4. Never write "It is important to...", "Best practice is...", "One should..." — bookish filler = VIOLATION.
+5. Code in Section 3 must be copy-pasteable with inline comments. Pseudocode = VIOLATION.
+6. War story in Section 3 must feel like a real incident debrief — not a case study template.
 `.trim();
 
       const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
@@ -948,41 +885,46 @@ MANDATORY FORMAT:
         content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
-      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
-      // They added ~800 tokens of microservices-specific context to EVERY request,
-      // which (a) slowed first-token and (b) biased non-microservices answers.
-      // The new system prompt's format rules achieve the same structure without the overhead.
-
       if (!codeMode && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
       }
 
-      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
-      // Still enough for rich context, saves ~2000 tokens of overhead per request
+      // ============================================================
+      // RESUME CONTEXT INJECTION — FIXED
+      // Old: "Candidate background (use to personalize answers):" — soft suggestion, model ignores it
+      // New: Explicit contract with named projects + hard rule that forces citation
+      // ============================================================
       let resumeSummary = "";
 
-// First question of session (resume provided)
-if (resumeText?.trim()) {
-  resumeSummary = await getResumeSummary(resumeText);
+      if (resumeText?.trim()) {
+        resumeSummary = await getResumeSummary(resumeText);
+        if (sessionId) {
+          SESSION_CACHE.set(sessionId, { resumeSummary });
+        }
+      } else if (sessionId && SESSION_CACHE.has(sessionId)) {
+        resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+      }
 
-  if (sessionId) {
-    SESSION_CACHE.set(sessionId, { resumeSummary });
-  }
-}
-// Subsequent questions (no resume sent, reuse cached)
-else if (sessionId && SESSION_CACHE.has(sessionId)) {
-  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-}
+      if (resumeSummary) {
+        const projectNames = extractProjectNames(resumeSummary);
+        messages.push({
+          role: "system",
+          content: `
+THIS IS THE CANDIDATE BEING INTERVIEWED. THIS IS NOT A HYPOTHETICAL PERSON.
+All "What I did" bullets in Section 2 MUST reference the specific projects and tools below.
+Using generic examples when this context is available = RULE VIOLATION.
 
-if (resumeSummary) {
-  messages.push({
-    role: "system",
-    content:
-      "Candidate background (use to personalize answers):\n" +
-      resumeSummary
-  });
-}
+Known projects to reference by name: ${projectNames}
 
+CANDIDATE PROFILE:
+${resumeSummary}
+
+ENFORCEMENT: Every answer in Section 2 must tie back to at least one named project above.
+If the question topic matches something in this profile, reference it directly and specifically.
+If no direct match exists, use the candidate's closest relevant experience from this profile.
+`.trim()
+        });
+      }
 
       const hist = safeHistory(history);
 
@@ -998,15 +940,11 @@ if (resumeSummary) {
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
-      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
-      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
-      // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
         model: "gpt-4o",
         stream: true,
-        temperature: 0.4,    // was 0.7 — lower = more consistent structure
-        max_tokens: 650,     // was 600 — higher = no cut-off answers
+        temperature: 0.4,
+        max_tokens: 900,  // Increased from 650 — structured 3-section answer needs headroom
         messages
       });
 
@@ -1091,7 +1029,6 @@ if (resumeSummary) {
   } catch (err) {
     const msg = String(err?.message || err);
 
-    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
       return res.status(400).json({
         error: "Unexpected end of form (multipart stream was consumed or interrupted)."
