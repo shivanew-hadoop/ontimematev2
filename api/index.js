@@ -882,6 +882,10 @@ Q: [restate the question]
 *[Add more implementation-level, outcome-focused  steps only if genuinely needed — do not pad]
 * \`Very practical actual command or code snippet if relevant\`
 
+
+RULES:
+
+- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
 `.trim();
 
       const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
