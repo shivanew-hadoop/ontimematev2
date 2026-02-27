@@ -93,7 +93,7 @@ ${resumeText.slice(0, 20000)}
 
   try {
     const r = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       temperature: 0,
       max_tokens: 260,
       messages: [
@@ -988,7 +988,7 @@ if (resumeSummary) {
       // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
       // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         stream: true,
         temperature: 0.4,    // was 0.7 — lower = more consistent structure
         max_tokens: 650,     // was 600 — higher = no cut-off answers
