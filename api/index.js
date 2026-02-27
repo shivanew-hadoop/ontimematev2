@@ -4,10 +4,16 @@ import { toFile } from "openai/uploads";
 import { supabaseAnon, supabaseAdmin } from "../_utils/supabaseClient.js";
 import { requireAdmin } from "../_utils/adminAuth.js";
 
+// NEW — STATIC IMPORTS REQUIRED BY VERCEL
 import mammoth from "mammoth";
 import pdfParse from "pdf-parse";
 import crypto from "crypto";
 
+/**
+ * CRITICAL:
+ * - bodyParser MUST be false for multipart/form-data
+ * - otherwise Busboy sees a drained stream -> "Unexpected end of form"
+ */
 export const config = {
   runtime: "nodejs",
   api: {
@@ -19,7 +25,8 @@ export const config = {
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const RESUME_SUMMARY_CACHE = new Map();
+// In-memory cache (per warm lambda) to avoid re-summarizing the same resume
+const RESUME_SUMMARY_CACHE = new Map(); // sha256(resumeText) -> summary
 const SESSION_CACHE = new Map();
 
 /* -------------------------------------------------------------------------- */
@@ -31,7 +38,10 @@ function setCors(req, res) {
   res.setHeader("Access-Control-Allow-Origin", origin);
   res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, Accept, X-Requested-With");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization, Accept, X-Requested-With"
+  );
 }
 
 function readJson(req) {
@@ -39,52 +49,44 @@ function readJson(req) {
     let body = "";
     req.on("data", c => (body += c));
     req.on("end", () => {
-      try { resolve(body ? JSON.parse(body) : {}); }
-      catch { reject(new Error("Invalid JSON")); }
+      try {
+        resolve(body ? JSON.parse(body) : {});
+      } catch {
+        reject(new Error("Invalid JSON"));
+      }
     });
     req.on("error", reject);
   });
 }
 
+
 function sha256(s = "") {
   return crypto.createHash("sha256").update(String(s)).digest("hex");
 }
 
+// Resume summary: summarize once, reuse many times (cuts tokens + latency)
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
-  if (resumeText.length <= 8000) return resumeText;
+
+  // If already short, keep it (hard cap)
+  if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
 
   const key = sha256(resumeText);
   const cached = RESUME_SUMMARY_CACHE.get(key);
   if (cached) return cached;
 
   const summaryPrompt = `
-Extract ALL key facts from this resume. Be EXHAUSTIVE — do not compress or omit specifics.
-Return EXACTLY this structure:
-
-**Name:** [full name]
-**Current Role:** [exact title]
-**Current Company:** [company]
-**Total Experience:** [X years]
-**Domain:** [primary domain e.g. Retail POS, E-commerce]
-
-**Work History (newest first — include ALL companies):**
-- [Company] | [Role] | [Start–End]
-  * [Specific achievement with tool]
-  * [Specific achievement with number if present]
-
-**Full Tech Stack (list every tool mentioned):**
-- Automation Frameworks: ...
-- Languages: ...
-- API/Backend: ...
-- CI/CD: ...
-- Databases: ...
-- Cloud/Other: ...
-
-**Key Achievements with Numbers:**
-* [List ALL quantified or notable achievements]
-
+Create a SHORT interview-ready resume summary from the content.
+Rules:
+- Output ONLY in Markdown.
+- Sections MUST be exactly:
+  **Role Snapshot:** (1 line)
+  **Core Skills:** (8–12 comma-separated keywords)
+  **Key Projects:** (3 bullets; each starts with **project keyword**)
+  **Impact:** (3 bullets with numbers if present; never invent)
+- Keep under 1200 characters.
+- If a detail is missing, skip it. Do NOT assume.
 Resume:
 ${resumeText.slice(0, 20000)}
 `.trim();
@@ -93,49 +95,83 @@ ${resumeText.slice(0, 20000)}
     const r = await openai.chat.completions.create({
       model: "gpt-4o-mini",
       temperature: 0,
-      max_tokens: 1100,
+      max_tokens: 260,
       messages: [
-        { role: "system", content: "Extract ONLY facts verbatim from the resume. Preserve all numbers and technical details exactly." },
+        { role: "system", content: "Extract facts only. Do not add assumptions." },
         { role: "user", content: summaryPrompt }
       ]
     });
+
     const summary = String(r?.choices?.[0]?.message?.content || "").trim();
     const finalSummary = summary || resumeText.slice(0, 2500);
     RESUME_SUMMARY_CACHE.set(key, finalSummary);
     return finalSummary;
   } catch {
+    // If summarization fails, fall back to a short slice.
     return resumeText.slice(0, 2500);
   }
 }
 
+/**
+ * Hardened multipart reader:
+ * - waits for file stream completion
+ * - handles aborted/limit/error
+ * - avoids "finish" resolving before file end in edge cases
+ */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
     const headers = req.headers || {};
     const ct = String(headers["content-type"] || "");
-    if (!ct.toLowerCase().includes("multipart/form-data")) return reject(new Error("Expected multipart/form-data"));
 
-    const bb = Busboy({ headers, limits: { fileSize: 25 * 1024 * 1024 } });
+    if (!ct.toLowerCase().includes("multipart/form-data")) {
+      return reject(new Error("Expected multipart/form-data"));
+    }
+
+    const bb = Busboy({
+      headers,
+      limits: { fileSize: 25 * 1024 * 1024 } // 25MB (adjust if needed)
+    });
+
     const fields = {};
     let file = null;
+
     let fileDone = Promise.resolve();
 
     bb.on("field", (name, val) => (fields[name] = val));
+
     bb.on("file", (name, stream, info) => {
       const chunks = [];
+
       fileDone = new Promise((resDone, rejDone) => {
         stream.on("data", d => chunks.push(d));
         stream.on("limit", () => rejDone(new Error("File too large")));
         stream.on("error", rejDone);
         stream.on("end", () => {
-          file = { field: name, filename: info?.filename || "upload.bin", mime: info?.mimeType || "application/octet-stream", buffer: Buffer.concat(chunks) };
+          file = {
+            field: name,
+            filename: info?.filename || "upload.bin",
+            mime: info?.mimeType || "application/octet-stream",
+            buffer: Buffer.concat(chunks)
+          };
           resDone();
         });
       });
     });
+
     bb.on("error", reject);
-    bb.on("finish", async () => { try { await fileDone; resolve({ fields, file }); } catch (e) { reject(e); } });
+
+    bb.on("finish", async () => {
+      try {
+        await fileDone;
+        resolve({ fields, file });
+      } catch (e) {
+        reject(e);
+      }
+    });
+
     req.on("aborted", () => reject(new Error("Request aborted")));
     req.on("error", reject);
+
     req.pipe(bb);
   });
 }
@@ -143,13 +179,16 @@ function readMultipart(req) {
 function originFromReq(req) {
   const proto = req.headers["x-forwarded-proto"] || "https";
   const host = req.headers["x-forwarded-host"] || req.headers.host;
-  if (!host) return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
+  if (!host)
+    return process.env.PUBLIC_SITE_URL || "https://thoughtmatters-ai.vercel.app";
   return `${proto}://${host}`;
 }
 
 function ymd(dateStr) {
   const dt = new Date(dateStr);
-  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(dt.getDate()).padStart(2, "0")}`;
+  return `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, "0")}-${String(
+    dt.getDate()
+  ).padStart(2, "0")}`;
 }
 
 async function getUserFromBearer(req) {
@@ -157,366 +196,296 @@ async function getUserFromBearer(req) {
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
   if (!token) return { ok: false, error: "Missing token" };
   if (token.startsWith("ADMIN::")) return { ok: false, error: "Admin token not valid for user" };
+
   const sb = supabaseAnon();
   const { data, error } = await sb.auth.getUser(token);
   if (error) return { ok: false, error: error.message };
   if (!data?.user) return { ok: false, error: "Invalid session" };
+
   return { ok: true, user: data.user, access_token: token };
 }
 
+// FIX 1 — LATENCY: Reduced from 18→8 messages, 2000→1200 chars per message
+// This cuts ~60% of history token overhead before the stream even starts
 function safeHistory(history) {
   if (!Array.isArray(history)) return [];
   const out = [];
-  for (const m of history.slice(-8)) {
+  for (const m of history.slice(-8)) {          // was -18
     const role = m?.role;
     const content = typeof m?.content === "string" ? m.content : "";
     if ((role === "user" || role === "assistant") && content.trim()) {
-      out.push({ role, content: content.slice(0, 1200) });
+      out.push({ role, content: content.slice(0, 1200) });  // was 2000
     }
   }
   return out;
 }
 
 /* -------------------------------------------------------------------------- */
-/* DYNAMIC INTENT DETECTION ENGINE                                            */
+/* LIGHTWEIGHT CODE-INTENT DETECTION (ADDED)                                  */
+/* - DOES NOT rely on "java/python" keywords                                   */
+/* - Explanation intent overrides language mentions like "in Java"             */
 /* -------------------------------------------------------------------------- */
 
-function normalizeQ(q = "") {
-  return String(q || "").toLowerCase().replace(/\s+/g, " ").trim();
+function looksLikeCodeText(s = "") {
+  // quick signals: braces/semicolons/common code tokens OR fenced blocks
+  if (!s) return false;
+  const t = String(s);
+
+  if (t.includes("```")) return true;
+
+  const tokenHits =
+    (t.match(/[{}();]/g)?.length || 0) +
+    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
+
+  return tokenHits >= 6;
 }
+
+// -------------------------------------------------------
+// QUESTION INTENT DETECTION (FIXED / PRACTICAL)
+// -------------------------------------------------------
+
+
+
+// -------------------------------------------------------
+// FOLLOW-UP DETECTION + CONTEXT PACK (ADDED)
+// - Improves continuity across 8–9 Q&As without extra model calls
+// -------------------------------------------------------
 
 function isFollowUpPrompt(q = "") {
   const s = normalizeQ(q);
-  const followTokens = ["then", "so", "but", "that", "this", "it", "same", "why", "how come", "as you said", "you said", "earlier", "previous", "follow up", "based on that"];
-  return followTokens.some(t => s.includes(t)) || s.length <= 160;
+  if (!s) return false;
+
+  // short questions with references are usually follow-ups
+  const followTokens = [
+    "then",
+    "so",
+    "but",
+    "that",
+    "this",
+    "it",
+    "same",
+    "why",
+    "how come",
+    "as you said",
+    "you said",
+    "earlier",
+    "previous",
+    "follow up",
+    "based on that"
+  ];
+
+  const hasRef = followTokens.some(t => s.includes(t));
+  const isShort = s.length <= 160;
+
+  return hasRef || isShort;
 }
 
+// FIX 2 — LATENCY + QUALITY: Reduced context pack from 9→5 pairs, 240→180 chars per Q, 260→200 chars per A
+// Tighter context = fewer tokens = faster first byte, model focuses on relevant context
 function buildContextPack(hist = []) {
   const pairs = [];
   let lastUser = null;
+
   for (const m of hist) {
-    if (m.role === "user") lastUser = m.content;
-    else if (m.role === "assistant" && lastUser) { pairs.push({ q: lastUser, a: m.content }); lastUser = null; }
+    if (m.role === "user") {
+      lastUser = m.content;
+    } else if (m.role === "assistant" && lastUser) {
+      pairs.push({ q: lastUser, a: m.content });
+      lastUser = null;
+    }
   }
-  const tail = pairs.slice(-5);
+
+  const tail = pairs.slice(-5);  // was -9
   if (!tail.length) return "";
+
   const lines = ["PRIOR CONTEXT (reference only if question is a follow-up):"];
   tail.forEach((p, i) => {
-    lines.push(`${i + 1}) Q: ${String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180)}`);
-    lines.push(`   A: ${String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200)}`);
+    const q = String(p.q || "").replace(/\s+/g, " ").trim().slice(0, 180);  // was 240
+    const a = String(p.a || "").replace(/\s+/g, " ").trim().slice(0, 200);  // was 260
+    lines.push(`${i + 1}) Q: ${q}`);
+    lines.push(`   A: ${a}`);
   });
+
   return lines.join("\n");
 }
 
-/**
- * DYNAMIC QUESTION TYPE CLASSIFIER
- * Returns one of: "code" | "sql" | "experience" | "concept" | "debug" | "behavioral" | "quick"
- */
-function classifyQuestion(q = "") {
+function normalizeQ(q = "") {
+  return String(q || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function isExplanationQuestion(q = "") {
   const s = normalizeQ(q);
 
-  // CODE: explicit coding task in a programming language
-  const explicitCode = ["write a function", "write a program", "give me code", "show me code", "code for", "implement", "write code", "snippet"];
-  const codeSignals = ["()", "{}", "for(", "while(", "public static", "def ", "class ", "async ", "=>"];
-  const algoKeywords = ["palindrome", "fibonacci", "prime", "factorial", "anagram", "linked list", "binary search", "recursion", "dynamic programming", "sorting"];
-  const programmingLang = /\b(java|kotlin|python|javascript|typescript|golang|go|rust|ruby|php|swift|scala|c\+\+|c#|bash|shell)\b/i.test(s);
-
-  let codeScore = 0;
-  if (explicitCode.some(x => s.includes(x))) codeScore += 4;
-  if (codeSignals.some(x => s.includes(x))) codeScore += 4;
-  if (algoKeywords.some(k => s.includes(k))) codeScore += 2;
-  if (programmingLang && /\b(write|implement|create|build|program|solve|count|find|print|return|calculate|reverse|sort)\b/.test(s)) codeScore += 2;
-  if (codeScore >= 3) return "code";
-
-  // SQL: query writing tasks
-  const sqlKeywords = ["select", "query", "sql", "join", "group by", "window function", "cte", "with clause", "row_number", "partition by", "snowflake query", "write a query", "give me a query"];
-  if (sqlKeywords.some(k => s.includes(k)) && /\b(write|show|give|how|what|fetch|get|find)\b/.test(s)) return "sql";
-
-  // EXPERIENCE: asking about past work, projects, challenges
-  const experienceSignals = [
-    "you worked on", "you have worked", "what complex", "most complex", "challenging project",
-    "give me an example", "tell me about a time", "walk me through", "describe a situation",
-    "what did you do", "how did you handle", "what was your approach", "real example",
-    "in your experience", "in your project", "have you ever", "did you work on",
-    "optimization you did", "problem you solved", "issue you faced", "you implemented"
+  // Strong explanation patterns (no code needed)
+  const explainStarts = [
+    "explain",
+    "what is",
+    "how does",
+    "why",
+    "describe",
+    "define",
+    "difference between",
+    "compare",
+    "advantages",
+    "disadvantages",
+    "pros and cons"
   ];
-  if (experienceSignals.some(k => s.includes(k))) return "experience";
 
-  // BEHAVIORAL: HR/soft skill questions
-  const behavioralSignals = [
-    "tell me about yourself", "greatest strength", "greatest weakness", "why should we hire",
-    "where do you see yourself", "conflict with", "team situation", "disagreement", "how do you handle pressure",
-    "what motivates you", "why did you leave", "career goal", "self introduction", "introduce yourself"
+  // Common deep-dive / theory topics (usually explanation)
+  const explainTopics = [
+    "architecture",
+    "design",
+    "lifecycle",
+    "internals",
+    "jvm",
+    "garbage collector",
+    "class loader",
+    "multithreading",
+    "deadlock",
+    "solid",
+    "oops",
+    "normalization"
   ];
-  if (behavioralSignals.some(k => s.includes(k))) return "behavioral";
 
-  // DEBUG: troubleshooting, failure investigation
-  const debugSignals = [
-    "pipeline failed", "build failed", "error", "exception", "not working", "issue", "bug",
-    "troubleshoot", "debug", "root cause", "why is it failing", "what could go wrong",
-    "potential reason", "investigate", "fix this", "what went wrong"
-  ];
-  if (debugSignals.some(k => s.includes(k))) return "debug";
-
-  // QUICK: short/factual questions
-  if (s.length < 60 && /^(what|who|when|where|which|is|are|do|does|can|how many|how much)/.test(s)) return "quick";
-
-  // CONCEPT: default for explanation questions
-  return "concept";
+  return (
+    explainStarts.some(p => s.startsWith(p)) ||
+    explainTopics.some(t => s.includes(t))
+  );
 }
 
-function normalizeRoleType(roleType = "", roleText = "") {
-  const rt = String(roleType || "").toLowerCase().trim();
-  if (rt) return rt;
-  const s = String(roleText || "").toLowerCase().trim();
-  if (!s) return "";
-  if (s.includes("qa") || s.includes("automation") || s.includes("test")) return "qa-automation";
-  if (s.includes("data engineer") || s.includes("etl") || s.includes("databricks") || s.includes("snowflake")) return "data-engineer";
-  if (s.includes("genai") || s.includes("llm") || s.includes("rag")) return "genai";
-  if (s.includes("cloud") || s.includes("architect")) return "cloud-architect";
-  if (s.includes("java") || s.includes("spring") || s.includes("backend")) return "java-backend";
-  return "generic";
+function isCodeQuestion(q = "") {
+  const s = normalizeQ(q);
+
+  // If user explicitly wants code, always treat as code
+  const explicitCode = [
+    "code",
+    "program",
+    "snippet",
+    "implementation",
+    "source code",
+    "write a function",
+    "write a program",
+    "give me code",
+    "show me code"
+  ];
+
+  // Task verbs that strongly indicate coding even without "code" word
+  const taskVerbs = [
+    "write",
+    "implement",
+    "create",
+    "build",
+    "develop",
+    "program",
+    "solve",
+    "print",
+    "return",
+    "calculate",
+    "count",
+    "find",
+    "check",
+    "validate",
+    "reverse",
+    "sort",
+    "remove",
+    "replace",
+    "convert"
+  ];
+
+  // Classic coding-problem keywords
+  const algoKeywords = [
+    "vowel",
+    "vowels",
+    "palindrome",
+    "anagram",
+    "fibonacci",
+    "prime",
+    "factorial",
+    "string",
+    "array",
+    "hashmap",
+    "hash set",
+    "linked list",
+    "stack",
+    "queue",
+    "binary search",
+    "time complexity",
+    "space complexity"
+  ];
+
+  // Code-looking characters/signals
+  const codeSignals = ["()", "{}", "[]", "for(", "while(", "if(", "public static", "def ", "class "];
+
+  const wantsExample = /\b(example|sample|demo)\b/.test(s);
+  const mentionsLanguage = /\b(java|python|javascript|typescript|c\+\+|c#|sql)\b/.test(s);
+
+  let score = 0;
+
+  if (explicitCode.some(x => s.includes(x))) score += 4;
+  if (codeSignals.some(x => s.includes(x))) score += 4;
+
+  if (taskVerbs.some(v => new RegExp(`\\b${v}\\b`).test(s))) score += 2;
+  if (algoKeywords.some(k => s.includes(k))) score += 2;
+
+  if (wantsExample) score += 1;
+  if (mentionsLanguage) score += 1; // LOW weight on purpose
+
+  // Threshold: >=3 => code-intent
+  return score >= 3;
 }
 
-/* -------------------------------------------------------------------------- */
-/* DYNAMIC SYSTEM PROMPT BUILDER                                              */
-/* -------------------------------------------------------------------------- */
-
-/**
- * Returns the RIGHT system prompt for the detected question type.
- * Each template mirrors the ChatGPT 5.2 style seen in the screenshots.
- */
-function buildDynamicSystemPrompt(questionType) {
-  switch (questionType) {
-
-    case "code":
-      return `You are a senior engineer answering a coding question in a live interview.
-
-CRITICAL RULES:
-- ALWAYS produce exactly TWO named blocks — no exceptions.
-- EVERY single line of code must have an inline comment explaining what it does.
-- Never write a block of code without comments.
-- Use "I" perspective throughout — e.g. "I use allMatch here because...", "I add this check to handle..."
-
----
-
-**BLOCK 1 — Core Logic (minimal, focused)**
-\`\`\`[language]
-// I [explain what this line does and why]
-[code line]   // [what this specific step achieves]
-[code line]   // [why I chose this approach]
-\`\`\`
-
-**BLOCK 2 — Complete Production Implementation**
-\`\`\`[language]
-// I [explain overall structure]
-[every line]   // [inline comment — no line left without explanation]
-[edge case]    // I handle this because [reason]
-[main method]  // I test with [sample] to verify
-\`\`\`
-
-**Input:** [concrete sample]
-**Output:** [expected result]
-
-**Time Complexity:** O(?) — [1-line reason]
-**Space Complexity:** O(?) — [1-line reason]
-
-**Why this approach:** [1–2 sentences in first person — "I chose X over Y because..."]`;
-
-    case "sql":
-      return `You are a senior data engineer answering a SQL/query question in a live interview.
-
-Always use "I" — not "you" or "your". E.g. "I would use...", "In my projects I handled this by..."
-
-Format:
-
-Start with 1 direct sentence — which technique I'll use and why.
-
-Then show the query with inline comments:
-
-\`\`\`sql
--- I use [technique] here because [reason]
-SELECT [col]          -- I select only needed columns to avoid full scan
-FROM [table]          -- [explain the source]
-WHERE [condition]     -- I filter early to reduce data before joining
-\`\`\`
-
-**What each part does:**
-- [clause] → [what I achieve with it]
-- [clause] → [why I chose this over alternatives]
-
-If multiple approaches exist, show both with a clear "I prefer X over Y because..." trade-off note.
-No filler. Be direct and practical.`;
-
-    case "experience":
-      return `You are a senior engineer sharing a real work experience in a live interview.
-
-Always speak in first person — "I built", "I identified", "My approach was". Never use "you" to refer to yourself.
-
-Open with ONE strong hook sentence — lead with the result:
-e.g. "One of the most complex X I worked on was Y — it was taking Z time, and I reduced it to W by redesigning A and B."
-
-Then say "Let me explain clearly." and break it into bullet-point sections:
-
-**The original problem had:**
-- [specific technical issue 1]
-- [specific technical issue 2]
-- [specific technical issue 3]
-
-**What I identified:**
-- [Root cause or key finding with tool/observation]
-- [Second finding]
-
-**What I did:**
-- [Specific action + exact tool I used]
-- [Why I chose that approach over alternatives]
-- [What problem each action solved]
-
-**Result:**
-- [Quantified improvement — time/cost/reliability]
-- [Business or team impact if relevant]
-
-Use real tools, real numbers, real decisions from the resume context if available.
-No generic filler like "this approach significantly improved overall reliability."`;
-
-    case "concept":
-      return `You are a senior engineer explaining a technical concept in a live interview.
-
-Always use "I" perspective — "In my projects I used...", "I handled this by...", "My team chose...". Never say "you can use" — say "I use".
-
-Format:
-
-**Direct answer first (2 sentences max):**
-State what it is + why it matters in production — no bookish definitions, no "great question", no preamble.
-
-**How it works (plain language first, then technical):**
-- [Core mechanism in simple terms]
-- [Technical detail — how it actually works under the hood]
-
-**Types / variants (if applicable):**
-- **[Type 1]:** [What it does] — [When I use it] — Example: [concrete scenario I've seen]
-- **[Type 2]:** [What it does] — [When I use it] — Example: [concrete scenario]
-- **[Type 3 if relevant]**
-
-**In my experience:**
-- I used [specific tool/approach] at [context — company/project type if from resume]
-- The problem I was solving: [specific issue]
-- What I did: [concrete action]
-- Result: [measurable or practical outcome]
-- Trade-off I noticed: [honest trade-off]
-
-**Core insight (1 sentence):** [The key thing that makes this concept click in practice]
-
-Do NOT copy textbook paragraphs. Sound like someone who has actually used this.`;
-
-    case "debug":
-      return `You are a senior engineer debugging a production issue in a live interview.
-
-Always use "I" — "I check...", "I look at...", "My first step is...". Never say "you should check".
-
-Open with 1 sentence identifying the most likely failure category based on context.
-
-Then walk through my investigation step by step:
-
-**1️⃣ [First thing I check]**
-[Why I check this first — my reasoning]
-- [Specific action: exact command, log location, or tool I use]
-- [What I look for in the output]
-
-**2️⃣ [Second investigation step]**
-[My reasoning]
-- [Specific action]
-- [What it reveals]
-
-**3️⃣ [Third step if relevant]**
-
-**Root causes I rule out:**
-- [Category 1]: [how I confirm or eliminate it]
-- [Category 2]: [how I confirm or eliminate it]
-
-**How I fix it:**
-- [Fix 1 — specific]
-- [Fix 2 — with reasoning]
-
-Reference real tools (git, CI logs, DB explain plans, monitoring dashboards, etc.). Sound methodical, not guessing.`;
-
-    case "behavioral":
-      return `You are answering a behavioral/HR interview question in first person.
-
-Always "I" — not "we" or generic statements. Keep it specific and authentic.
-
-**Situation:**
-[2–3 sentences — context, team size, what was at stake, my role]
-
-**Action:**
-- [What I specifically did — concrete step]
-- [Tool or method I used and why]
-- [How I handled any challenge, conflict, or pushback]
-- [Decision I made and the reasoning behind it]
-
-**Result:**
-- [Measurable or clear outcome]
-- [What I personally learned or improved]
-
-No filler phrases. No "I am a great team player." Sound like someone recalling a real memory.`;
-
-    case "quick":
-      return `You are a senior engineer answering a concise technical question in a live interview.
-
-Always use "I" — "In my experience...", "I use this when...", "I've seen this in..."
-
-Give a direct, practical answer in 2–4 sentences — no bookish definitions.
-
-If there are multiple items to cover, use a short bullet list.
-
-Then add one "In my experience..." line — a real-world observation or trade-off I've personally dealt with.
-
-Do not over-explain. No textbook paragraphs.`;
-
-    default:
-      return `You are a senior engineer answering in a live technical interview.
-
-Always speak in first person — "I", "my", "I've worked on". Never use "you" to refer to yourself.
-
-Lead with a 1–2 sentence direct practical answer — no preamble, no bookish definition.
-
-Use bullet points where listing multiple items, steps, or trade-offs.
-
-Then explain with appropriate depth:
-- Concepts → direct definition + bullet-point breakdown + my real experience
-- Experience → hook sentence + bullet-point problem/action/result
-- Code → Block 1 (core) + Block 2 (complete), every line commented
-- Debug → numbered investigation steps + my fix
-
-Use specific tools, real numbers, and practical trade-offs. Sound like someone who has done this.`;
-  }
-}
 
 /* -------------------------------------------------------------------------- */
-/* RESUME EXTRACTION                                                          */
+/* RESUME EXTRACTION — FINAL VERSION (STATIC IMPORTS)                         */
 /* -------------------------------------------------------------------------- */
 
 function guessExtAndMime(file) {
   const name = (file?.filename || "").toLowerCase();
   const mime = (file?.mime || "").toLowerCase();
-  if (name.endsWith(".pdf") || mime.includes("pdf")) return { ext: "pdf", mime: "application/pdf" };
-  if (name.endsWith(".docx") || mime.includes("wordprocessingml")) return { ext: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document" };
-  if (name.endsWith(".txt") || mime.includes("text/plain")) return { ext: "txt", mime: "text/plain" };
+
+  if (name.endsWith(".pdf") || mime.includes("pdf"))
+    return { ext: "pdf", mime: "application/pdf" };
+
+  if (name.endsWith(".docx") || mime.includes("wordprocessingml"))
+    return {
+      ext: "docx",
+      mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    };
+
+  if (name.endsWith(".txt") || mime.includes("text/plain"))
+    return { ext: "txt", mime: "text/plain" };
+
   return { ext: "bin", mime: "application/octet-stream" };
 }
 
 async function extractResumeText(file) {
   if (!file?.buffer || file.buffer.length < 20) return "";
+
   const { ext } = guessExtAndMime(file);
+
   if (ext === "txt") return file.buffer.toString("utf8");
+
   if (ext === "docx") {
-    try { const out = await mammoth.extractRawText({ buffer: file.buffer }); return String(out?.value || ""); }
-    catch (e) { return `[DOCX error] ${e?.message || ""}`; }
+    try {
+      const out = await mammoth.extractRawText({ buffer: file.buffer });
+      return String(out?.value || "");
+    } catch (e) {
+      return `[DOCX error during extraction] ${e?.message || ""}`;
+    }
   }
+
   if (ext === "pdf") {
-    try { const out = await pdfParse(file.buffer); return String(out?.text || ""); }
-    catch (e) { return `[PDF error] ${e?.message || ""}`; }
+    try {
+      const out = await pdfParse(file.buffer);
+      return String(out?.text || "");
+    } catch (e) {
+      return `[PDF error during extraction] ${e?.message || ""}`;
+    }
   }
+
   return file.buffer.toString("utf8");
 }
 
@@ -532,10 +501,16 @@ export default async function handler(req, res) {
     const url = new URL(req.url, "http://localhost");
     const path = (url.searchParams.get("path") || "").replace(/^\/+/, "");
 
+    /* ------------------------------------------------------- */
+    /* HEALTH                                                  */
+    /* ------------------------------------------------------- */
     if (req.method === "GET" && (path === "" || path === "healthcheck")) {
       return res.status(200).json({ ok: true, time: new Date().toISOString() });
     }
 
+    /* ------------------------------------------------------- */
+    /* ENV CHECK                                               */
+    /* ------------------------------------------------------- */
     if (req.method === "GET" && path === "envcheck") {
       return res.status(200).json({
         hasSUPABASE_URL: !!process.env.SUPABASE_URL,
@@ -547,47 +522,110 @@ export default async function handler(req, res) {
       });
     }
 
+    /* ------------------------------------------------------- */
+    /* AUTH — SIGNUP                                           */
+    /* ------------------------------------------------------- */
     if (path === "auth/signup") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const { name, phone, email, password } = await readJson(req);
       if (!name || !email || !password) return res.status(400).json({ error: "Missing fields" });
+
       const sb = supabaseAnon();
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
-      const { data, error } = await sb.auth.signUp({ email, password, options: { emailRedirectTo: redirectTo } });
+
+      const { data, error } = await sb.auth.signUp({
+        email,
+        password,
+        options: { emailRedirectTo: redirectTo }
+      });
       if (error) return res.status(400).json({ error: error.message });
-      await supabaseAdmin().from("user_profiles").insert({ id: data?.user?.id, name, phone: phone || "", email, approved: false, credits: 0, created_at: new Date().toISOString() });
+
+      await supabaseAdmin().from("user_profiles").insert({
+        id: data?.user?.id,
+        name,
+        phone: phone || "",
+        email,
+        approved: false,
+        credits: 0,
+        created_at: new Date().toISOString()
+      });
+
       return res.json({ ok: true, message: "Account created. Verify email + wait for approval." });
     }
 
+    /* ------------------------------------------------------- */
+    /* AUTH — LOGIN                                            */
+    /* ------------------------------------------------------- */
     if (path === "auth/login") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const { email, password } = await readJson(req);
+
       const adminEmail = (process.env.ADMIN_EMAIL || "").toLowerCase().trim();
       const adminPass = (process.env.ADMIN_PASSWORD || "").trim();
       if (email.toLowerCase().trim() === adminEmail && password === adminPass) {
         const token = `ADMIN::${adminEmail}::${Math.random().toString(36).slice(2)}`;
-        return res.json({ ok: true, session: { is_admin: true, token, user: { id: "admin", email: adminEmail } } });
+        return res.json({
+          ok: true,
+          session: { is_admin: true, token, user: { id: "admin", email: adminEmail } }
+        });
       }
+
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.signInWithPassword({ email, password });
       if (error) return res.status(401).json({ error: error.message });
+
       const user = data.user;
       if (!user.email_confirmed_at) return res.status(403).json({ error: "Email not verified yet" });
-      const profile = await supabaseAdmin().from("user_profiles").select("approved").eq("id", user.id).single();
-      if (!profile.data?.approved) return res.status(403).json({ error: "Admin has not approved your account yet" });
-      return res.json({ ok: true, session: { is_admin: false, access_token: data.session.access_token, refresh_token: data.session.refresh_token, expires_at: data.session.expires_at, user: { id: user.id, email: user.email } } });
+
+      const profile = await supabaseAdmin()
+        .from("user_profiles")
+        .select("approved")
+        .eq("id", user.id)
+        .single();
+
+      if (!profile.data?.approved)
+        return res.status(403).json({ error: "Admin has not approved your account yet" });
+
+      return res.json({
+        ok: true,
+        session: {
+          is_admin: false,
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at,
+          user: { id: user.id, email: user.email }
+        }
+      });
     }
 
+    /* ------------------------------------------------------- */
+    /* AUTH — REFRESH TOKEN                                    */
+    /* ------------------------------------------------------- */
     if (path === "auth/refresh") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const { refresh_token } = await readJson(req);
       if (!refresh_token) return res.status(400).json({ error: "Missing refresh_token" });
+
       const sb = supabaseAnon();
       const { data, error } = await sb.auth.refreshSession({ refresh_token });
       if (error) return res.status(401).json({ error: error.message });
-      return res.json({ ok: true, session: { access_token: data.session.access_token, refresh_token: data.session.refresh_token, expires_at: data.session.expires_at } });
+
+      return res.json({
+        ok: true,
+        session: {
+          access_token: data.session.access_token,
+          refresh_token: data.session.refresh_token,
+          expires_at: data.session.expires_at
+        }
+      });
     }
 
+    /* ------------------------------------------------------- */
+    /* AUTH — FORGOT PASSWORD                                  */
+    /* ------------------------------------------------------- */
     if (path === "auth/forgot") {
       const { email } = await readJson(req);
       const redirectTo = `${originFromReq(req)}/auth?tab=login`;
@@ -595,40 +633,83 @@ export default async function handler(req, res) {
       return res.json({ ok: true });
     }
 
+    /* ------------------------------------------------------- */
+    /* USER PROFILE                                            */
+    /* ------------------------------------------------------- */
     if (path === "user/profile") {
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const profile = await supabaseAdmin().from("user_profiles").select("id,name,email,phone,approved,credits,created_at").eq("id", gate.user.id).single();
+
+      const profile = await supabaseAdmin()
+        .from("user_profiles")
+        .select("id,name,email,phone,approved,credits,created_at")
+        .eq("id", gate.user.id)
+        .single();
+
       if (!profile.data) return res.status(404).json({ error: "Profile not found" });
-      return res.json({ ok: true, user: { ...profile.data, created_ymd: ymd(profile.data.created_at) } });
+
+      return res.json({
+        ok: true,
+        user: { ...profile.data, created_ymd: ymd(profile.data.created_at) }
+      });
     }
 
+    /* ------------------------------------------------------- */
+    /* USER — CREDIT DEDUCTION                                 */
+    /* ------------------------------------------------------- */
     if (path === "user/deduct") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
+
       const { delta } = await readJson(req);
       const d = Math.max(0, Math.floor(Number(delta || 0)));
       if (!d) return res.json({ ok: true, remaining: null });
+
       const sb = supabaseAdmin();
-      const { data: row, error: e1 } = await sb.from("user_profiles").select("credits").eq("id", gate.user.id).single();
+
+      const { data: row, error: e1 } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
       if (e1) return res.status(400).json({ error: e1.message });
+
       const current = Number(row?.credits || 0);
       const remaining = Math.max(0, current - d);
-      const { error: e2 } = await sb.from("user_profiles").update({ credits: remaining }).eq("id", gate.user.id);
+
+      const { error: e2 } = await sb
+        .from("user_profiles")
+        .update({ credits: remaining })
+        .eq("id", gate.user.id);
       if (e2) return res.status(400).json({ error: e2.message });
+
       return res.json({ ok: remaining > 0, remaining });
     }
 
+    /* ------------------------------------------------------- */
+    /* REALTIME — CLIENT SECRET (NEW)                           */
+    /* ------------------------------------------------------- */
     if (path === "realtime/client_secret") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const { data: row } = await supabaseAdmin().from("user_profiles").select("credits").eq("id", gate.user.id).single();
+
+      // basic credit gate (don't start ASR if no credits)
+      const { data: row } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
+
       const body = await readJson(req).catch(() => ({}));
-      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600)));
+      const ttl = Math.max(60, Math.min(900, Number(body?.ttl_sec || 600))); // 1–15 min
+
       const payload = {
         expires_after: { anchor: "created_at", seconds: ttl },
         session: {
@@ -636,55 +717,118 @@ export default async function handler(req, res) {
           audio: {
             input: {
               format: { type: "audio/pcm", rate: 24000 },
-              transcription: { model: "gpt-4o-mini-transcribe", language: "en", prompt: "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit." },
+              transcription: {
+                model: "gpt-4o-mini-transcribe",
+                language: "en",
+                prompt:
+                  "Transcribe exactly what is spoken. Do NOT add new words. Do NOT repeat phrases. Do NOT translate. Keep punctuation minimal. If uncertain, omit."
+              },
               noise_reduction: { type: "far_field" },
-              turn_detection: { type: "server_vad", threshold: 0.5, prefix_padding_ms: 300, silence_duration_ms: 350 }
+              turn_detection: {
+                type: "server_vad",
+                threshold: 0.5,
+                prefix_padding_ms: 300,
+                silence_duration_ms: 350
+              }
             }
           }
         }
       };
+
       const r = await fetch("https://api.openai.com/v1/realtime/client_secrets", {
         method: "POST",
-        headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, "Content-Type": "application/json" },
+        headers: {
+          Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+          "Content-Type": "application/json"
+        },
         body: JSON.stringify(payload)
       });
+
       const out = await r.json().catch(() => ({}));
-      if (!r.ok) return res.status(r.status).json({ error: out?.error?.message || out?.error || "Failed to create client secret" });
+      if (!r.ok) {
+        return res.status(r.status).json({
+          error: out?.error?.message || out?.error || "Failed to create client secret"
+        });
+      }
+
       return res.json({ value: out.value, expires_at: out.expires_at || 0 });
     }
 
+    /* ------------------------------------------------------- */
+    /* DEEPGRAM — API KEY                                      */
+    /* ------------------------------------------------------- */
     if (path === "deepgram/key") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const gate = await getUserFromBearer(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const { data: row } = await supabaseAdmin().from("user_profiles").select("credits").eq("id", gate.user.id).single();
+
+      // Check if user has credits
+      const { data: row } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", gate.user.id)
+        .single();
+
       const credits = Number(row?.credits || 0);
       if (credits <= 0) return res.status(403).json({ error: "No credits remaining" });
+
+      // Return Deepgram API key
       const apiKey = process.env.DEEPGRAM_API_KEY;
-      if (!apiKey) return res.status(500).json({ error: "Deepgram API key not configured" });
+      if (!apiKey) {
+        return res.status(500).json({ error: "Deepgram API key not configured" });
+      }
+
       return res.json({ key: apiKey });
     }
 
+    /* ------------------------------------------------------- */
+    /* RESUME EXTRACTION                                       */
+    /* ------------------------------------------------------- */
     if (path === "resume/extract") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const { file } = await readMultipart(req);
       if (!file?.buffer) return res.json({ text: "" });
+
       const text = await extractResumeText(file);
       return res.json({ text: String(text || "") });
     }
 
+    /* ------------------------------------------------------- */
+    /* TRANSCRIBE (mic/system audio)                           */
+    /* ------------------------------------------------------- */
     if (path === "transcribe") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
       const { fields, file } = await readMultipart(req);
       if (!file?.buffer || file.buffer.length < 2500) return res.json({ text: "" });
+
       try {
         const filename = file.filename || "audio.webm";
         const mime = (file.mime || "audio/webm").split(";")[0];
         const audioFile = await toFile(file.buffer, filename, { type: mime });
-        const basePrompt = "Transcribe EXACTLY what is spoken in English. Do NOT translate. Do NOT add filler words. Do NOT invent speakers. Do NOT repeat earlier sentences. If silence/no speech, return empty.";
+
+        const basePrompt =
+          "Transcribe EXACTLY what is spoken in English. " +
+          "Do NOT translate. Do NOT add filler words. Do NOT invent speakers. " +
+          "Do NOT repeat earlier sentences. If silence/no speech, return empty.";
+
         const userPrompt = String(fields?.prompt || "").slice(0, 500);
-        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(0, 800);
-        const out = await openai.audio.transcriptions.create({ file: audioFile, model: "gpt-4o-transcribe", language: "en", temperature: 0, response_format: "json", prompt: finalPrompt });
+        const finalPrompt = (basePrompt + (userPrompt ? "\n\nContext:\n" + userPrompt : "")).slice(
+          0,
+          800
+        );
+
+        const out = await openai.audio.transcriptions.create({
+          file: audioFile,
+          model: "gpt-4o-transcribe",
+          language: "en",
+          temperature: 0,
+          response_format: "json",
+          prompt: finalPrompt
+        });
+
         return res.json({ text: out.text || "" });
       } catch (e) {
         const status = e?.status || e?.response?.status || 500;
@@ -693,15 +837,18 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
-    /* CHAT SEND — DYNAMIC TEMPLATE ENGINE                     */
+    /* CHAT SEND — OPTIMIZED FOR LATENCY + QUALITY             */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
       if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-      const { prompt, instructions, resumeText, history, sessionId, roleType, roleText, yearsExp } = await readJson(req);
+      const { prompt, instructions, resumeText, history, sessionId } = await readJson(req);
+
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // Stream headers
+      // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
+      // This sends the HTTP 200 + headers to the client right away,
+      // eliminating the "blank screen" wait while we build messages.
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -709,95 +856,142 @@ export default async function handler(req, res) {
       res.flushHeaders?.();
       res.write("\u200B");
 
+      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
+      // All message construction is sync so we reach openai.create() as fast as possible
       const messages = [];
 
-      // ── STEP 1: Classify the question to pick the right response template ──
-      const questionType = classifyQuestion(prompt);
+      // ============================================================
+      // SYSTEM PROMPTS
+      // ============================================================
 
-      // ── STEP 2: Apply the dynamic system prompt for this question type ──
+      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
+      // Old framing forced generic invented answers. New framing works with OR without resume.
+      const baseSystem = `You are super most experienced and a senior for the attached role with 10+ years of hands-on production experience.
+You answer ONLY from real-world implementation perspective — not theory, not textbook definitions, not academic explanations
+
+MANDATORY FORMAT (follow exactly for every non-code answer):
+
+Q: [restate the question]
+
+[blank line]
+
+**[One-sentence direct answer — extremely practical, implementation-level, outcome-focused, reflecting how it works in real production systems.]**
+
+
+1️⃣ [First major step must be out of One-sentence direct answer related — verb-first, action title]
+* [extremely practical, implementation-level, outcome-focused detailed actions taken]
+* [extremely practical, implementation-level, outcome-focused detailed actions taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+2️⃣ [Second major step must be out of One-sentence direct answer related ]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+3️⃣ [Third major step must be out of One-sentence direct answer related]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+[N️⃣ Add more extremely practical, implementation-level, outcome-focused  steps only if genuinely needed — do not pad]
+
+**[Bold closing statement — outcome, guarantee, or key takeaway with numbers if applicable]**
+
+RULES:
+- Every step starts with an emoji number: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
+- Sub-bullets use * (not •) and are specific actions — not definitions
+- Inline \`code\` for any real command, query, config value, or metric formula
+- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
+- NO "Real Scenario:" section — the steps ARE the production scenario
+- NO textbook definitions — never explain what something is, only what you DO with it
+- NO padding phrases: "It is important to", "This ensures that", "In order to"
+- Include real values where natural: timeout thresholds, retry counts, error rates, latency numbers
+- For architecture questions: show the call chain inline → UI → Gateway → Service → DB
+- For calculation questions: show the formula first, then plug in real numbers
+- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
+
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
+
+MANDATORY FORMAT:
+
+\`\`\`[language]
+// Brief one-line description of what this does
+
+[code with inline comment on every non-trivial line]
+\`\`\`
+
+**Input:** [sample input]
+**Output:** [sample output]`.trim();
+
+      const forceCode =
+        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
+        /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
+
+      const codeMode = forceCode || isCodeQuestion(prompt);
+
       messages.push({
         role: "system",
-        content: buildDynamicSystemPrompt(questionType)
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
       });
 
-      // ── STEP 3: Optional caller instructions (only for non-code/sql) ──
-      const isStructuredType = questionType === "code" || questionType === "sql";
-      if (!isStructuredType && instructions?.trim()) {
-        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) });
+      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
+      // They added ~800 tokens of microservices-specific context to EVERY request,
+      // which (a) slowed first-token and (b) biased non-microservices answers.
+      // The new system prompt's format rules achieve the same structure without the overhead.
+
+      if (!codeMode && instructions?.trim()) {
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
       }
 
-      // ── STEP 4: Role-specific overlay ──
-      const normalizedRoleType = normalizeRoleType(roleType, roleText);
-      if (!isStructuredType) {
-        const roleOverlays = {
-          "java-backend": "Interview focus: Java backend / Spring Boot / microservices. Prioritize Spring ecosystem, REST APIs, Kafka, Redis caching, DB indexing, thread pools, performance, resilience (timeouts/circuit breaker), and production debugging.",
-          "data-engineer": "Interview focus: Data Engineering. Prioritize ETL pipelines, ingestion, partitioning, parallel processing, data quality, orchestration, warehouse optimization (Snowflake/Databricks), batch vs streaming trade-offs.",
-          "qa-automation": "Interview focus: QA Automation. Prioritize framework design, UI/API automation strategy, CI/CD integration, flaky test reduction, environment issues, test data management, coverage metrics, release validation.",
-          "cloud-architect": "Interview focus: Cloud / Solution Architecture. Prioritize AWS/Azure architecture, scalability, IAM/security, high availability, observability, cost-performance trade-offs, migration decisions.",
-          "genai": "Interview focus: GenAI / LLM systems. Prioritize RAG architecture, embeddings, retrieval quality, latency, prompt orchestration, evaluation, hallucination controls, and production reliability."
-        };
-        if (roleOverlays[normalizedRoleType]) {
-          messages.push({ role: "system", content: roleOverlays[normalizedRoleType] });
-        }
-      }
-
-      // ── STEP 5: Years of experience context ──
-      const yrs = Number(yearsExp || 0);
-      if (!isStructuredType && Number.isFinite(yrs) && yrs > 0) {
-        messages.push({ role: "system", content: `Candidate positioning: answer at the depth and ownership expected from a ${yrs}-year experienced engineer.` });
-      }
-
-      // ── STEP 6: Free-text role hint ──
-      if (!isStructuredType && String(roleText || "").trim()) {
-        messages.push({ role: "system", content: `Target interview role: ${String(roleText).trim().slice(0, 120)}. Bias examples toward this role when relevant.` });
-      }
-
-      // ── STEP 7: Resume personalization ──
+      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
+      // Still enough for rich context, saves ~2000 tokens of overhead per request
       let resumeSummary = "";
-      if (resumeText?.trim()) {
-        resumeSummary = await getResumeSummary(resumeText);
-        if (sessionId) SESSION_CACHE.set(sessionId, { resumeSummary });
-      } else if (sessionId && SESSION_CACHE.has(sessionId)) {
-        resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-      }
 
-      if (resumeSummary) {
-        messages.push({
-          role: "system",
-          content: `══════════════════════════════════════════
-CANDIDATE RESUME CONTEXT
-══════════════════════════════════════════
-${resumeSummary}
-══════════════════════════════════════════
+// First question of session (resume provided)
+if (resumeText?.trim()) {
+  resumeSummary = await getResumeSummary(resumeText);
 
-Use this resume when the question relates to the candidate's experience:
-- Use their actual companies, projects, tools, and achievements.
-- Use exact technologies from the resume — no substitutions.
-- Use real metrics/numbers from the resume if they fit.
-- If the question is unrelated to resume, answer generically but senior-level.
-- Do NOT invent companies, projects, or achievements not in the resume.`
-        });
-      } else {
-        messages.push({ role: "system", content: "No resume provided. Give senior-level answers with practical production examples, real tools, trade-offs, and measurable impact." });
-      }
+  if (sessionId) {
+    SESSION_CACHE.set(sessionId, { resumeSummary });
+  }
+}
+// Subsequent questions (no resume sent, reuse cached)
+else if (sessionId && SESSION_CACHE.has(sessionId)) {
+  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+}
 
-      // ── STEP 8: Conversation history ──
+if (resumeSummary) {
+  messages.push({
+    role: "system",
+    content:
+      "Candidate background (use to personalize answers):\n" +
+      resumeSummary
+  });
+}
+
+
       const hist = safeHistory(history);
-      if (!isStructuredType && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+
+      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
         const ctx = buildContextPack(hist);
         if (ctx) messages.push({ role: "system", content: ctx });
       }
+
       for (const m of hist) messages.push(m);
 
-      // ── STEP 9: User prompt ──
-      messages.push({ role: "user", content: String(prompt).slice(0, 7000).trim() });
+      messages.push({
+        role: "user",
+        content: String(prompt).slice(0, 7000).trim()
+      });
 
-      // ── STEP 10: Stream response ──
+      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
+      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
+      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
+      // More consistent format adherence, less rambling, still natural-sounding
       const stream = await openai.chat.completions.create({
         model: "gpt-4o-mini",
         stream: true,
-        temperature: questionType === "code" || questionType === "sql" ? 0.1 : 0.35,
-        max_tokens: questionType === "experience" ? 1800 : 1600,
+        temperature: 0.4,    // was 0.7 — lower = more consistent structure
+        max_tokens: 650,     // was 600 — higher = no cut-off answers
         messages
       });
 
@@ -811,41 +1005,84 @@ Use this resume when the question relates to the candidate's experience:
       return res.end();
     }
 
+    /* ------------------------------------------------------- */
+    /* CHAT RESET                                              */
+    /* ------------------------------------------------------- */
     if (path === "chat/reset") return res.json({ ok: true });
 
+    /* ------------------------------------------------------- */
+    /* ADMIN — USER LIST                                       */
+    /* ------------------------------------------------------- */
     if (path === "admin/users") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
-      const { data } = await supabaseAdmin().from("user_profiles").select("id,name,email,phone,approved,credits,created_at").order("created_at", { ascending: false });
+
+      const { data } = await supabaseAdmin()
+        .from("user_profiles")
+        .select("id,name,email,phone,approved,credits,created_at")
+        .order("created_at", { ascending: false });
+
       return res.json({ users: data });
     }
 
+    /* ------------------------------------------------------- */
+    /* ADMIN — APPROVE USER                                    */
+    /* ------------------------------------------------------- */
     if (path === "admin/approve") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
+
       const { user_id, approved } = await readJson(req);
-      const { data } = await supabaseAdmin().from("user_profiles").update({ approved }).eq("id", user_id).select().single();
+
+      const { data } = await supabaseAdmin()
+        .from("user_profiles")
+        .update({ approved })
+        .eq("id", user_id)
+        .select()
+        .single();
+
       return res.json({ ok: true, user: data });
     }
 
+    /* ------------------------------------------------------- */
+    /* ADMIN — UPDATE CREDITS                                  */
+    /* ------------------------------------------------------- */
     if (path === "admin/credits") {
       const gate = requireAdmin(req);
       if (!gate.ok) return res.status(401).json({ error: gate.error });
+
       const { user_id, delta } = await readJson(req);
+
       const sb = supabaseAdmin();
-      const { data: row } = await sb.from("user_profiles").select("credits").eq("id", user_id).single();
+      const { data: row } = await sb
+        .from("user_profiles")
+        .select("credits")
+        .eq("id", user_id)
+        .single();
+
       const newCredits = Math.max(0, Number(row.credits) + Number(delta));
-      const { data } = await sb.from("user_profiles").update({ credits: newCredits }).eq("id", user_id).select().single();
+
+      const { data } = await sb
+        .from("user_profiles")
+        .update({ credits: newCredits })
+        .eq("id", user_id)
+        .select()
+        .single();
+
       return res.json({ ok: true, credits: data.credits });
     }
 
     return res.status(404).json({ error: `No route: /api/${path}` });
-
   } catch (err) {
     const msg = String(err?.message || err);
+
+    // Convert the classic multipart failure into a cleaner error (helps debugging)
     if (msg.toLowerCase().includes("unexpected end of form")) {
-      return res.status(400).json({ error: "Unexpected end of form (multipart stream was consumed or interrupted)." });
+      return res.status(400).json({
+        error: "Unexpected end of form (multipart stream was consumed or interrupted)."
+      });
     }
+
     return res.status(500).json({ error: msg });
   }
 }

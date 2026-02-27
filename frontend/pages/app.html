@@ -104,13 +104,17 @@
                    "Liberation Mono", "Courier New", monospace;
     }
 
+    /* Transcript blocks */
     .transcript-block {
       margin-bottom: 10px;
       padding-bottom: 10px;
       border-bottom: 1px solid #d1d5db;
     }
-    .transcript-block:last-child { border-bottom: none; }
+    .transcript-block:last-child {
+      border-bottom: none;
+    }
 
+    /* Unsent block: bold text, blue left border — no inner header row */
     .transcript-block.unsent {
       background: #fff;
       border: 1px solid #bfdbfe;
@@ -118,8 +122,12 @@
       border-radius: 6px;
       padding: 8px 10px;
       margin-bottom: 10px;
+    }
+    .unsent-text {
       font-weight: 700;
       color: #1f2937;
+      white-space: pre-wrap;
+      word-wrap: break-word;
     }
 
     .transcript-block.sent {
@@ -130,23 +138,38 @@
 </head>
 
 <body>
+
   <div id="bannerTop" class="hidden sticky top-0 z-50 text-white text-center py-2 font-semibold"></div>
 
   <div class="flex flex-col h-screen overflow-hidden">
+
     <div class="bg-white border-b px-4 py-3 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
       <div class="flex items-center gap-3 min-w-0">
         <div id="userInfo" class="text-sm text-gray-800 truncate"></div>
       </div>
       <div class="flex items-center gap-2">
-        <button id="emptyBtn" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Empty</button>
-        <button id="indept" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Indept</button>
-        <button id="notCodeBtn" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Not Code</button>
-        <button id="codeSameBtn" class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">Code Same</button>
+        <button id="emptyBtn"
+          class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          Empty
+        </button>
+        <button id="indept"
+          class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          Indept
+        </button>
+        <button id="notCodeBtn"
+          class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          Not Code
+        </button>
+        <button id="codeSameBtn"
+          class="text-xs px-2 py-1 bg-gray-200 rounded hover:bg-gray-300">
+          Code Same
+        </button>
         <button id="logoutBtn" class="text-sm text-red-600 hover:underline">Logout</button>
       </div>
     </div>
 
     <div class="flex flex-col lg:flex-row flex-1 min-h-0 overflow-hidden">
+
       <div class="lg:w-5/12 w-full bg-white border-r p-4 flex flex-col gap-4 min-h-0 overflow-y-auto">
 
         <div class="flex flex-col flex-1 min-h-0 gap-3">
@@ -165,14 +188,19 @@
             </div>
           </div>
 
-          <div id="liveTranscript" tabindex="0" role="textbox" aria-label="Live transcript"></div>
+          <div id="liveTranscript"
+               tabindex="0"
+               role="textbox"
+               aria-label="Live transcript">
+          </div>
 
           <div>
             <h3 class="font-semibold mb-1 text-sm">Refine Question (Optional)</h3>
             <textarea id="manualQuestion"
                       rows="2"
                       class="w-full border p-2 text-sm bg-white rounded resize-none"
-                      placeholder="Optional manual refinement…"></textarea>
+                      placeholder="Optional manual refinement…">
+            </textarea>
           </div>
 
           <div>
@@ -192,27 +220,10 @@
             <button id="stopBtn" disabled class="px-3 py-2 bg-red-600 text-white text-sm rounded opacity-50">Stop</button>
             <button id="sysBtn" disabled class="px-3 py-2 bg-purple-600 text-white text-sm rounded opacity-50">System Audio</button>
           </div>
-
-          <!-- REPLACED Mic: ON button with Role + Years split -->
-          <div class="grid grid-cols-2 gap-2 mt-2">
-            <div>
-              <label for="roleText" class="block text-[11px] text-gray-600 mb-1">Role Target</label>
-              <input id="roleText"
-                     type="text"
-                     class="w-full border rounded px-2 py-2 text-sm"
-                     placeholder="e.g. Java Backend / QA / Data Eng">
-            </div>
-            <div>
-              <label for="yearsExp" class="block text-[11px] text-gray-600 mb-1">Years Exp</label>
-              <input id="yearsExp"
-                     type="number"
-                     min="0"
-                     max="50"
-                     step="1"
-                     class="w-full border rounded px-2 py-2 text-sm"
-                     placeholder="10">
-            </div>
-          </div>
+          <button id="micMuteBtn"
+                  class="mt-2 w-full px-3 py-2 bg-gray-700 text-white text-sm rounded">
+            Mic: ON
+          </button>
           <div id="audioStatus" class="text-xs mt-2 text-gray-700"></div>
         </div>
 
@@ -235,6 +246,7 @@
           <input type="file" id="resumeInput" class="text-sm">
           <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
         </div>
+
       </div>
 
       <div class="lg:w-7/12 w-full p-4 flex flex-col min-h-0">
@@ -243,6 +255,7 @@
         </div>
         <div id="responseBox"></div>
       </div>
+
     </div>
   </div>
 
