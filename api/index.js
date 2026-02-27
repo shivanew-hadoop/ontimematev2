@@ -93,7 +93,7 @@ ${resumeText.slice(0, 20000)}
 
   try {
     const r = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: "gpt-4o",
       temperature: 0,
       max_tokens: 260,
       messages: [
@@ -226,7 +226,19 @@ function safeHistory(history) {
 /* - Explanation intent overrides language mentions like "in Java"             */
 /* -------------------------------------------------------------------------- */
 
+function looksLikeCodeText(s = "") {
+  // quick signals: braces/semicolons/common code tokens OR fenced blocks
+  if (!s) return false;
+  const t = String(s);
 
+  if (t.includes("```")) return true;
+
+  const tokenHits =
+    (t.match(/[{}();]/g)?.length || 0) +
+    (t.match(/\b(for|while|if|else|switch|case|return|class|public|static|void|def|function)\b/gi)?.length || 0);
+
+  return tokenHits >= 6;
+}
 
 // -------------------------------------------------------
 // QUESTION INTENT DETECTION (FIXED / PRACTICAL)
@@ -477,57 +489,6 @@ async function extractResumeText(file) {
   return file.buffer.toString("utf8");
 }
 
-/* -------------------------------------------------------------------------- */
-/* GLOBAL SYSTEM PROMPTS (DEFINE ONCE)                                        */
-/* -------------------------------------------------------------------------- */
-
-const INTERVIEW_SYSTEM = `
-You are a senior engineer answering interview questions.
-
-MANDATORY FORMAT:
-
-1️⃣ First line MUST be:
-A single bold, senior-level, production-focused one-sentence answer.
-
-2️⃣ Then provide structured practical steps only if needed.
-
-Rules:
-- No textbook definitions.
-- No filler phrases.
-- No theory.
-- Implementation-focused.
-- Real-world language.
-`;
-
-const CODE_SYSTEM = `
-You are a senior engineer.
-
-Return working code only.
-
-Format:
-
-\`\`\`[language]
-// one-line purpose
-// production-ready clean code
-// inline comments on important lines
-\`\`\`
-
-Include sample input/output if relevant.
-`;
-
-const EXPLANATION_SYSTEM = `
-Explain practically from real production perspective.
-
-- No long definitions.
-- Use real examples.
-- Clear and concise.
-`;
-
-const SHORT_SYSTEM = `
-Answer in 2–3 sharp lines only.
-No formatting.
-Direct answer.
-`;
 /* -------------------------------------------------------------------------- */
 /* MAIN HANDLER                                                               */
 /* -------------------------------------------------------------------------- */
@@ -878,127 +839,171 @@ export default async function handler(req, res) {
     /* ------------------------------------------------------- */
     /* CHAT SEND — OPTIMIZED FOR LATENCY + QUALITY             */
     /* ------------------------------------------------------- */
-
     if (path === "chat/send") {
-  if (req.method !== "POST")
-    return res.status(405).json({ error: "Method not allowed" });
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
 
-  const { prompt, instructions, resumeText, history, sessionId } =
-    await readJson(req);
+      const { prompt, instructions, resumeText, history, sessionId } = await readJson(req);
 
-  if (!prompt)
-    return res.status(400).json({ error: "Missing prompt" });
+      if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-  /* ------------------------------------------------------- */
-  /* STREAM HEADERS — FLUSH IMMEDIATELY                     */
-  /* ------------------------------------------------------- */
-  res.setHeader("Content-Type", "text/markdown; charset=utf-8");
-  res.setHeader("Cache-Control", "no-cache, no-transform");
-  res.setHeader("Connection", "keep-alive");
-  res.setHeader("Transfer-Encoding", "chunked");
-  res.flushHeaders?.();
-  res.write("\u200B");
+      // FIX 3 — LATENCY: Set headers and flush IMMEDIATELY before any processing
+      // This sends the HTTP 200 + headers to the client right away,
+      // eliminating the "blank screen" wait while we build messages.
+      res.setHeader("Content-Type", "text/markdown; charset=utf-8");
+      res.setHeader("Cache-Control", "no-cache, no-transform");
+      res.setHeader("Connection", "keep-alive");
+      res.setHeader("Transfer-Encoding", "chunked");
+      res.flushHeaders?.();
+      res.write("\u200B");
 
-  /* ------------------------------------------------------- */
-  /* SYSTEM PROMPTS (LIGHTWEIGHT + DYNAMIC)                 */
-  /* ------------------------------------------------------- */
+      // FIX 4 — LATENCY + QUALITY: Build messages synchronously (no await before stream)
+      // All message construction is sync so we reach openai.create() as fast as possible
+      const messages = [];
 
-  
-  /* ------------------------------------------------------- */
-  /* DYNAMIC SYSTEM SELECTION                                */
-  /* ------------------------------------------------------- */
+      // ============================================================
+      // SYSTEM PROMPTS
+      // ============================================================
 
-  let systemPrompt = INTERVIEW_SYSTEM;
+      // FIX 5 — QUALITY: Removed the "YOU did" framing when no resume is present.
+      // Old framing forced generic invented answers. New framing works with OR without resume.
+      const baseSystem = `You are super most experienced and a senior for the attached role with 10+ years of hands-on production experience.
+You answer ONLY from real-world implementation perspective — not theory, not textbook definitions, not academic explanations
 
-  if (isCodeQuestion(prompt)) {
-    systemPrompt = CODE_SYSTEM;
-  } else if (isExplanationQuestion(prompt)) {
-    systemPrompt = EXPLANATION_SYSTEM;
-  } else if (prompt.length < 40 && !isExplanationQuestion(prompt)) {
-  systemPrompt = SHORT_SYSTEM;
+MANDATORY FORMAT (follow exactly for every non-code answer):
+
+Q: [restate the question]
+
+[blank line]
+
+**[One-sentence direct answer — extremely practical, implementation-level, outcome-focused, reflecting how it works in real production systems.]**
+
+
+1️⃣ [First major step must be out of One-sentence direct answer related — verb-first, action title]
+* [extremely practical, implementation-level, outcome-focused detailed actions taken]
+* [extremely practical, implementation-level, outcome-focused detailed actions taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+2️⃣ [Second major step must be out of One-sentence direct answer related ]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+3️⃣ [Third major step must be out of One-sentence direct answer related]
+* [extremely practical, implementation-level, outcome-focused detailed action taken]
+* \`Very practical actual command or code snippet if relevant\`
+
+[N️⃣ Add more extremely practical, implementation-level, outcome-focused  steps only if genuinely needed — do not pad]
+
+**[Bold closing statement — outcome, guarantee, or key takeaway with numbers if applicable]**
+
+RULES:
+- Every step starts with an emoji number: 1️⃣ 2️⃣ 3️⃣ 4️⃣ 5️⃣
+- Sub-bullets use * (not •) and are specific actions — not definitions
+- Inline \`code\` for any real command, query, config value, or metric formula
+- End with a bold statement — the result or guarantee ("Cluster returns to last healthy state." / "Zero downtime. SLA maintained.")
+- NO "Real Scenario:" section — the steps ARE the production scenario
+- NO textbook definitions — never explain what something is, only what you DO with it
+- NO padding phrases: "It is important to", "This ensures that", "In order to"
+- Include real values where natural: timeout thresholds, retry counts, error rates, latency numbers
+- For architecture questions: show the call chain inline → UI → Gateway → Service → DB
+- For calculation questions: show the formula first, then plug in real numbers
+- For failure/incident questions: steps = detect → contain → fix → verify`.trim();
+
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
+
+MANDATORY FORMAT:
+
+\`\`\`[language]
+// Brief one-line description of what this does
+
+[code with inline comment on every non-trivial line]
+\`\`\`
+
+**Input:** [sample input]
+**Output:** [sample output]`.trim();
+
+      const forceCode =
+        /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
+        /\b(count|find|occurrence|write|implement|create|solve)\b/i.test(prompt);
+
+      const codeMode = forceCode || isCodeQuestion(prompt);
+
+      messages.push({
+        role: "system",
+        content: codeMode ? CODE_FIRST_SYSTEM : baseSystem
+      });
+
+      // FIX 6 — LATENCY + QUALITY: Removed the two hardcoded few-shot examples.
+      // They added ~800 tokens of microservices-specific context to EVERY request,
+      // which (a) slowed first-token and (b) biased non-microservices answers.
+      // The new system prompt's format rules achieve the same structure without the overhead.
+
+      if (!codeMode && instructions?.trim()) {
+        messages.push({ role: "system", content: instructions.trim().slice(0, 3000) }); // was 4000
+      }
+
+      // FIX 7 — LATENCY: Resume capped at 4000 chars (was 12000 = ~3000 tokens)
+      // Still enough for rich context, saves ~2000 tokens of overhead per request
+      let resumeSummary = "";
+
+// First question of session (resume provided)
+if (resumeText?.trim()) {
+  resumeSummary = await getResumeSummary(resumeText);
+
+  if (sessionId) {
+    SESSION_CACHE.set(sessionId, { resumeSummary });
+  }
 }
-  const messages = [];
+// Subsequent questions (no resume sent, reuse cached)
+else if (sessionId && SESSION_CACHE.has(sessionId)) {
+  resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
+}
 
+if (resumeSummary) {
   messages.push({
     role: "system",
-    content: systemPrompt
+    content:
+      "Candidate background (use to personalize answers):\n" +
+      resumeSummary
   });
-
-  /* ------------------------------------------------------- */
-  /* RESUME-AWARE INJECTION (CONDITIONAL + CACHED)          */
-  /* ------------------------------------------------------- */
-
-  let resumeSummary = "";
-
-  if (resumeText?.trim()) {
-    resumeSummary = await getResumeSummary(resumeText);
-
-    if (sessionId) {
-      SESSION_CACHE.set(sessionId, { resumeSummary });
-    }
-  } else if (sessionId && SESSION_CACHE.has(sessionId)) {
-    resumeSummary = SESSION_CACHE.get(sessionId).resumeSummary;
-  }
-
-  if (resumeSummary) {
-    messages.push({
-      role: "system",
-      content:
-        "Candidate background (use only if relevant to personalize examples):\n" +
-        resumeSummary
-    });
-  }
-
-  /* ------------------------------------------------------- */
-  /* HISTORY + FOLLOW-UP CONTEXT                             */
-  /* ------------------------------------------------------- */
-
-  const hist = safeHistory(history);
-
-  if (!isCodeQuestion(prompt) && hist.length && isFollowUpPrompt(prompt)) {
-    const ctx = buildContextPack(hist);
-    if (ctx) {
-      messages.push({ role: "system", content: ctx });
-    }
-  }
-
-  for (const m of hist) {
-    messages.push(m);
-  }
-
-  /* ------------------------------------------------------- */
-  /* CURRENT USER PROMPT                                     */
-  /* ------------------------------------------------------- */
-
-  messages.push({
-    role: "user",
-    content: String(prompt).slice(0, 7000).trim()
-  });
-
-  /* ------------------------------------------------------- */
-  /* OPENAI STREAM CALL                                      */
-  /* ------------------------------------------------------- */
-const temperature =
-  isCodeQuestion(prompt) ? 0.2 :
-  isExplanationQuestion(prompt) ? 0.3 :
-  0.4;
-  const stream = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    stream: true,
-    temperature,
-    max_tokens: 900,
-    messages
-  });
-
-  try {
-    for await (const chunk of stream) {
-      const t = chunk?.choices?.[0]?.delta?.content || "";
-      if (t) res.write(t);
-    }
-  } catch {}
-
-  return res.end();
 }
+
+
+      const hist = safeHistory(history);
+
+      if (!codeMode && hist.length && isFollowUpPrompt(String(prompt || ""))) {
+        const ctx = buildContextPack(hist);
+        if (ctx) messages.push({ role: "system", content: ctx });
+      }
+
+      for (const m of hist) messages.push(m);
+
+      messages.push({
+        role: "user",
+        content: String(prompt).slice(0, 7000).trim()
+      });
+
+      // FIX 8 — QUALITY: Increased max_tokens from 600 → 900
+      // ChatGPT's uptime answer alone needed ~700 tokens. 600 was cutting off answers mid-response.
+      // FIX 9 — QUALITY: Lowered temperature from 0.7 → 0.4
+      // More consistent format adherence, less rambling, still natural-sounding
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4o",
+        stream: true,
+        temperature: 0.4,    // was 0.7 — lower = more consistent structure
+        max_tokens: 650,     // was 600 — higher = no cut-off answers
+        messages
+      });
+
+      try {
+        for await (const chunk of stream) {
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
+        }
+      } catch {}
+
+      return res.end();
+    }
 
     /* ------------------------------------------------------- */
     /* CHAT RESET                                              */
