@@ -306,10 +306,8 @@ if (liveTranscript) {
 function updateTranscript() {
   if (!liveTranscript) return;
 
-  // Define displayText FIRST
   const displayText = currentBlock.text + (currentInterimText ? " " + currentInterimText : "");
 
-  // Now safe to use displayText for copy button
   const copyBtn = document.getElementById("copyUnsentBtn");
   if (copyBtn) {
     copyBtn.style.display = displayText.trim() ? "inline-flex" : "none";
@@ -378,6 +376,169 @@ function buildInterviewQuestionPrompt(currentTextOnly) {
   if (priorQs.length) prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
   return prompt;
 }
+
+/* -------------------------------------------------------------------------- */
+/* SCREEN ANALYZER — NEW                                                      */
+/* Captures the currently shared screen (or prompts for one), sends to        */
+/* backend GPT-4o vision endpoint, appends extracted text to manual textarea. */
+/* -------------------------------------------------------------------------- */
+
+async function captureScreenContent() {
+  const btn = document.getElementById("screenCaptureBtn");
+  const statusEl = document.getElementById("screenCaptureStatus");
+
+  if (!btn || !statusEl) return;
+
+  btn.disabled = true;
+  btn.textContent = "📸 Reading…";
+  statusEl.textContent = "Capturing screen…";
+  statusEl.className = "text-xs text-orange-500";
+
+  let captureStream = null;
+  let shouldStopStream = false;
+
+  try {
+    // Use existing system audio stream's video track if available
+    // Otherwise open a fresh screen capture just for the snapshot
+    if (sysStream && sysStream.getVideoTracks().length > 0) {
+      captureStream = sysStream;
+      shouldStopStream = false; // Don't stop the shared stream
+    } else {
+      // Request screen capture — audio:false because we only need the visual frame
+      captureStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { displaySurface: "monitor" },
+        audio: false
+      });
+      shouldStopStream = true;
+    }
+
+    const videoTrack = captureStream.getVideoTracks()[0];
+    if (!videoTrack) throw new Error("No video track available");
+
+    // Grab a single frame using ImageCapture API
+    let imageBase64 = "";
+
+    if (window.ImageCapture) {
+      // Modern path — ImageCapture API
+      const imageCapture = new ImageCapture(videoTrack);
+      const bitmap = await imageCapture.grabFrame();
+
+      const canvas = document.createElement("canvas");
+      canvas.width = bitmap.width;
+      canvas.height = bitmap.height;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(bitmap, 0, 0);
+
+      // JPEG at 0.85 quality — good balance of detail vs payload size
+      imageBase64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+    } else {
+      // Fallback — draw video frame to canvas
+      const video = document.createElement("video");
+      video.srcObject = captureStream;
+      video.muted = true;
+
+      await new Promise((resolve) => {
+        video.onloadedmetadata = () => {
+          video.play();
+          resolve();
+        };
+      });
+
+      // Small delay to ensure first frame is rendered
+      await new Promise(r => setTimeout(r, 200));
+
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      const ctx = canvas.getContext("2d");
+      ctx.drawImage(video, 0, 0);
+
+      video.pause();
+      video.srcObject = null;
+
+      imageBase64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+    }
+
+    if (!imageBase64 || imageBase64.length < 100) {
+      throw new Error("Failed to capture frame — empty image data");
+    }
+
+    statusEl.textContent = "Analyzing screen content…";
+
+    // Send to backend for GPT-4o vision extraction
+    const res = await fetch(`/api?path=screen/analyze`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ imageBase64 })
+    });
+
+    if (!res.ok) {
+      const errData = await res.json().catch(() => ({}));
+      throw new Error(errData?.error || `Server error ${res.status}`);
+    }
+
+    const data = await res.json();
+    const extractedText = String(data?.text || "").trim();
+
+    if (!extractedText) {
+      statusEl.textContent = "No text found on screen";
+      statusEl.className = "text-xs text-orange-500";
+      return;
+    }
+
+    // Append extracted screen content to the manual question textarea
+    // so the user can use it as context when hitting Send
+    const existing = (manualQuestion?.value || "").trim();
+    if (manualQuestion) {
+      manualQuestion.value = existing
+        ? existing + "\n\n[Screen content]:\n" + extractedText
+        : extractedText;
+    }
+
+    // Show confirmation
+    statusEl.textContent = "✅ Read complete screen details";
+    statusEl.className = "text-xs text-green-600";
+
+    // Auto-clear the confirmation after 4 seconds
+    setTimeout(() => {
+      if (statusEl.textContent === "✅ Read complete screen details") {
+        statusEl.textContent = "";
+      }
+    }, 4000);
+
+  } catch (err) {
+    console.error("[SCREEN CAPTURE]", err);
+
+    // User cancelled the screen picker — don't show an error
+    if (err?.name === "NotAllowedError" || err?.message?.includes("Permission denied")) {
+      statusEl.textContent = "Screen capture cancelled";
+      statusEl.className = "text-xs text-gray-400";
+    } else {
+      statusEl.textContent = `Error: ${err?.message || "Unknown"}`;
+      statusEl.className = "text-xs text-red-500";
+    }
+  } finally {
+    // Only stop the stream if we created it specifically for this snapshot
+    if (shouldStopStream && captureStream) {
+      captureStream.getTracks().forEach(t => t.stop());
+    }
+
+    btn.disabled = false;
+    btn.textContent = "📸 Screen";
+  }
+}
+
+// Wire up the button once DOM is ready
+document.addEventListener("DOMContentLoaded", () => {
+  const screenBtn = document.getElementById("screenCaptureBtn");
+  if (screenBtn) {
+    screenBtn.addEventListener("click", captureScreenContent);
+  }
+});
+
+/* -------------------------------------------------------------------------- */
+/* REST OF APP — UNCHANGED                                                    */
+/* -------------------------------------------------------------------------- */
 
 async function loadUserProfile() {
   try {

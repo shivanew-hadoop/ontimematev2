@@ -114,7 +114,7 @@
       border-bottom: none;
     }
 
-    /* Unsent block: bold text, blue left border — no inner header row */
+    /* Unsent block: bold text, blue left border */
     .transcript-block.unsent {
       background: #fff;
       border: 1px solid #bfdbfe;
@@ -133,6 +133,12 @@
     .transcript-block.sent {
       font-weight: 400;
       color: #4b5563;
+    }
+
+    /* Screen capture button pulse animation when reading */
+    #screenCaptureBtn:disabled {
+      opacity: 0.7;
+      cursor: wait;
     }
   </style>
 </head>
@@ -241,11 +247,32 @@
           <div id="instrStatus"></div>
         </div>
 
+        <!-- ============================================================ -->
+        <!-- RESUME UPLOAD + SCREEN ANALYZER — side by side               -->
+        <!-- ============================================================ -->
         <div class="shrink-0">
           <h3 class="font-semibold mb-2 text-sm">Resume Upload</h3>
-          <input type="file" id="resumeInput" class="text-sm">
+
+          <!-- File input row -->
+          <input type="file" id="resumeInput" class="text-sm w-full mb-2">
+
+          <!-- Screen Analyzer button + inline status — same row -->
+          <div class="flex items-center gap-2">
+            <button
+              id="screenCaptureBtn"
+              title="Capture your current screen and read all its text content"
+              class="flex-shrink-0 text-xs px-2 py-1 bg-indigo-600 text-white rounded hover:bg-indigo-700 active:bg-indigo-800 transition-colors">
+              📸 Screen
+            </button>
+            <span
+              id="screenCaptureStatus"
+              class="text-xs text-gray-500 leading-tight">
+            </span>
+          </div>
+
           <div id="resumeStatus" class="text-xs mt-1 text-gray-600"></div>
         </div>
+        <!-- ============================================================ -->
 
       </div>
 

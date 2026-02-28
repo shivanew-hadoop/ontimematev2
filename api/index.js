@@ -66,23 +66,17 @@ function sha256(s = "") {
 /* -------------------------------------------------------------------------- */
 /* RESUME SUMMARY — FIXED                                                      */
 /* Preserves exact project names, client names, tools, and measurable wins.   */
-/* Old version compressed everything into keywords → model had nothing to cite */
 /* -------------------------------------------------------------------------- */
 async function getResumeSummary(resumeTextRaw = "") {
   const resumeText = String(resumeTextRaw || "").trim();
   if (!resumeText) return "";
 
-  // If already short enough, use it directly
   if (resumeText.length <= 2500) return resumeText.slice(0, 2500);
 
   const key = sha256(resumeText);
   const cached = RESUME_SUMMARY_CACHE.get(key);
   if (cached) return cached;
 
-  // FIX: Extract specifics, NOT a keyword summary.
-  // The old prompt produced "Core Skills: Selenium, TestNG..." which gives the model
-  // zero ammunition to answer "how did YOU handle X" — it falls back to generic answers.
-  // This prompt preserves the exact details the model needs to ground answers in the candidate's reality.
   const summaryPrompt = `
 Extract a precise interview-ready technical profile from this resume.
 CRITICAL RULES:
@@ -115,7 +109,7 @@ ${resumeText.slice(0, 20000)}
     const r = await openai.chat.completions.create({
       model: "gpt-4o",
       temperature: 0,
-      max_tokens: 420, // was 260 — not enough for structured project extraction with specifics
+      max_tokens: 420,
       messages: [
         { role: "system", content: "Extract facts only. Preserve exact names, tools, numbers. Do not generalize or add assumptions." },
         { role: "user", content: summaryPrompt }
@@ -133,7 +127,6 @@ ${resumeText.slice(0, 20000)}
 
 /* -------------------------------------------------------------------------- */
 /* EXTRACT PROJECT NAMES — HELPER FOR RESUME INJECTION                        */
-/* Pulls client/project names for explicit reinforcement in the system prompt  */
 /* -------------------------------------------------------------------------- */
 function extractProjectNames(summary = "") {
   const matches = summary.match(/[-•]\s+([A-Z][A-Za-z0-9\s&]+?)\s+\(/g) || [];
@@ -143,7 +136,6 @@ function extractProjectNames(summary = "") {
     .slice(0, 5);
 
   if (!names.length) {
-    // Fallback: look for bold project-like patterns
     const bold = summary.match(/\*\*([^*]+)\*\*/g) || [];
     return bold.map(b => b.replace(/\*\*/g, "").trim()).slice(0, 5).join(", ") || "projects in resume";
   }
@@ -151,10 +143,7 @@ function extractProjectNames(summary = "") {
 }
 
 /**
- * Hardened multipart reader:
- * - waits for file stream completion
- * - handles aborted/limit/error
- * - avoids "finish" resolving before file end in edge cases
+ * Hardened multipart reader
  */
 function readMultipart(req) {
   return new Promise((resolve, reject) => {
@@ -167,7 +156,7 @@ function readMultipart(req) {
 
     const bb = Busboy({
       headers,
-      limits: { fileSize: 25 * 1024 * 1024 } // 25MB
+      limits: { fileSize: 25 * 1024 * 1024 }
     });
 
     const fields = {};
@@ -765,6 +754,62 @@ export default async function handler(req, res) {
     }
 
     /* ------------------------------------------------------- */
+    /* SCREEN ANALYZE — NEW                                    */
+    /* Accepts a base64 JPEG screenshot, extracts all visible  */
+    /* text using GPT-4o vision, returns plain text.           */
+    /* ------------------------------------------------------- */
+    if (path === "screen/analyze") {
+      if (req.method !== "POST") return res.status(405).json({ error: "Method not allowed" });
+
+      const { imageBase64 } = await readJson(req);
+      if (!imageBase64) return res.status(400).json({ error: "Missing imageBase64" });
+
+      // Validate it looks like a real base64 image (rough check)
+      if (imageBase64.length < 100) {
+        return res.status(400).json({ error: "Image data too small" });
+      }
+
+      try {
+        const r = await openai.chat.completions.create({
+          model: "gpt-4o",
+          max_tokens: 1500,
+          temperature: 0,
+          messages: [
+            {
+              role: "system",
+              content:
+                "You are a screen reader. Extract ALL visible text from the screenshot exactly as it appears. " +
+                "Include every word, number, code snippet, question, UI label, menu item, and any readable content. " +
+                "Preserve the structure and order of content. Output plain text only — no commentary, no formatting additions."
+            },
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/jpeg;base64,${imageBase64}`,
+                    detail: "high"  // high detail = reads small text accurately
+                  }
+                },
+                {
+                  type: "text",
+                  text: "Extract ALL text content visible on this screen. Preserve code blocks, questions, labels, and all readable text exactly as shown."
+                }
+              ]
+            }
+          ]
+        });
+
+        const extractedText = String(r?.choices?.[0]?.message?.content || "").trim();
+        return res.json({ ok: true, text: extractedText });
+      } catch (e) {
+        const status = e?.status || e?.response?.status || 500;
+        return res.status(status).json({ error: e?.message || String(e) });
+      }
+    }
+
+    /* ------------------------------------------------------- */
     /* CHAT SEND                                               */
     /* ------------------------------------------------------- */
     if (path === "chat/send") {
@@ -785,10 +830,7 @@ export default async function handler(req, res) {
       const messages = [];
 
       // ============================================================
-      // BASE SYSTEM — FIXED
-      // Root cause of generic answers: old prompt said "if resume provided → use it"
-      // which the model treated as optional. New prompt makes it NON-NEGOTIABLE with
-      // explicit rules and violation labels.
+      // BASE SYSTEM
       // ============================================================
       const baseSystem = `
 You are a senior QA/SDET engineer with 10+ years of production experience being interviewed.
@@ -890,9 +932,7 @@ MANDATORY FORMAT:
       }
 
       // ============================================================
-      // RESUME CONTEXT INJECTION — FIXED
-      // Old: "Candidate background (use to personalize answers):" — soft suggestion, model ignores it
-      // New: Explicit contract with named projects + hard rule that forces citation
+      // RESUME CONTEXT INJECTION
       // ============================================================
       let resumeSummary = "";
 
@@ -944,7 +984,7 @@ If no direct match exists, use the candidate's closest relevant experience from 
         model: "gpt-4o",
         stream: true,
         temperature: 0.4,
-        max_tokens: 900,  // Increased from 650 — structured 3-section answer needs headroom
+        max_tokens: 900,
         messages
       });
 
