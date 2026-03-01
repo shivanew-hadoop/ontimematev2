@@ -107,7 +107,7 @@ ${resumeText.slice(0, 20000)}
 
   try {
     const r = await openai.chat.completions.create({
-      model: "gpt-4o",
+      model: "gpt-4o-mini",
       temperature: 0,
       max_tokens: 420,
       messages: [
@@ -771,7 +771,7 @@ export default async function handler(req, res) {
 
       try {
         const r = await openai.chat.completions.create({
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           max_tokens: 1500,
           temperature: 0,
           messages: [
@@ -981,7 +981,7 @@ If no direct match exists, use the candidate's closest relevant experience from 
       });
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         stream: true,
         temperature: 0.4,
         max_tokens: 900,

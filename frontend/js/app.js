@@ -424,13 +424,16 @@ async function captureScreenContent() {
       const bitmap = await imageCapture.grabFrame();
 
       const canvas = document.createElement("canvas");
-      canvas.width = bitmap.width;
-      canvas.height = bitmap.height;
+      // Cap at 1280px wide — enough for text, cuts payload ~60% vs full HD
+      const MAX_W = 1280;
+      const scale = bitmap.width > MAX_W ? MAX_W / bitmap.width : 1;
+      canvas.width = Math.round(bitmap.width * scale);
+      canvas.height = Math.round(bitmap.height * scale);
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(bitmap, 0, 0);
+      ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
 
-      // JPEG at 0.85 quality — good balance of detail vs payload size
-      imageBase64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+      // JPEG 0.75 — readable text, smaller payload = faster upload + faster vision
+      imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
     } else {
       // Fallback — draw video frame to canvas
       const video = document.createElement("video");
@@ -448,15 +451,17 @@ async function captureScreenContent() {
       await new Promise(r => setTimeout(r, 200));
 
       const canvas = document.createElement("canvas");
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+      const MAX_W2 = 1280;
+      const scale2 = video.videoWidth > MAX_W2 ? MAX_W2 / video.videoWidth : 1;
+      canvas.width = Math.round(video.videoWidth * scale2);
+      canvas.height = Math.round(video.videoHeight * scale2);
       const ctx = canvas.getContext("2d");
-      ctx.drawImage(video, 0, 0);
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
       video.pause();
       video.srcObject = null;
 
-      imageBase64 = canvas.toDataURL("image/jpeg", 0.85).split(",")[1];
+      imageBase64 = canvas.toDataURL("image/jpeg", 0.75).split(",")[1];
     }
 
     if (!imageBase64 || imageBase64.length < 100) {
@@ -1004,6 +1009,22 @@ sendBtn.onclick = handleSend;
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || e.shiftKey) return;
   e.preventDefault();
+
+  // Ctrl + Enter → copy unsent text to clipboard, then send
+  if (e.ctrlKey) {
+    const displayText = (currentBlock.text + (currentInterimText ? " " + currentInterimText : "")).trim();
+    if (displayText) {
+      navigator.clipboard.writeText(displayText).then(() => {
+        const btn = document.getElementById("copyUnsentBtn");
+        if (btn) {
+          btn.textContent = "✅ Copied";
+          setTimeout(() => (btn.textContent = "📋 Copy"), 1200);
+        }
+      }).catch(() => {});
+    }
+  }
+
+  // Always send regardless
   handleSend();
 });
 
