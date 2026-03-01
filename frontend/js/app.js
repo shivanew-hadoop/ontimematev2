@@ -371,10 +371,30 @@ function buildDraftQuestion(spoken) {
 function buildInterviewQuestionPrompt(currentTextOnly) {
   const base = normalize(currentTextOnly);
   if (!base) return "";
+
   const priorQs = extractPriorQuestions();
-  let prompt = base;
-  if (priorQs.length) prompt = `Previously asked:\n${priorQs.map(q => "- " + q).join("\n")}\n\n${prompt}`;
-  return prompt;
+
+  // For short follow-up questions (who, why, how, was it just you, etc.)
+  // don't bury it — lead with the question, add prior context after
+  const isShortFollowUp = base.length < 120;
+
+  if (!priorQs.length) return base;
+
+  if (isShortFollowUp) {
+    // Short follow-up: context is secondary — model must answer the live question first
+    return `[LIVE INTERVIEW FOLLOW-UP — answer this directly and briefly]:
+${base}
+
+[Prior questions in this interview for context only]:
+${priorQs.map(q => "- " + q).join("\n")}`;
+  }
+
+  // Longer question: prior context helps frame the answer
+  return `[Prior questions in this interview]:
+${priorQs.map(q => "- " + q).join("\n")}
+
+[Current question being asked now]:
+${base}`;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1010,21 +1030,47 @@ document.addEventListener("keydown", (e) => {
   if (e.key !== "Enter" || e.shiftKey) return;
   e.preventDefault();
 
-  // Ctrl + Enter → copy unsent text to clipboard, then send
+  // Ctrl + Enter → copy unsent text FIRST (before handleSend clears it), then send
   if (e.ctrlKey) {
+    // Snapshot NOW — handleSend() clears these vars immediately after
     const displayText = (currentBlock.text + (currentInterimText ? " " + currentInterimText : "")).trim();
     if (displayText) {
-      navigator.clipboard.writeText(displayText).then(() => {
+      // Primary: modern clipboard API
+      // Fallback: execCommand for when clipboard API is blocked (focus loss, permissions)
+      const copySuccess = () => {
         const btn = document.getElementById("copyUnsentBtn");
         if (btn) {
+          const prev = btn.textContent;
           btn.textContent = "✅ Copied";
-          setTimeout(() => (btn.textContent = "📋 Copy"), 1200);
+          setTimeout(() => (btn.textContent = prev || "📋 Copy"), 1500);
         }
-      }).catch(() => {});
+      };
+
+      const copyFallback = (text) => {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none";
+        document.body.appendChild(ta);
+        ta.focus();
+        ta.select();
+        try {
+          const ok = document.execCommand("copy");
+          if (ok) copySuccess();
+        } catch {}
+        document.body.removeChild(ta);
+      };
+
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(displayText)
+          .then(copySuccess)
+          .catch(() => copyFallback(displayText));
+      } else {
+        copyFallback(displayText);
+      }
     }
   }
 
-  // Always send regardless
+  // Send after clipboard write is fired (non-blocking)
   handleSend();
 });
 
