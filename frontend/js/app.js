@@ -418,12 +418,13 @@ async function captureScreenContent() {
   let shouldStopStream = false;
 
   try {
-    // Request screen capture — audio:false, video only for the snapshot
+    // Fresh capture each click — grab one frame then stop everything immediately.
+    // Zero ongoing GPU/memory usage between clicks.
     captureStream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: "monitor" },
+      video: true,
       audio: false
     });
-    shouldStopStream = true;
+    shouldStopStream = true;  // stop all tracks immediately after frame is grabbed
 
     const videoTrack = captureStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("No video track available");
@@ -657,9 +658,7 @@ async function enableSystemAudio() {
       }
     });
 
-    // Stop video track IMMEDIATELY after stream granted.
-    // Browser requires video:true to open the picker, but we only need audio.
-    // Stopping video: zero video encoding, zero screen streaming, ~60% less CPU/memory.
+    // Stop video track immediately — audio only, zero GPU/video pipeline overhead.
     sysStream.getVideoTracks().forEach(t => {
       t.stop();
       sysStream.removeTrack(t);
