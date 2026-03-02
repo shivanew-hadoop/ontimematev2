@@ -189,10 +189,6 @@ let hiddenInstructions = "";
 let micMuted = false;
 
 let sysStream = null;
-
-// SESSION-PERSISTENT STREAMS — asked ONCE, reused for entire session
-let sessionAudioStream = null;
-let sessionVideoStream = null;
 let sysAudioContext = null;
 let sysProcessor = null;
 let sysWebSocket = null;
@@ -422,33 +418,12 @@ async function captureScreenContent() {
   let shouldStopStream = false;
 
   try {
-    // Reuse session video stream if alive — zero permission prompt
-    const liveVideoTrack = sessionVideoStream?.getVideoTracks()
-      .find(t => t.readyState === "live");
-
-    if (liveVideoTrack) {
-      // Already have permission — reuse existing video track instantly
-      captureStream = sessionVideoStream;
-      shouldStopStream = false;  // don't stop the shared session stream
-      console.log("[SCREEN] Reusing session video stream — no permission needed");
-    } else {
-      // No session stream yet — request permission (will be stored for reuse)
-      // If audio was already captured, sessionVideoStream should already exist.
-      // This path only runs if user clicks Screen before starting System Audio.
-      console.log("[SCREEN] Requesting screen permission...");
-      captureStream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true   // grab audio too so it can be stored for Deepgram
-      });
-      // Store video for future screenshots
-      sessionVideoStream = new MediaStream(captureStream.getVideoTracks());
-      // Store audio too if we don't have it yet
-      if (!sessionAudioStream && captureStream.getAudioTracks().length > 0) {
-        sessionAudioStream = new MediaStream(captureStream.getAudioTracks());
-      }
-      shouldStopStream = false;  // stored in session, don't stop
-      console.log("[SCREEN] Session streams stored from screen capture");
-    }
+    // Request screen capture — audio:false, video only for the snapshot
+    captureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "monitor" },
+      audio: false
+    });
+    shouldStopStream = true;
 
     const videoTrack = captureStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("No video track available");
@@ -650,7 +625,7 @@ async function getDeepgramKey() {
   return data.key;
 }
 
-function stopSystemAudioOnly(releaseStream = false) {
+function stopSystemAudioOnly() {
   if (sysReconnectTimer) {
     clearTimeout(sysReconnectTimer);
     sysReconnectTimer = null;
@@ -661,91 +636,56 @@ function stopSystemAudioOnly(releaseStream = false) {
   sysProcessor = null;
   try { sysAudioContext?.close(); } catch {}
   sysAudioContext = null;
-
-  // releaseStream=true ONLY when user explicitly hits Stop or logs out
-  // Normal stop/reconnect keeps session streams alive — no re-permission needed
-  if (releaseStream) {
-    try { sessionAudioStream?.getTracks().forEach(t => t.stop()); } catch {}
-    try { sessionVideoStream?.getTracks().forEach(t => t.stop()); } catch {}
-    sessionAudioStream = null;
-    sessionVideoStream = null;
-    sysStream = null;
-    console.log("[SESSION] All streams released");
+  if (sysStream) {
+    try { sysStream.getTracks().forEach(t => t.stop()); } catch {}
   }
+  sysStream = null;
 }
 
 async function enableSystemAudio() {
   if (!isRunning) return;
-  stopSystemAudioOnly();  // kills WebSocket/AudioContext only, keeps session streams
-  console.log("[DEEPGRAM] Starting system audio...");
-
-  // REUSE existing session stream if still alive — no permission prompt
-  const existingAudioTrack = sessionAudioStream?.getAudioTracks()
-    .find(t => t.readyState === "live");
-
-  if (!existingAudioTrack) {
-    // First time (or stream died) — ask permission ONCE
-    // This single getDisplayMedia call captures BOTH audio + video.
-    // Audio goes to Deepgram. Video is stored for screenshot reuse.
-    console.log("[SESSION] Requesting new stream permission...");
-    try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,   // needed for picker + stored for screenshots
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          sampleRate: 16000
-        }
-      });
-
-      // Store audio for Deepgram
-      sessionAudioStream = new MediaStream(stream.getAudioTracks());
-      sysStream = sessionAudioStream;
-
-      // Store video track ONLY if still needed for screenshots
-      // Stop it immediately to free CPU/memory — restart only when screenshot is taken
-      const videoTracks = stream.getVideoTracks();
-      if (videoTracks.length > 0) {
-        sessionVideoStream = new MediaStream(videoTracks);
-        // Stop video immediately — no screen streaming, just audio needed
-        videoTracks.forEach(t => t.stop());
+  stopSystemAudioOnly();
+  console.log("[DEEPGRAM] Starting system audio capture...");
+  try {
+    sysStream = await navigator.mediaDevices.getDisplayMedia({
+      video: true,
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        sampleRate: 16000
       }
+    });
 
-      console.log("[SESSION] Streams stored — won't ask permission again this session");
+    // Stop video track IMMEDIATELY after stream granted.
+    // Browser requires video:true to open the picker, but we only need audio.
+    // Stopping video: zero video encoding, zero screen streaming, ~60% less CPU/memory.
+    sysStream.getVideoTracks().forEach(t => {
+      t.stop();
+      sysStream.removeTrack(t);
+    });
 
-      // When user manually ends sharing, clear session streams
-      stream.getTracks().forEach(t => {
-        t.onended = () => {
-          console.log("[SESSION] Track ended by user — clearing session streams");
-          sessionAudioStream = null;
-          sessionVideoStream = null;
-          sysStream = null;
-          stopSystemAudioOnly();
-          setStatus(audioStatus, "Audio sharing ended. Click System Audio to restart.", "text-orange-600");
-        };
-      });
-
-    } catch (err) {
-      console.error("[DEEPGRAM] Permission denied:", err);
-      setStatus(audioStatus, "Audio capture denied. Click System Audio and allow access.", "text-red-600");
-      return;
-    }
-  } else {
-    // Reusing existing session stream — zero permission prompts
-    sysStream = sessionAudioStream;
-    console.log("[SESSION] Reusing existing audio stream — no permission needed");
-  }
-
-  const audioTrack = sysStream?.getAudioTracks().find(t => t.readyState === "live");
-  if (!audioTrack) {
-    console.error("[DEEPGRAM] No live audio track");
-    setStatus(audioStatus, "No audio track. Click System Audio to retry.", "text-red-600");
-    sessionAudioStream = null;
+  } catch (err) {
+    console.error("[DEEPGRAM] Permission denied:", err);
+    setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
 
-  console.log("[DEEPGRAM] Audio track ready:", audioTrack.label);
+  const audioTrack = sysStream.getAudioTracks()[0];
+  if (!audioTrack) {
+    console.error("[DEEPGRAM] No audio track");
+    setStatus(audioStatus, "No system audio detected. Enable Share Audio in the picker.", "text-red-600");
+    stopSystemAudioOnly();
+    showBanner("Enable \'Share audio\' checkbox at the bottom of the screen picker.");
+    return;
+  }
+
+  console.log("[DEEPGRAM] Audio track acquired:", audioTrack.label);
+  audioTrack.onended = () => {
+    console.log("[DEEPGRAM] Track ended");
+    stopSystemAudioOnly();
+    setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
+  };
 
   try {
     const apiKey = await getDeepgramKey();
@@ -827,7 +767,6 @@ async function enableSystemAudio() {
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
   }
 }
-
 async function deductCredits(delta) {
   const res = await apiFetch("user/deduct", {
     method: "POST",
@@ -853,8 +792,7 @@ function startCreditTicking() {
     try {
       const out = await deductCredits(delta);
       if (out.remaining <= 0) {
-        stopSystemAudioOnly(false);  // keep streams, stop processing
-        isRunning = false;
+        stopAll();
         showBanner("No credits remaining.");
         return;
       }
@@ -1012,7 +950,7 @@ async function startAll() {
 function stopAll() {
   console.log("[STOP] Stopping all...");
   isRunning = false;
-  stopSystemAudioOnly(false);  // keep session streams alive — no picker on next Start
+  stopSystemAudioOnly();
 
   if (creditTimer) clearInterval(creditTimer);
 
@@ -1153,8 +1091,7 @@ resetBtn.onclick = async () => {
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
   resumeTextMem = "";
-  stopSystemAudioOnly(true);  // fully release streams on logout
-  isRunning = false;
+  stopAll();
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
 };
