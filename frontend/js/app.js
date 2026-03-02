@@ -648,11 +648,11 @@ async function enableSystemAudio() {
   stopSystemAudioOnly();
   console.log("[DEEPGRAM] Starting system audio capture...");
   try {
-    // video: false — audio-only capture, no screen sharing, no video bandwidth/memory
-    // Chrome supports getDisplayMedia({ audio: true, video: false }) natively.
-    // User sees a simple "Share tab audio" picker — no screen selection needed.
+    // video: true is required by all browsers to open the picker.
+    // We immediately stop the video track after acquiring audio —
+    // so NO screen is streamed, no video bandwidth, minimal memory.
     sysStream = await navigator.mediaDevices.getDisplayMedia({
-      video: false,
+      video: true,
       audio: {
         echoCancellation: false,
         noiseSuppression: false,
@@ -660,18 +660,25 @@ async function enableSystemAudio() {
         sampleRate: 16000
       }
     });
+
+    // Stop video track immediately — we only need audio
+    sysStream.getVideoTracks().forEach(t => {
+      t.stop();
+      sysStream.removeTrack(t);
+    });
+
   } catch (err) {
     console.error("[DEEPGRAM] Permission denied:", err);
-    // Fallback message — guide user if browser doesn't support audio-only
-    setStatus(audioStatus, "Audio capture denied or unsupported. Try Chrome.", "text-red-600");
+    setStatus(audioStatus, "Share audio denied. Select a tab and enable Share Audio.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
     console.error("[DEEPGRAM] No audio track");
-    setStatus(audioStatus, "No system audio found. Enable 'Share audio' in the picker.", "text-red-600");
+    setStatus(audioStatus, "No audio track found. Make sure to enable Share Audio in the picker.", "text-red-600");
     stopSystemAudioOnly();
+    showBanner("Enable 'Share audio' in the screen picker to capture system audio.");
     return;
   }
 
