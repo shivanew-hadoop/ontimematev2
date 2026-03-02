@@ -418,19 +418,13 @@ async function captureScreenContent() {
   let shouldStopStream = false;
 
   try {
-    // Use existing system audio stream's video track if available
-    // Otherwise open a fresh screen capture just for the snapshot
-    if (sysStream && sysStream.getVideoTracks().length > 0) {
-      captureStream = sysStream;
-      shouldStopStream = false; // Don't stop the shared stream
-    } else {
-      // Request screen capture — audio:false because we only need the visual frame
-      captureStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { displaySurface: "monitor" },
-        audio: false
-      });
-      shouldStopStream = true;
-    }
+    // Always open a fresh video-only stream for screenshots.
+    // sysStream is now audio-only (video: false) so it has no video tracks to reuse.
+    captureStream = await navigator.mediaDevices.getDisplayMedia({
+      video: { displaySurface: "monitor" },
+      audio: false
+    });
+    shouldStopStream = true;
 
     const videoTrack = captureStream.getVideoTracks()[0];
     if (!videoTrack) throw new Error("No video track available");
@@ -654,8 +648,11 @@ async function enableSystemAudio() {
   stopSystemAudioOnly();
   console.log("[DEEPGRAM] Starting system audio capture...");
   try {
+    // video: false — audio-only capture, no screen sharing, no video bandwidth/memory
+    // Chrome supports getDisplayMedia({ audio: true, video: false }) natively.
+    // User sees a simple "Share tab audio" picker — no screen selection needed.
     sysStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
+      video: false,
       audio: {
         echoCancellation: false,
         noiseSuppression: false,
@@ -665,16 +662,16 @@ async function enableSystemAudio() {
     });
   } catch (err) {
     console.error("[DEEPGRAM] Permission denied:", err);
-    setStatus(audioStatus, "Share audio denied.", "text-red-600");
+    // Fallback message — guide user if browser doesn't support audio-only
+    setStatus(audioStatus, "Audio capture denied or unsupported. Try Chrome.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
     console.error("[DEEPGRAM] No audio track");
-    setStatus(audioStatus, "No system audio detected.", "text-red-600");
+    setStatus(audioStatus, "No system audio found. Enable 'Share audio' in the picker.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("System audio requires selecting a window/tab and enabling 'Share audio' in the picker.");
     return;
   }
 
