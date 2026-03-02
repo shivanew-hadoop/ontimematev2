@@ -648,20 +648,35 @@ async function enableSystemAudio() {
   stopSystemAudioOnly();
   console.log("[DEEPGRAM] Starting system audio capture...");
   try {
-    // video: true is required by all browsers to open the picker.
-    // We immediately stop the video track after acquiring audio —
-    // so NO screen is streamed, no video bandwidth, minimal memory.
-    sysStream = await navigator.mediaDevices.getDisplayMedia({
-      video: true,
-      audio: {
-        echoCancellation: false,
-        noiseSuppression: false,
-        autoGainControl: false,
-        sampleRate: 16000
-      }
-    });
+    // Strategy 1: preferCurrentTab — Chrome auto-selects this tab instantly,
+    // no picker shown, no manual selection, minimal overhead.
+    // Strategy 2: fallback to standard picker if preferCurrentTab not supported.
+    try {
+      sysStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        preferCurrentTab: true,   // Chrome 94+ — skips picker entirely
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 16000
+        }
+      });
+    } catch (e1) {
+      console.warn("[DEEPGRAM] preferCurrentTab failed, falling back to picker:", e1.message);
+      // Fallback — standard picker, user must select a tab
+      sysStream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 16000
+        }
+      });
+    }
 
-    // Stop video track immediately — we only need audio
+    // Stop video track immediately — we only need audio, no screen streaming
     sysStream.getVideoTracks().forEach(t => {
       t.stop();
       sysStream.removeTrack(t);
@@ -669,16 +684,16 @@ async function enableSystemAudio() {
 
   } catch (err) {
     console.error("[DEEPGRAM] Permission denied:", err);
-    setStatus(audioStatus, "Share audio denied. Select a tab and enable Share Audio.", "text-red-600");
+    setStatus(audioStatus, "Audio capture denied. Please allow access.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
-    console.error("[DEEPGRAM] No audio track");
-    setStatus(audioStatus, "No audio track found. Make sure to enable Share Audio in the picker.", "text-red-600");
+    console.error("[DEEPGRAM] No audio track — did you enable Share Audio?");
+    setStatus(audioStatus, "No audio captured. Make sure Share Audio is enabled.", "text-red-600");
     stopSystemAudioOnly();
-    showBanner("Enable 'Share audio' in the screen picker to capture system audio.");
+    showBanner("Tip: In the share picker, check the 'Share audio' checkbox at the bottom.");
     return;
   }
 
