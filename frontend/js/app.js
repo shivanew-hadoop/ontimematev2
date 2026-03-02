@@ -699,10 +699,18 @@ async function enableSystemAudio() {
         }
       });
 
-      // Store BOTH tracks in session variables
+      // Store audio for Deepgram
       sessionAudioStream = new MediaStream(stream.getAudioTracks());
-      sessionVideoStream = new MediaStream(stream.getVideoTracks());
       sysStream = sessionAudioStream;
+
+      // Store video track ONLY if still needed for screenshots
+      // Stop it immediately to free CPU/memory — restart only when screenshot is taken
+      const videoTracks = stream.getVideoTracks();
+      if (videoTracks.length > 0) {
+        sessionVideoStream = new MediaStream(videoTracks);
+        // Stop video immediately — no screen streaming, just audio needed
+        videoTracks.forEach(t => t.stop());
+      }
 
       console.log("[SESSION] Streams stored — won't ask permission again this session");
 
@@ -845,7 +853,8 @@ function startCreditTicking() {
     try {
       const out = await deductCredits(delta);
       if (out.remaining <= 0) {
-        stopAll();
+        stopSystemAudioOnly(false);  // keep streams, stop processing
+        isRunning = false;
         showBanner("No credits remaining.");
         return;
       }
@@ -1003,7 +1012,7 @@ async function startAll() {
 function stopAll() {
   console.log("[STOP] Stopping all...");
   isRunning = false;
-  stopSystemAudioOnly(true);  // true = release session streams
+  stopSystemAudioOnly(false);  // keep session streams alive — no picker on next Start
 
   if (creditTimer) clearInterval(creditTimer);
 
@@ -1144,7 +1153,8 @@ resetBtn.onclick = async () => {
 document.getElementById("logoutBtn").onclick = () => {
   chatHistory = [];
   resumeTextMem = "";
-  stopAll();
+  stopSystemAudioOnly(true);  // fully release streams on logout
+  isRunning = false;
   localStorage.removeItem("session");
   window.location.href = "/auth?tab=login";
 };
