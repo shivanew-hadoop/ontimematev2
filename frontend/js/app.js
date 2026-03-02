@@ -745,23 +745,62 @@ async function enableSystemAudio() {
 
     sysAudioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
     const source = sysAudioContext.createMediaStreamSource(sysStream);
-    sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
 
-    sysProcessor.onaudioprocess = (e) => {
-      if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
-      const inputData = e.inputBuffer.getChannelData(0);
-      const int16Data = new Int16Array(inputData.length);
-      for (let i = 0; i < inputData.length; i++) {
-        const s = Math.max(-1, Math.min(1, inputData[i]));
-        int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+    // AudioWorklet runs on a DEDICATED audio thread — NOT the main thread.
+    // Replaces deprecated ScriptProcessor which blocked UI and starved other apps.
+    const workletCode = `
+      class PCMSender extends AudioWorkletProcessor {
+        process(inputs) {
+          const input = inputs[0]?.[0];
+          if (!input || input.length === 0) return true;
+          // Convert float32 → int16 and send to main thread
+          const int16 = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            const s = Math.max(-1, Math.min(1, input[i]));
+            int16[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+          }
+          this.port.postMessage(int16.buffer, [int16.buffer]);
+          return true;
+        }
       }
-      if (sysWebSocket.readyState === WebSocket.OPEN) {
+      registerProcessor('pcm-sender', PCMSender);
+    `;
+
+    const blob = new Blob([workletCode], { type: 'application/javascript' });
+    const workletUrl = URL.createObjectURL(blob);
+
+    try {
+      await sysAudioContext.audioWorklet.addModule(workletUrl);
+      const workletNode = new AudioWorkletNode(sysAudioContext, 'pcm-sender');
+
+      workletNode.port.onmessage = (e) => {
+        if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
+        sysWebSocket.send(e.data);
+      };
+
+      source.connect(workletNode);
+      // Store reference so we can disconnect on stop
+      sysProcessor = workletNode;
+      URL.revokeObjectURL(workletUrl);
+
+    } catch (workletErr) {
+      // Fallback to ScriptProcessor if AudioWorklet unavailable
+      console.warn("[DEEPGRAM] AudioWorklet unavailable, falling back:", workletErr.message);
+      URL.revokeObjectURL(workletUrl);
+      sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
+      sysProcessor.onaudioprocess = (e) => {
+        if (!isRunning || !sysWebSocket || sysWebSocket.readyState !== WebSocket.OPEN) return;
+        const inputData = e.inputBuffer.getChannelData(0);
+        const int16Data = new Int16Array(inputData.length);
+        for (let i = 0; i < inputData.length; i++) {
+          const s = Math.max(-1, Math.min(1, inputData[i]));
+          int16Data[i] = s < 0 ? s * 0x8000 : s * 0x7FFF;
+        }
         sysWebSocket.send(int16Data.buffer);
-      }
-    };
-
-    source.connect(sysProcessor);
-    sysProcessor.connect(sysAudioContext.destination);
+      };
+      source.connect(sysProcessor);
+      sysProcessor.connect(sysAudioContext.destination);
+    }
   } catch (e) {
     console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
