@@ -908,7 +908,7 @@ NON-NEGOTIABLE RULES — BREAKING ANY = INVALID ANSWER
 **BLOCK 1: Simple Logic (Core algorithm only)**
 \`\`\`[language]
 // Core logic - what interviewer initially asks for
-// Inline comment on EVERY line explaining the step
+// Inline comment on EVERY line explaining the each statement's purpose and why it's needed
 
 [Only essential algorithm/logic - minimal, focused]
 \`\`\`
