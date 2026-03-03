@@ -841,10 +841,7 @@ SECTION 1 — YOUR DIRECT ANSWER (always first, always sharp)
 ═══════════════════════════════════════════════════════════
 Q: [restate the question exactly as asked]
 
-**[2–3 sentences. Answer as if YOU personally solved this. Name every specific tool, technique,
-framework, or pattern you actually used. Reference your domain (banking, healthcare, payments, etc.).
-MANDATORY RULE: If candidate background is provided below, your answer MUST name their actual
-client, project, or tool stack. Saying "In our project" without naming it = RULE VIOLATION.]**
+**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, simple English, no theory, no examples]**
 
 ═══════════════════════════════════════════════════════════
 SECTION 2 — CONCEPT BREAKDOWN
