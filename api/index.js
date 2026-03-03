@@ -903,18 +903,27 @@ NON-NEGOTIABLE RULES — BREAKING ANY = INVALID ANSWER
 6. War story in Section 3 must feel like a real incident debrief — not a case study template.
 `.trim();
 
-      const CODE_FIRST_SYSTEM = `You are a senior engineer. Answer coding questions with working code, inline comments on every critical line, and sample I/O.
+      const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
 
-MANDATORY FORMAT:
-
+**BLOCK 1: Simple Logic (Core algorithm only)**
 \`\`\`[language]
-// Brief one-line description of what this does
+// Core logic - what interviewer initially asks for
+// Inline comment on EVERY line explaining the step
 
-[code with inline comment on every non-trivial line]
+[Only essential algorithm/logic - minimal, focused]
 \`\`\`
 
-**Input:** [sample input]
-**Output:** [sample output]`.trim();
+**BLOCK 2: Complete Implementation (If they ask for full solution)**
+\`\`\`[language]
+// Complete solution with edge cases
+// Inline comment on every non-trivial line
+
+[Full implementation with validation, edge cases, main method]
+\`\`\`
+
+**Input:** [sample]
+**Output:** [sample]`.trim();
+
 
       const forceCode =
         /\b(java|python|javascript|code|program)\b/i.test(prompt) &&
