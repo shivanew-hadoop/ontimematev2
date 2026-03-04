@@ -841,7 +841,7 @@ SECTION 1 — YOUR DIRECT ANSWER (always first, always sharp)
 ═══════════════════════════════════════════════════════════
 Q: [restate the question exactly as asked]
 
-**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, simple English, no theory, no examples. do not say I use commonly following , implemented in project. List out first here if any list applicable]**
+**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, simple English, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]**
 
 ═══════════════════════════════════════════════════════════
 SECTION 2 — CONCEPT BREAKDOWN
