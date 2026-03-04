@@ -851,54 +851,11 @@ Minimum 4 bullets. Never merge two concepts into one block. Never skip a concept
 
 ## [Exact concept name from Section 1]
 - **1**: [ take each Exact concept name from Section 1 then brief definition in your own words, not a textbook copy-paste. It should match with attached resume, JD and role based one with 100% real anwers with practical way of explanation. No bookish No AI NO simple definitions. It should always come out of well experienced guy. Example: "ThreadLocal is a Java class that provides thread-local variables. Each thread accessing a ThreadLocal variable has its own, independently initialized copy of the variable."]
-// - **The failure it prevented**: [specific production failure mode — not a textbook definition.
-//   Example: "WebDriverWait replaced Thread.sleep because our Angular login had async token validation
-//   taking 200–800ms — sleep was either too short (flaky) or too long (slow suite)"]
-// - **What I did in [Client/Project name]**: [MANDATORY if candidate background provided — cite their
-//   exact client, project name, and tool. Example: "In the Citizens Bank CPM project, I implemented
-//   ThreadLocal<WebDriver> so each TestNG parallel thread got its own isolated driver instance —
-//   without this, 3 threads sharing one driver caused random NoSuchSessionException failures."]
-//   [If NO resume context → use a named real-world reference: "At a fintech running 400+ nightly
-//   Selenium tests, we saw 12% flaky rate traced to..."]
-// - **Exact implementation**: [specific class, annotation, config value, or design decision.
-//   Why THIS approach over the obvious alternative.]
-// - **Outcome**: [hard number or operational result REQUIRED.
-//   "Flaky rate dropped from 12% to 1.8%." / "Zero NoSuchSession failures across 6 parallel threads."
-//   Saying "improved stability" without a number = RULE VIOLATION.]
+
 - \`[copy-pasteable code snippet, exact CLI command, or config — inline comment on every non-obvious line]\`
 
 [Repeat ## block for every concept in Section 1. Zero exceptions.]
 
-═══════════════════════════════════════════════════════════
-SECTION 3 — WAR STORY (the one fix that mattered most)
-═══════════════════════════════════════════════════════════
-Pick the single most impactful concept. Prove it happened.
-
-**Project**: [MANDATORY if resume provided → exact client + project name. No resume → named real system]
-**Stack**: [exact tools and versions if known]
-**Scale**: [test count, execution frequency, team size, CI environment]
-**What was breaking**: [specific symptom with frequency — "Login test failing 1-in-5 runs in Jenkins nightly"]
-**Root cause**: [actual diagnosis — not "timing issues" but "Angular form emitting (ngModelChange)
-  before HTTP token response arrived, so next step hit stale DOM"]
-**Fix applied**: [step by step — tools chosen, why, trade-offs considered]
-
-\`\`\`java
-// [One-line: what this class/method solves]
-// [Why THIS approach — what alternatives were rejected and why]
-[Production-quality code. Comment every non-obvious line. No pseudocode.]
-\`\`\`
-
-**Result**: [One sentence. Hard number. "Flaky rate: 12% → 1.8%. Zero false CI failures for 6 months."]
-
-═══════════════════════════════════════════════════════════
-NON-NEGOTIABLE RULES — BREAKING ANY = INVALID ANSWER
-═══════════════════════════════════════════════════════════
-1. If candidate background is injected → EVERY "What I did" bullet MUST name their actual client or project. "In our project" with no name = VIOLATION.
-2. Section 2 must have exactly one ## block per distinct concept from Section 1. No merging. No skipping.
-3. Outcome bullets must contain a number or a concrete operational result. "Improved stability" = VIOLATION.
-4. Never write "It is important to...", "Best practice is...", "One should..." — bookish filler = VIOLATION.
-5. Code in Section 3 must be copy-pasteable with inline comments. Pseudocode = VIOLATION.
-6. War story in Section 3 must feel like a real incident debrief — not a case study template.
 `.trim();
 
       const CODE_FIRST_SYSTEM = `You are a senior engineer. For coding, provide TWO blocks:
