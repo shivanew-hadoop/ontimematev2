@@ -771,7 +771,7 @@ export default async function handler(req, res) {
 
       try {
         const r = await openai.chat.completions.create({
-          model: "gpt-4o-mini",
+          model: "gpt-4o",
           max_tokens: 1500,
           temperature: 0,
           messages: [
@@ -841,7 +841,7 @@ SECTION 1 — YOUR DIRECT ANSWER (always first, always sharp)
 ═══════════════════════════════════════════════════════════
 Q: [restate the question exactly as asked]
 
-**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, simple English, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]**
+**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, in simple English, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]**
 
 ═══════════════════════════════════════════════════════════
 SECTION 2 — CONCEPT BREAKDOWN
@@ -987,7 +987,7 @@ If no direct match exists, use the candidate's closest relevant experience from 
       });
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o-mini",
+        model: "gpt-4o",
         stream: true,
         temperature: 0.4,
         max_tokens: 900,
