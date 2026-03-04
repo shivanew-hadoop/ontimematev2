@@ -771,7 +771,7 @@ export default async function handler(req, res) {
 
       try {
         const r = await openai.chat.completions.create({
-          model: "gpt-4o",
+          model: "gpt-4o-mini",
           max_tokens: 1500,
           temperature: 0,
           messages: [
@@ -850,20 +850,21 @@ For EVERY distinct concept, tool, or technique named in Section 1 — write one 
 Minimum 4 bullets. Never merge two concepts into one block. Never skip a concept.
 
 ## [Exact concept name from Section 1]
-- **The failure it prevented**: [specific production failure mode — not a textbook definition.
-  Example: "WebDriverWait replaced Thread.sleep because our Angular login had async token validation
-  taking 200–800ms — sleep was either too short (flaky) or too long (slow suite)"]
-- **What I did in [Client/Project name]**: [MANDATORY if candidate background provided — cite their
-  exact client, project name, and tool. Example: "In the Citizens Bank CPM project, I implemented
-  ThreadLocal<WebDriver> so each TestNG parallel thread got its own isolated driver instance —
-  without this, 3 threads sharing one driver caused random NoSuchSessionException failures."]
-  [If NO resume context → use a named real-world reference: "At a fintech running 400+ nightly
-  Selenium tests, we saw 12% flaky rate traced to..."]
-- **Exact implementation**: [specific class, annotation, config value, or design decision.
-  Why THIS approach over the obvious alternative.]
-- **Outcome**: [hard number or operational result REQUIRED.
-  "Flaky rate dropped from 12% to 1.8%." / "Zero NoSuchSession failures across 6 parallel threads."
-  Saying "improved stability" without a number = RULE VIOLATION.]
+- **1**: [ take each Exact concept name from Section 1 then brief definition in your own words, not a textbook copy-paste. It should match with attached resume, JD and role based one with 100% real anwers with practical way of explanation. No bookish No AI NO simple definitions. It should always come out of well experienced guy. Example: "ThreadLocal is a Java class that provides thread-local variables. Each thread accessing a ThreadLocal variable has its own, independently initialized copy of the variable."]
+// - **The failure it prevented**: [specific production failure mode — not a textbook definition.
+//   Example: "WebDriverWait replaced Thread.sleep because our Angular login had async token validation
+//   taking 200–800ms — sleep was either too short (flaky) or too long (slow suite)"]
+// - **What I did in [Client/Project name]**: [MANDATORY if candidate background provided — cite their
+//   exact client, project name, and tool. Example: "In the Citizens Bank CPM project, I implemented
+//   ThreadLocal<WebDriver> so each TestNG parallel thread got its own isolated driver instance —
+//   without this, 3 threads sharing one driver caused random NoSuchSessionException failures."]
+//   [If NO resume context → use a named real-world reference: "At a fintech running 400+ nightly
+//   Selenium tests, we saw 12% flaky rate traced to..."]
+// - **Exact implementation**: [specific class, annotation, config value, or design decision.
+//   Why THIS approach over the obvious alternative.]
+// - **Outcome**: [hard number or operational result REQUIRED.
+//   "Flaky rate dropped from 12% to 1.8%." / "Zero NoSuchSession failures across 6 parallel threads."
+//   Saying "improved stability" without a number = RULE VIOLATION.]
 - \`[copy-pasteable code snippet, exact CLI command, or config — inline comment on every non-obvious line]\`
 
 [Repeat ## block for every concept in Section 1. Zero exceptions.]
@@ -987,7 +988,7 @@ If no direct match exists, use the candidate's closest relevant experience from 
       });
 
       const stream = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: "gpt-4o-mini",
         stream: true,
         temperature: 0.4,
         max_tokens: 900,
