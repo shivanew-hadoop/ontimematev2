@@ -841,7 +841,7 @@ SECTION 1 — YOUR DIRECT ANSWER (always first, always sharp)
 ═══════════════════════════════════════════════════════════
 Q: [restate the question exactly as asked]
 
-**[Explain [topic] in 1 or 2 sharp lines, interview style, practical explanation, in simple English, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]**
+**[Explain [topic] in 1 or 2 strong lines related to [topic] alone and not for side topics or no bookish, only point to point interview style, practical explanation, in simple English, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]**
 
 ## [Exact concept name from Section 1]
 - **1**: [ take each Exact concept name from Section 1 then brief definition in your own words, not a textbook copy-paste. It should match with attached resume, JD and role based one with 100% real anwers with practical way of explanation. No bookish No AI NO simple definitions. It should always come out of well experienced guy. Example: "ThreadLocal is a Java class that provides thread-local variables. Each thread accessing a ThreadLocal variable has its own, independently initialized copy of the variable."]
