@@ -882,7 +882,7 @@ Q: [restate the question exactly as asked]
 
 - \`[ if applicable only copy-pasteable code snippet, exact CLI command, or config — inline comment on every non-obvious line]\`
 
-[Repeat ## block for every concept in Section 1. Zero exceptions.]
+[Identify 2–3 core concepts related to the question and create a ## section for each.]
 
 `.trim();
 
