@@ -819,7 +819,7 @@ export default async function handler(req, res) {
 
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // Flush headers immediately to eliminate blank-screen latency
+      // Flush headers immediately to eliminate blank-screen latency..
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -840,7 +840,7 @@ Q: [restate the question]
 
 [blank line]
 
-**[Direct 1 or 2 sharp lines, interview style, practical explanation, in simple English, no intro like it is good to have , they are important etc, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]]**
+**[Direct 1 or 2 sharp lines, interview style, no explanation, instead give answers , in simple English, no intro like it is good to have , they are important etc, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]]**
 
 Here's how I handle it in production:
 
