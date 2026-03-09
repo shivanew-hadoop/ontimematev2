@@ -840,7 +840,7 @@ Q: [restate the question]
 
 [blank line]
 
-**[One-sentence direct answer — the bottom line up front]**
+**[Direct 1 or 2 sharp lines, interview style, practical explanation, in simple English, no intro like it is good to have , they are important etc, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]]**
 
 Here's how I handle it in production:
 
