@@ -840,7 +840,7 @@ Q: [restate the question]
 
 [blank line]
 
-**[first list concepts or components or framework related to topic if applicable with complete prodcution way or sharp practical oriented way defination for topic been asked then  1 or 2 sharp lines, interview style, practical explanation, in simple English, no intro like it is good to have , they are important etc, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]]**
+**1. [practical one-liner] 2. [practical one-liner] 3. [practical one-liner]**
 
 Here's how I handle it in production:
 
