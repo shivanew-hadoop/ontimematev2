@@ -840,13 +840,7 @@ Q: [restate the question]
 
 [blank line]
 
-1. [what I actually did — past tense, specific action, real tool or system name]
-
-2. [what I actually did — past tense, specific action, real tool or system name]
-
-3. [what I actually did — past tense, specific action, real tool or system name]
-
-— list ALL applicable points this way, no limit, no category labels, no advice like "clearly state" or "highlight" or "discuss" or "mention" — just what I did, like a practitioner answering in an interview, blank line between each
+[what I actually did — past tense, specific action, real tool or system name. List , 100% needed only and implemented in production, ALL applicable points as numbered list, no minimum, no maximum, no category labels, no advice like "clearly state" or "highlight" or "discuss" or "mention" — just what I did, like a practitioner answering in an interview, blank line between each point]
 
 Here's how I handle it in production:
 
