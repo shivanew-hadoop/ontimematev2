@@ -1,5 +1,5 @@
 /* ========================================================================== */
-/* app.js — FIXED: updateTranscript bug + copyUnsentText + personalized AI --new  */
+/* app.js — FIXED: updateTranscript bug + copyUnsentText + personalized AI   */
 /* ========================================================================== */
 
 const COMMIT_WORDS = 2;

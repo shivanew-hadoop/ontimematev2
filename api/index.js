@@ -412,39 +412,6 @@ async function extractResumeText(file) {
   return file.buffer.toString("utf8");
 }
 
-async function generateInterviewAnswer(openai, messages) {
-
-  // PASS 1 — draft answer (fast model)
-  const draft = await openai.chat.completions.create({
-    model: "gpt-4o-mini",   // fast generation
-    temperature: 0.4,
-    max_tokens: 900,
-    messages
-  });
-
-  const draftText = draft?.choices?.[0]?.message?.content || "";
-
-  // PASS 2 — critic / repair (stronger model)
-  const repaired = await openai.chat.completions.create({
-    model: "gpt-4o",
-    temperature: 0,
-    max_tokens: 900,
-    messages: [
-      {
-        role: "system",
-        content:
-          "You are a senior interviewer reviewing a candidate answer. Fix formatting and clarity but do NOT add new information."
-      },
-      {
-        role: "user",
-        content: draftText
-      }
-    ]
-  });
-
-  return repaired?.choices?.[0]?.message?.content || draftText;
-}
-
 /* -------------------------------------------------------------------------- */
 /* MAIN HANDLER                                                               */
 /* -------------------------------------------------------------------------- */
@@ -852,7 +819,7 @@ export default async function handler(req, res) {
 
       if (!prompt) return res.status(400).json({ error: "Missing prompt" });
 
-      // Flush headers immediately to eliminate blank-screen latency changes
+      // Flush headers immediately to eliminate blank-screen latency
       res.setHeader("Content-Type", "text/markdown; charset=utf-8");
       res.setHeader("Cache-Control", "no-cache, no-transform");
       res.setHeader("Connection", "keep-alive");
@@ -995,10 +962,22 @@ If no direct match exists, use the candidate's closest relevant experience from 
         content: String(prompt).slice(0, 7000).trim()
       });
 
-      const finalAnswer = await generateInterviewAnswer(openai, messages);
+      const stream = await openai.chat.completions.create({
+        model: "gpt-4o-mini",
+        stream: true,
+        temperature: 0.4,
+        max_tokens: 900,
+        messages
+      });
 
-res.write(finalAnswer);
-return res.end();
+      try {
+        for await (const chunk of stream) {
+          const t = chunk?.choices?.[0]?.delta?.content || "";
+          if (t) res.write(t);
+        }
+      } catch {}
+
+      return res.end();
     }
 
     /* ------------------------------------------------------- */
