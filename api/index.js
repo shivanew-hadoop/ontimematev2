@@ -840,10 +840,13 @@ Q: [restate the question]
 
 [blank line]
 
-1. [practical one-liner] 
-2. [practical one-liner] 
-3. [practical one-liner] 
-— list ALL applicable key points this way, no limit, no category labels, just numbered practical statements
+1. [what I actually did — past tense, specific action, real tool or system name]
+
+2. [what I actually did — past tense, specific action, real tool or system name]
+
+3. [what I actually did — past tense, specific action, real tool or system name]
+
+— list ALL applicable points this way, no limit, no category labels, no advice like "clearly state" or "highlight" or "discuss" or "mention" — just what I did, like a practitioner answering in an interview, blank line between each
 
 Here's how I handle it in production:
 
