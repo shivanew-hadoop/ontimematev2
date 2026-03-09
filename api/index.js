@@ -840,7 +840,17 @@ Q: [restate the question]
 
 [blank line]
 
-**[first list really used interal of concepts or components or framework related to topic if applicable with complete prodcution way or sharp practical oriented way defination for topic been asked then  1 or 2 sharp lines, interview style, practical explanation, in simple English, no intro like it is good to have , they are important etc, no theory, no examples. do not say I use commonly following , implemented in project or I have utilized several. instead List out them first here if any list applicable]]**
+— If yes/no question: start with "Yes" or "No" directly, then explain in 1-2 sharp lines what it does or doesn't do, no bullet points needed
+
+— If difference/compare question: list as:
+- [Term A]: [one or two sharp lines what it does]
+- [Term B]: [one or two sharp lines what it does]
+no paragraphs, no "Here's how I handle it 100% in production" for compare questions
+
+— If concept/tool/framework question: bullet list what it actually is and does:
+- [first list the real core concept or framwork or tool or skill set what it is or does — production way, no "it is important", no "commonly used", no intro fluff]
+- [another real point]
+blank line between each bullet, list ALL applicable, no minimum, no maximum, no category labels, just what I actually did or what it actually does, past tense if experience question, present tense if concept question
 
 Here's how I handle it in production:
 
