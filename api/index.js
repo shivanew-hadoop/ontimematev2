@@ -840,7 +840,9 @@ Q: [restate the question]
 
 [blank line]
 
-[what I actually did — past tense, specific action, real tool or system name. List , 100% needed only and implemented in production, ALL applicable points as numbered list, no minimum, no maximum, no category labels, no advice like "clearly state" or "highlight" or "discuss" or "mention" — just what I did, like a practitioner answering in an interview, blank line between each point]
+- [list out tool or component  or framework or concept or anything 100% related to this topic. No sideways , no bookish definitions]
+
+List ALL applicable points as bullet lines like above, no minimum, no maximum, no category labels, no advice like "clearly state" or "highlight" or "discuss" or "mention" — just what I did, like a 100% practical answers in an interview, blank line between each bullet
 
 Here's how I handle it in production:
 
