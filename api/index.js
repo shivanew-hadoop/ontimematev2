@@ -845,7 +845,7 @@ Q: [restate the question]
 — If difference/compare question: list as:
 - [Term A]: [one or two sharp lines what it does]
 - [Term B]: [one or two sharp lines what it does]
-no paragraphs, no "Here's how I handle it 100% in production" for compare questions
+blank line between each difference . no paragraphs, no "Here's how I handle it 100% in production" for compare questions
 
 — If concept/tool/framework question: bullet list what it actually is and does:
 - [first list the real core concept or framwork or tool or skill set what it is or does — production way, no "it is important", no "commonly used", no intro fluff]
