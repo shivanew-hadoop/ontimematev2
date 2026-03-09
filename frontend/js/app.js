@@ -102,7 +102,7 @@ function renderMarkdownLite(md) {
       if (/^Q:\s/.test(trimmed)) return `<div style="margin-bottom:8px;font-weight:600">${trimmed}</div>`;
       if (/^here'?s how i handle it in production/i.test(trimmed)) return `<div style="margin-top:8px;margin-bottom:6px;font-style:italic">${trimmed}</div>`;
       if (!trimmed) return `<div style="height:6px"></div>`;
-      return `<div style="line-height:1.6">${trimmed}</div>`;
+      return `<div style="line-height:1.6; margin-bottom:8px">${trimmed}</div>`;
     });
     return htmlLines.join("");
   });

@@ -840,10 +840,10 @@ Q: [restate the question]
 
 [blank line]
 
-**1. [practical one-liner] 
+1. [practical one-liner] 
 2. [practical one-liner] 
 3. [practical one-liner] 
-— list ALL applicable key points this way, no limit, no category labels, just numbered practical statements**
+— list ALL applicable key points this way, no limit, no category labels, just numbered practical statements
 
 Here's how I handle it in production:
 
