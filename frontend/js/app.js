@@ -7,7 +7,7 @@ const COMMIT_WORDS = 2;
 // TEMP CLIPBOARD BUTTONS
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => {
-    console.log("Copied:", text);
+    // console.log("Copied:", text);
   });
 }
 
@@ -344,7 +344,7 @@ function removeOverlap(existingText, newText) {
     if (existingTail === incomingHead) {
       const originalIncomingWords = normalize(newText).split(" ");
       const newPart = originalIncomingWords.slice(overlapSize).join(" ");
-      console.log(`[DEDUP] Removed ${overlapSize} overlapping words`);
+      // console.log(`[DEDUP] Removed ${overlapSize} overlapping words`);
       return newPart;
     }
   }
@@ -526,7 +526,7 @@ async function captureScreenContent() {
     }, 4000);
 
   } catch (err) {
-    console.error("[SCREEN CAPTURE]", err);
+    // console.error("[SCREEN CAPTURE]", err);
 
     // User cancelled the screen picker — don't show an error
     if (err?.name === "NotAllowedError" || err?.message?.includes("Permission denied")) {
@@ -646,7 +646,7 @@ function stopSystemAudioOnly() {
 async function enableSystemAudio() {
   if (!isRunning) return;
   stopSystemAudioOnly();
-  console.log("[DEEPGRAM] Starting system audio capture...");
+  // console.log("[DEEPGRAM] Starting system audio capture...");
   try {
     sysStream = await navigator.mediaDevices.getDisplayMedia({
       video: true,
@@ -665,23 +665,23 @@ async function enableSystemAudio() {
     });
 
   } catch (err) {
-    console.error("[DEEPGRAM] Permission denied:", err);
+    // console.error("[DEEPGRAM] Permission denied:", err);
     setStatus(audioStatus, "Share audio denied.", "text-red-600");
     return;
   }
 
   const audioTrack = sysStream.getAudioTracks()[0];
   if (!audioTrack) {
-    console.error("[DEEPGRAM] No audio track");
+    // console.error("[DEEPGRAM] No audio track");
     setStatus(audioStatus, "No system audio detected. Enable Share Audio in the picker.", "text-red-600");
     stopSystemAudioOnly();
     showBanner("Enable \'Share audio\' checkbox at the bottom of the screen picker.");
     return;
   }
 
-  console.log("[DEEPGRAM] Audio track acquired:", audioTrack.label);
+  // console.log("[DEEPGRAM] Audio track acquired:", audioTrack.label);
   audioTrack.onended = () => {
-    console.log("[DEEPGRAM] Track ended");
+    // console.log("[DEEPGRAM] Track ended");
     stopSystemAudioOnly();
     setStatus(audioStatus, "System audio stopped (share ended).", "text-orange-600");
   };
@@ -692,7 +692,7 @@ async function enableSystemAudio() {
     sysWebSocket = new WebSocket(wsUrl, ["token", apiKey]);
 
     sysWebSocket.onopen = () => {
-      console.log("[DEEPGRAM] WebSocket connected");
+      // console.log("[DEEPGRAM] WebSocket connected");
       setStatus(audioStatus, "System audio LIVE (Deepgram Nova-2).", "text-green-600");
       currentInterimText = "";
     };
@@ -705,7 +705,7 @@ async function enableSystemAudio() {
           const isFinal = data.is_final;
           if (!transcript.trim()) return;
           const normalizedTranscript = normalize(transcript);
-          console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
+          // console.log(`[DEEPGRAM] ${isFinal ? 'FINAL' : 'interim'}:`, normalizedTranscript);
           if (isFinal) {
             const newPart = removeOverlap(currentBlock.text, normalizedTranscript);
             if (newPart.trim()) {
@@ -715,7 +715,7 @@ async function enableSystemAudio() {
                 currentBlock.text = newPart;
               }
               currentBlock.t = Date.now();
-              console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
+              // console.log("[DEEPGRAM] Committed:", newPart.substring(0, 50));
             }
             currentInterimText = "";
             updateTranscript();
@@ -725,17 +725,17 @@ async function enableSystemAudio() {
           }
         }
       } catch (e) {
-        console.error("[DEEPGRAM] Message parse error:", e);
+        // console.error("[DEEPGRAM] Message parse error:", e);
       }
     };
 
     sysWebSocket.onerror = (err) => {
-      console.error("[DEEPGRAM] WebSocket error:", err);
+      // console.error("[DEEPGRAM] WebSocket error:", err);
       setStatus(audioStatus, "Deepgram connection error.", "text-red-600");
     };
 
     sysWebSocket.onclose = () => {
-      console.log("[DEEPGRAM] WebSocket closed");
+      // console.log("[DEEPGRAM] WebSocket closed");
       if (isRunning) {
         setStatus(audioStatus, "Reconnecting...", "text-orange-600");
         sysReconnectTimer = setTimeout(() => enableSystemAudio(), 1000);
@@ -784,7 +784,7 @@ async function enableSystemAudio() {
 
     } catch (workletErr) {
       // Fallback to ScriptProcessor if AudioWorklet unavailable
-      console.warn("[DEEPGRAM] AudioWorklet unavailable, falling back:", workletErr.message);
+      // console.warn("[DEEPGRAM] AudioWorklet unavailable, falling back:", workletErr.message);
       URL.revokeObjectURL(workletUrl);
       sysProcessor = sysAudioContext.createScriptProcessor(4096, 1, 1);
       sysProcessor.onaudioprocess = (e) => {
@@ -801,7 +801,7 @@ async function enableSystemAudio() {
       sysProcessor.connect(sysAudioContext.destination);
     }
   } catch (e) {
-    console.error("[DEEPGRAM] Setup failed:", e);
+    // console.error("[DEEPGRAM] Setup failed:", e);
     setStatus(audioStatus, `Deepgram error: ${e.message}`, "text-red-600");
   }
 }
@@ -926,7 +926,7 @@ async function startChatStreaming(prompt, userTextForHistory) {
     }
   } catch (e) {
     if (e?.name === "AbortError" || chatAbort?.signal?.aborted) return;
-    console.error(e);
+    // console.error(e);
     setStatus(sendStatus, "Failed", "text-red-600");
     responseBox.innerHTML = `<span class="text-red-600 text-sm">Failed. Check backend /chat/send streaming.</span>`;
   } finally {
@@ -958,7 +958,7 @@ resumeInput?.addEventListener("change", async () => {
 });
 
 async function startAll() {
-  console.log("[START] Initializing...");
+  // console.log("[START] Initializing...");
   hideBanner();
   if (isRunning) return;
 
@@ -986,7 +986,7 @@ async function startAll() {
 }
 
 function stopAll() {
-  console.log("[STOP] Stopping all...");
+  // console.log("[STOP] Stopping all...");
   isRunning = false;
   stopSystemAudioOnly();
 
@@ -1135,7 +1135,7 @@ document.getElementById("logoutBtn").onclick = () => {
 };
 
 window.addEventListener("load", async () => {
-  console.log("[LOAD] Page loaded");
+  // console.log("[LOAD] Page loaded");
   session = JSON.parse(localStorage.getItem("session") || "null");
   if (!session) return (window.location.href = "/auth?tab=login");
   if (!session.refresh_token) {
@@ -1167,7 +1167,7 @@ window.addEventListener("load", async () => {
 
   setStatus(audioStatus, "Stopped", "text-orange-600");
   updateMicMuteUI();
-  console.log("[LOAD] Initialization complete");
+  // console.log("[LOAD] Initialization complete");
 });
 
 startBtn.onclick = startAll;
